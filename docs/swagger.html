@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>器灵 · 接口协议</title>
+    <link rel="icon" type="image/png" href="/docs/favicon-32x32.png" />
+    <link rel="stylesheet" href="/docs/swagger-ui.css" />
+    <style>
+      html {
+        box-sizing: border-box;
+        overflow-y: scroll;
+      }
+      *,
+      *::before,
+      *::after {
+        box-sizing: inherit;
+      }
+      body {
+        margin: 0;
+        background: #fafafa;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="swagger-ui"></div>
+    <script src="/docs/swagger-ui-bundle.js"></script>
+    <script>
+      window.ui = SwaggerUIBundle({
+        url: '/openapi.yaml',
+        dom_id: '#swagger-ui',
+        layout: 'BaseLayout',
+        presets: [SwaggerUIBundle.presets.apis],
+        deepLinking: true,
+        displayRequestDuration: true,
+        docExpansion: 'list',
+        defaultModelsExpandDepth: 1,
+        tryItOutEnabled: true,
+        validatorUrl: null,
+      })
+    </script>
+  </body>
+</html>

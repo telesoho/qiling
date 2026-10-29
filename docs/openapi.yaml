@@ -1,0 +1,234 @@
+openapi: 3.1.0
+info:
+  title: 器灵接口协议
+  version: 0.1.0
+  summary: 本机桌宠「器灵」的 HTTP 接口
+  description: |
+    「器灵」是本机桌宠。别的程序把写好的一句经本机 HTTP 交给它，它用姿势和语音念出来；识局是第一个客户端。
+
+    服务只监听回环地址，默认 `http://127.0.0.1:8766`。启动前设置 `QILING_PORT` 可以换端口；值不是 1–65535 的整数时回落到 8766。
+
+    约定：
+
+    - 无鉴权，也不要暴露到局域网；能连上端口的人都能让器灵说话。
+    - `POST /v1/say` 只是把台词交给宠物，返回 `{"ok": true}` 时还没有开始朗读。是否出声取决于宠物当前是否静音，以及本机语音服务是否就绪。
+    - 新的 `/v1/say` 会接管正在读的上一句；要主动停下用 `POST /v1/cancel`。
+    - 请求体最多读 64 KiB；超过会被截断，通常得到 `bad_json`。
+    - 所有路径都接受 `OPTIONS` 预检，返回 `204` 和 CORS 头：`Access-Control-Allow-Origin: *`、`Access-Control-Allow-Methods: GET, POST, OPTIONS`、`Access-Control-Allow-Headers: Content-Type`。
+    - 未匹配的方法或路径一律 `404`，响应体为空。
+    - 请求由单个线程逐条处理，适合低频台词，不做高并发承诺。
+
+    本协议原文在 `GET /openapi.yaml`，Swagger UI 在 `GET /docs`。
+servers:
+  - url: /
+    description: 当前这一台；跟随 QILING_PORT，Swagger UI 的 Try it out 走它
+  - url: http://127.0.0.1:8766
+    description: 默认监听地址
+tags:
+  - name: 探活
+    description: 确认器灵在听
+  - name: 台词
+    description: 把一句交给宠物，或让它停下
+  - name: 文档
+    description: 协议自身
+paths:
+  /v1/health:
+    get:
+      tags: [探活]
+      operationId: health
+      summary: 器灵是否在听
+      description: 只确认进程在跑、端口通。不返回版本、语音状态或窗口状态。
+      responses:
+        '200':
+          description: 在听
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              example:
+                ok: true
+                name: 器灵
+  /v1/say:
+    post:
+      tags: [台词]
+      operationId: say
+      summary: 送一句台词并选姿势
+      description: |
+        把一句交给宠物。接口立即返回，姿势与朗读异步进行。
+
+        `phase` 决定动作：
+
+        - `thinking`：切到思考姿势，不张嘴；`text` 既不朗读，气泡也不显示。
+        - `say`：显示并朗读 `text`，姿势由 `mood` 决定。语音开着时，合成期间先停在思考姿势，真正出声才转到 `mood` 姿势，念完回待机；语音关着时直接停在 `mood` 姿势。
+        - `idle`：回待机；`text` 与 `mood` 都被忽略。
+
+        `text` 为空时，气泡回落到该姿势的默认短句，也不会有朗读。
+
+        重复调用会接管上一句：上一句的朗读被打断，姿势按新的一句重新选。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SayRequest'
+            examples:
+              advantage:
+                summary: 优势讲解
+                value:
+                  source: siju
+                  phase: say
+                  text: 红方略优。
+                  mood: up
+              thinking:
+                summary: 只思考，不念
+                value:
+                  source: siju
+                  phase: thinking
+                  text: 正在算这步棋
+                  mood: neutral
+              idle:
+                summary: 收回待机
+                value:
+                  source: siju
+                  phase: idle
+                  text: ''
+                  mood: neutral
+      responses:
+        '200':
+          description: 已交给宠物，不代表已经念完
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ack'
+              example:
+                ok: true
+        '400':
+          description: 请求不合规；`error` 指出第一处没通过的校验
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                bad_phase:
+                  summary: 枚举外
+                  value:
+                    ok: false
+                    error: bad_phase
+                bad_text:
+                  summary: 超过 400 字
+                  value:
+                    ok: false
+                    error: bad_text
+  /v1/cancel:
+    post:
+      tags: [台词]
+      operationId: cancel
+      summary: 停止正在读的那句
+      description: |
+        打断宠物当前的朗读与合成；没有在念时调用也安全。
+        请求体被忽略。
+      responses:
+        '204':
+          description: 已发出打断，无响应体
+  /openapi.yaml:
+    get:
+      tags: [文档]
+      operationId: openapi
+      summary: 本协议的 OpenAPI 原文
+      description: 与本协议同源，始终是器灵内置的那一份。
+      responses:
+        '200':
+          description: OpenAPI 3.1 YAML
+          content:
+            application/yaml:
+              schema:
+                type: string
+  /docs:
+    get:
+      tags: [文档]
+      operationId: docs
+      summary: Swagger UI
+      description: 与本协议同源，可以直接在页面上 Try it out。
+      responses:
+        '200':
+          description: Swagger UI 页面
+          content:
+            text/html:
+              schema:
+                type: string
+components:
+  schemas:
+    Health:
+      type: object
+      additionalProperties: false
+      required: [ok, name]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        name:
+          type: string
+          const: 器灵
+    Ack:
+      type: object
+      additionalProperties: false
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+          const: true
+    Error:
+      type: object
+      additionalProperties: false
+      required: [ok, error]
+      properties:
+        ok:
+          type: boolean
+          const: false
+        error:
+          type: string
+          description: |
+            第一处没通过的校验，顺序固定为 JSON → source → phase → mood → text：
+
+            - `bad_json`：请求体不是合法 JSON，含缺字段、类型不对、或超过 64 KiB 被截断。
+            - `bad_source`：`source` 去掉首尾空白后为空，或超过 64 个字符。
+            - `bad_phase`：`phase` 不是 `thinking`、`say`、`idle`。
+            - `bad_mood`：`mood` 不是 `neutral`、`up`、`down`。
+            - `bad_text`：`text` 超过 400 个字符（按 Unicode 码点算，trim 前）。
+          enum: [bad_json, bad_source, bad_phase, bad_mood, bad_text]
+    Phase:
+      type: string
+      enum: [thinking, say, idle]
+      description: |
+        `thinking` 只切思考姿势，不朗读、气泡也不显示 text。
+        `say` 显示并朗读 text，姿势由 mood 决定。
+        `idle` 回待机；text、mood 被忽略。
+    Mood:
+      type: string
+      enum: [neutral, up, down]
+      description: |
+        `neutral` 讲解姿势，`up` 优势姿势，`down` 劣势姿势。
+        只在 `phase: say` 时有意义：thinking 固定思考，idle 固定待机。
+    SayRequest:
+      type: object
+      additionalProperties: true
+      description: 四个字段都必填；未知字段会被忽略。
+      required: [source, phase, text, mood]
+      properties:
+        source:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: 谁送来的，客户端标识。服务端去掉首尾空白后要求 1–64 个字符。
+          examples: [siju]
+        phase:
+          $ref: '#/components/schemas/Phase'
+        text:
+          type: string
+          maxLength: 400
+          description: |
+            要显示与朗读的句子。服务端去掉首尾空白后使用；长度按 trim 前的 Unicode 码点算，最多 400。
+            空串合法：气泡回落到该姿势的默认短句，也不会有朗读。
+          examples: [红方略优。]
+        mood:
+          $ref: '#/components/schemas/Mood'
