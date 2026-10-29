@@ -1,18 +1,20 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 
-/// Upstream checkpoint. The local service loads this repo, not a renamed substitute.
-pub const MODEL_ID: &str = "FunAudioLLM/Fun-CosyVoice3-0.5B-2512";
 pub const ENGINE_ID: &str = "cosyvoice3-0.5b";
 pub const CHILD_VOICE: &str = "child-girl-zero-shot";
 pub const DEFAULT_SERVICE_URL: &str = "http://127.0.0.1:8765";
 pub const READY_DETAIL: &str = "CosyVoice 3 0.5B 本机零样本，儿童女孩参考音";
 /// CosyVoice3 requires this control prefix. It does not choose the speaker.
+#[cfg(test)]
 pub const PROMPT_PREFIX: &str = "You are a helpful assistant.<|endofprompt|>";
 /// Official zero-shot demo line, recorded by an adult woman. Not 诗琚's voice.
+#[cfg(test)]
 const ADULT_DEMO: &str = "希望你以后能够做的比我还好";
 
+#[cfg(test)]
 pub const MIN_PROMPT_SECS: f32 = 2.5;
+#[cfg(test)]
 pub const MAX_PROMPT_SECS: f32 = 30.0;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -222,6 +224,7 @@ pub fn cancel_body(before: u64) -> Value {
     json!({ "before": before })
 }
 
+#[cfg(test)]
 pub fn cosyvoice3_prompt(spoken: &str) -> String {
     if spoken.contains("<|endofprompt|>") {
         spoken.to_string()
@@ -231,6 +234,7 @@ pub fn cosyvoice3_prompt(spoken: &str) -> String {
 }
 
 /// Accept a real child-girl reference. Reject the silent stub and the adult demo line.
+#[cfg(test)]
 pub fn assess_reference(wav: Option<&[u8]>, transcript: Option<&str>) -> Result<String, String> {
     let Some(transcript) = transcript else {
         return Err("没有找到参考文稿。请在录音旁边放同名 txt，内容是录音里说的原句。".into());
@@ -332,6 +336,7 @@ pub fn wav_info(bytes: &[u8]) -> Option<WavInfo> {
     })
 }
 
+#[cfg(test)]
 fn content_lines(raw: &str) -> Vec<&str> {
     raw.lines()
         .map(str::trim)
@@ -339,6 +344,7 @@ fn content_lines(raw: &str) -> Vec<&str> {
         .collect()
 }
 
+#[cfg(test)]
 fn spoken_body(text: &str) -> String {
     text.rsplit_once("<|endofprompt|>")
         .map(|(_, tail)| tail)
@@ -347,6 +353,7 @@ fn spoken_body(text: &str) -> String {
         .to_string()
 }
 
+#[cfg(test)]
 fn is_stub_marker(line: &str) -> bool {
     let marker = line
         .trim()
@@ -354,6 +361,7 @@ fn is_stub_marker(line: &str) -> bool {
     marker.eq_ignore_ascii_case("STUB") || marker.eq_ignore_ascii_case("PLACEHOLDER")
 }
 
+#[cfg(test)]
 fn is_adult_demo(spoken: &str) -> bool {
     let compact: String = spoken.chars().filter(|ch| !ch.is_whitespace()).collect();
     let compact =
