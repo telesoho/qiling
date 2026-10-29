@@ -1,0 +1,59 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "器灵",
+  "version": "0.1.0",
+  "identifier": "com.qiling.pet",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1421",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "pet",
+        "title": "器灵",
+        "width": 210,
+        "height": 270,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false,
+        "closable": true,
+        "fullscreen": false,
+        "focus": false,
+        "focusable": true,
+        "transparent": true,
+        "noRedirectionBitmap": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "visibleOnAllWorkspaces": true,
+        "skipTaskbar": true,
+        "shadow": false,
+        "visible": true,
+        "center": false,
+        "backgroundThrottling": "disabled",
+        "zoomHotkeysEnabled": false,
+        "backgroundColor": "#00000000"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "../assets/qiling/voice-prompt-girl-child.wav": "qiling/voice-prompt-girl-child.wav",
+      "../assets/qiling/voice-prompt-girl-child.txt": "qiling/voice-prompt-girl-child.txt"
+    }
+  }
+}

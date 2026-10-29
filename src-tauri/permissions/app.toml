@@ -1,0 +1,15 @@
+[[permission]]
+identifier = "allow-bubble-commands"
+description = "Size and show the speech bubble window"
+commands.allow = ["bubble_present"]
+
+[[permission]]
+identifier = "allow-pet-commands"
+description = "Desktop pet voice"
+commands.allow = [
+  "pet_set_open",
+  "pet_is_open",
+  "qiling_voice_status",
+  "qiling_voice_synthesize",
+  "qiling_voice_cancel"
+]

@@ -1,0 +1,19 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>器灵</title>
+    <script>
+      var petQuery = false
+      try { petQuery = new URLSearchParams(location.search).get('pet') === '1' } catch (e) {}
+      if (location.hash === '#pet' || petQuery || location.hash === '#bubble') {
+        document.documentElement.classList.add('pet-window')
+        document.documentElement.style.background = 'transparent'
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

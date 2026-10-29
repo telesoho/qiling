@@ -1,0 +1,203 @@
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+html.pet-window,
+html.pet-window body,
+html.pet-window #root {
+  background: transparent !important;
+}
+
+@keyframes pet-arrive {
+  from { opacity: 0.45; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.pet-arrive {
+  transform-origin: 50% 100%;
+  filter: drop-shadow(0 12px 8px rgb(80 48 28 / 0.22));
+  animation: pet-arrive 240ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pet-arrive {
+    animation: none;
+  }
+}
+
+.pet-stage {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  width: 100%;
+  height: 100%;
+  padding-bottom: 10px;
+  user-select: none;
+}
+
+.pet-stage.is-preview {
+  background: #2b2b2b;
+}
+
+.pet-figure {
+  position: relative;
+  width: max-content;
+}
+
+.pet-sprite {
+  cursor: grab;
+}
+
+.pet-sprite:active {
+  cursor: grabbing;
+}
+
+.pet-sprite img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: none;
+  pointer-events: none;
+  -webkit-user-drag: none;
+}
+
+.pet-bubble {
+  --pet-glass: rgba(255, 251, 247, 0.88);
+  --pet-glass-rim: rgba(255, 255, 255, 0.82);
+  position: absolute;
+  z-index: 2;
+  left: 50%;
+  bottom: calc(100% + 16px);
+  width: 108%;
+  transform: translateX(-50%);
+  padding: 8px 8px 12px 14px;
+  border: 1px solid var(--pet-glass-rim);
+  border-radius: 20px;
+  background-color: var(--pet-glass);
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.42), rgba(255, 255, 255, 0) 42%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.72),
+    0 16px 36px rgba(28, 16, 8, 0.16),
+    0 2px 8px rgba(28, 16, 8, 0.06);
+  backdrop-filter: blur(16px) saturate(1.25);
+  -webkit-backdrop-filter: blur(16px) saturate(1.25);
+  color: #3a342e;
+  font-family: "PingFang SC", "Noto Sans SC", "Microsoft YaHei", "WenQuanYi Micro Hei", "Segoe UI", sans-serif;
+}
+
+.pet-bubble-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 26px;
+}
+
+.pet-bubble-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: #2a2622;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.02em;
+}
+
+.pet-online {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 999px;
+  background: #f08c1a;
+  box-shadow: 0 0 0 2px rgba(240, 140, 26, 0.16);
+}
+
+.pet-bubble-actions {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  flex: none;
+}
+
+.pet-icon-btn {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #8d877f;
+  cursor: pointer;
+}
+
+.pet-icon-btn svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.pet-icon-btn:hover {
+  background: rgba(70, 48, 28, 0.06);
+  color: #5e584f;
+}
+
+.pet-icon-btn:focus-visible {
+  outline: 2px solid rgba(240, 140, 26, 0.85);
+  outline-offset: 1px;
+}
+
+.pet-bubble-text {
+  margin: 5px 6px 0 0;
+  overflow: hidden;
+  color: #3f3832;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.55;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+}
+
+.pet-bubble-tail {
+  position: absolute;
+  left: 50%;
+  bottom: -11px;
+  display: block;
+  width: 26px;
+  height: 15px;
+  overflow: visible;
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+
+.pet-bubble-window {
+  box-sizing: border-box;
+  width: 210px;
+  padding: 8px 8px 19px;
+}
+
+.pet-bubble.is-window {
+  position: relative;
+  left: auto;
+  bottom: auto;
+  width: 100%;
+  transform: none;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}

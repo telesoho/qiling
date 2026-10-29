@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "bubble",
+  "description": "器灵对话泡泡。只画字，不播语音。",
+  "windows": ["bubble"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "allow-bubble-commands"
+  ]
+}

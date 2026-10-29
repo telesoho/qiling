@@ -1,0 +1,21 @@
+[package]
+name = "qiling"
+version = "0.1.0"
+edition = "2021"
+description = "器灵。桌宠听本机一句，再念出来。"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tiny_http = "0.12"
+ureq = { version = "=2.9.7", default-features = false, features = ["json"] }
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
