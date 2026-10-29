@@ -11,5 +11,6 @@ commands.allow = [
   "pet_is_open",
   "qiling_voice_status",
   "qiling_voice_synthesize",
-  "qiling_voice_cancel"
+  "qiling_voice_cancel",
+  "pet_menu"
 ]

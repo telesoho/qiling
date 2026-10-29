@@ -1,3 +1,4 @@
+import { invoke } from '@tauri-apps/api/core'
 import { useEffect, useRef, useState } from 'react'
 import { QiLingPhase } from '../lib/phase'
 import { readLine, subscribeLine, type PetLine } from '../lib/line'
@@ -226,7 +227,15 @@ export default function PetApp(): JSX.Element {
             onCollapse={collapseBubble}
           />
         )}
-        <div className="pet-sprite" data-tauri-drag-region>
+        <div
+          className="pet-sprite"
+          data-tauri-drag-region
+          onContextMenu={(event) => {
+            if (!inTauri()) return
+            event.preventDefault()
+            void invoke('pet_menu')
+          }}
+        >
           <img
             key={state.id}
             src={`/pet/${idle?.file ?? state.file}`}

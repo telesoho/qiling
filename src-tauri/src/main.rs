@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tauri::utils::config::{BackgroundThrottlingPolicy, Color};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, PhysicalPosition, Runtime, State,
     WebviewUrl, WebviewWindow, WebviewWindowBuilder,
@@ -201,6 +202,45 @@ fn qiling_voice_cancel(state: State<AppState>) {
     state.voice.cancel();
 }
 
+fn open_settings(app: &AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("settings") {
+        let _ = window.unminimize();
+        window.show().map_err(|err| err.to_string())?;
+        window.set_focus().map_err(|err| err.to_string())?;
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
+        .title("设定")
+        .inner_size(320.0, 220.0)
+        .resizable(false)
+        .maximizable(false)
+        .minimizable(true)
+        .closable(true)
+        .focused(true)
+        .decorations(true)
+        .always_on_top(false)
+        .skip_taskbar(false)
+        .transparent(false)
+        .visible(true)
+        .center()
+        .build()
+        .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn pet_menu(app: AppHandle) -> Result<(), String> {
+    let settings = MenuItem::with_id(&app, "settings", "设定", true, None::<&str>)
+        .map_err(|err| err.to_string())?;
+    let quit = MenuItem::with_id(&app, "quit", "退出", true, None::<&str>)
+        .map_err(|err| err.to_string())?;
+    let separator = PredefinedMenuItem::separator(&app).map_err(|err| err.to_string())?;
+    let menu = Menu::with_items(&app, &[&settings, &separator, &quit])
+        .map_err(|err| err.to_string())?;
+    let pet = app.get_webview_window("pet").ok_or("没有器灵窗口")?;
+    pet.popup_menu(&menu).map_err(|err| err.to_string())
+}
+
 fn main() {
     let app = tauri::Builder::default()
         .setup(|app| {
@@ -243,13 +283,21 @@ fn main() {
             }
             _ => {}
         })
+        .on_menu_event(|app, event| {
+            if event.id() == "settings" {
+                let _ = open_settings(app);
+            } else if event.id() == "quit" {
+                app.exit(0);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             pet_set_open,
             pet_is_open,
             qiling_voice_status,
             qiling_voice_synthesize,
             qiling_voice_cancel,
-            bubble_present
+            bubble_present,
+            pet_menu
         ])
         .build(tauri::generate_context!())
         .expect("error while running qiling");
