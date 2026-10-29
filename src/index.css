@@ -201,3 +201,23 @@ html.pet-window #root {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
 }
+
+.pet-settings {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100%;
+  margin: 0;
+  padding: 20px 22px;
+  background: #fffaf6;
+  color: #3a342e;
+  font-family: "PingFang SC", "Noto Sans SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  font-size: 14px;
+}
+
+.pet-settings label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
