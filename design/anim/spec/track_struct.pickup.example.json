@@ -1,0 +1,94 @@
+{
+  "id": "shiju-pickup-hover",
+  "displayName": "诗琚·吊起悬停",
+  "description": "按下吊起 → 拖动悬空（跟手）→ 松开落下；奶油唐装白底序列经 rembg(bria-rmbg) 预烘焙透明帧，固定比例缩放到 180×240。",
+  "version": "0.3.0",
+  "fps": 24,
+  "frameSize": {
+    "width": 180,
+    "height": 240
+  },
+  "format": {
+    "tracksExt": "webp",
+    "alpha": true,
+    "naming": "frame{NNN}.{ext}",
+    "zeroPad": 3,
+    "indexBase": 1,
+    "hoverSeamless": true
+  },
+  "fit": {
+    "scale": 0.4081237911025145,
+    "sourceCanvas": 720,
+    "method": "stand_char_height_vs_idle",
+    "viewport": {
+      "x": 57,
+      "y": 45,
+      "w": 180,
+      "h": 240
+    },
+    "note": "scale=211/517；vx=round(360*scale-90)，vy=round(153*scale-17)；全帧共用"
+  },
+  "anchor": {
+    "x": 0.5,
+    "y": 0.12,
+    "note": "无形线抓手约在头顶"
+  },
+  "paths": {
+    "preview": "preview/all_in_one.webp",
+    "tracksDir": "tracks",
+    "struct": "track_struct.json"
+  },
+  "phases": {
+    "idle": {
+      "label": "待机",
+      "frames": {
+        "from": 1,
+        "to": 36
+      },
+      "playback": "loop"
+    },
+    "lift": {
+      "label": "吊起",
+      "frames": {
+        "from": 37,
+        "to": 72
+      },
+      "trigger": "pointerdown",
+      "playback": "once",
+      "holdAtEnd": true,
+      "onHoldComplete": "hover"
+    },
+    "hover": {
+      "label": "悬空",
+      "frames": {
+        "from": 73,
+        "to": 132
+      },
+      "trigger": "pointermove",
+      "playback": "loop",
+      "while": "pointerdown",
+      "followPointer": true,
+      "enterAlso": "lift.holdAtEnd"
+    },
+    "drop": {
+      "label": "落下",
+      "frames": {
+        "from": 133,
+        "to": 193
+      },
+      "trigger": "pointerup",
+      "playback": "once",
+      "holdAtEnd": true,
+      "fallback": "idle"
+    }
+  },
+  "interrupt": {
+    "pointerupDuringLift": "drop",
+    "pointerupDuringHover": "drop",
+    "pointerdownDuringDrop": "lift",
+    "pointerdownWhileIdle": "lift",
+    "holdStillAfterLift": "enterHover",
+    "rapidClick": "liftThenDrop"
+  },
+  "frameCount": 193
+}

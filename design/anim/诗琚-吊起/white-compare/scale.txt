@@ -1,0 +1,8 @@
+ref_video=诗琚-无形线吊起悬停-白底.mp4 frame0 (站立)
+ref_pet=public/pet/idle.webp frame0
+idle_char_h=211
+stand_char_h=517
+scale=0.408124
+paste_y=17 (match idle top)
+paste_x_center=true
+canvas=180x240

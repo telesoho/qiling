@@ -1,0 +1,26 @@
+{
+  "scale": 0.4081237911025145,
+  "scaledSize": 294,
+  "viewport": {
+    "x": 57,
+    "y": 20,
+    "w": 180,
+    "h": 260
+  },
+  "frameSize": {
+    "width": 180,
+    "height": 260
+  },
+  "unionScaled": {
+    "top": 25.711798839458414,
+    "bot": 273.0348162475822,
+    "h": 247.3230174081238,
+    "w": 146.1083172147002
+  },
+  "margin": 6,
+  "method": "fixed_scale_0.408_taller_canvas",
+  "note": "scale锁定0.408；画布抬高为180×260以容纳全序列包围盒(~247.3px+边距)",
+  "standIdleScale": 0.4081237911025145,
+  "frameCount": 193,
+  "fps": 24
+}

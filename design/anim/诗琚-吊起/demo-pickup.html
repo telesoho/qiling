@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>诗琚 · 吊起悬停演示</title>
+<style>
+  :root {
+    --bg0: #0b1020; --bg1: #141a2e;
+    --glass: rgba(255,255,255,.08); --stroke: rgba(255,255,255,.18);
+    --text: #eef2ff; --muted: #9aa3c0; --glow: rgba(232,93,76,.45);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; color: var(--text);
+    font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background:
+      radial-gradient(900px 500px at 20% 10%, rgba(232,93,76,.18), transparent 55%),
+      radial-gradient(700px 420px at 80% 80%, rgba(90,140,255,.16), transparent 50%),
+      linear-gradient(160deg, var(--bg0), var(--bg1));
+    overflow: hidden; user-select: none;
+  }
+  .hud {
+    position: fixed; margin: 18px 0 0 18px; padding: 14px 16px;
+    width: min(360px, calc(100vw - 36px));
+    background: var(--glass); border: 1px solid var(--stroke);
+    border-radius: 16px; backdrop-filter: blur(16px);
+    box-shadow: 0 10px 40px rgba(0,0,0,.35); z-index: 5;
+  }
+  .hud h1 { margin: 0 0 6px; font-size: 15px; font-weight: 650; }
+  .hud p { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.5; }
+  .hud code { font-size: 11px; color: #ffc9b8; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .pill {
+    font-size: 11px; padding: 4px 9px; border-radius: 999px;
+    border: 1px solid var(--stroke); background: rgba(255,255,255,.04); color: var(--muted);
+  }
+  .pill.on {
+    color: #fff; border-color: rgba(232,93,76,.55);
+    background: rgba(232,93,76,.22); box-shadow: 0 0 16px var(--glow);
+  }
+  .stage { position: absolute; inset: 0; touch-action: none; }
+  .stage.dragging { cursor: grabbing; }
+  .pet {
+    position: absolute; width: 180px; height: 240px;
+    filter: drop-shadow(0 18px 24px rgba(0,0,0,.45));
+    pointer-events: none;
+  }
+  .pet canvas, .pet img.clip {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    display: block; object-fit: contain;
+  }
+  .pet img.clip { display: none; }
+  .pet.mode-webp canvas { display: none; }
+  .pet.mode-webp img.clip { display: block; }
+  .hit {
+    position: absolute; width: 120px; height: 140px;
+    pointer-events: auto; cursor: grab;
+  }
+  .stage.dragging .hit { cursor: grabbing; }
+  .hint {
+    position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
+    padding: 10px 16px; border-radius: 999px;
+    background: var(--glass); border: 1px solid var(--stroke);
+    backdrop-filter: blur(12px); font-size: 12px; color: var(--muted); z-index: 5;
+  }
+  .loader {
+    position: fixed; inset: 0; display: grid; place-items: center;
+    background: rgba(8,10,20,.72); backdrop-filter: blur(8px); z-index: 10;
+  }
+  .loader.hidden { display: none; }
+  .card {
+    width: min(380px, 86vw); padding: 22px; border-radius: 18px;
+    background: var(--glass); border: 1px solid var(--stroke);
+  }
+  .bar { height: 8px; border-radius: 999px; background: rgba(255,255,255,.08); overflow: hidden; margin-top: 12px; }
+  .bar > i { display: block; height: 100%; width: 0%; background: linear-gradient(90deg,#e85d4c,#ff9a7a); border-radius: inherit; }
+  .floor {
+    position: absolute; left: 10%; right: 10%; bottom: 12%; height: 2px;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,.18), transparent);
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+  <div class="loader" id="loader">
+    <div class="card">
+      <div style="font-weight:650;margin-bottom:4px">加载 track_struct + 资源…</div>
+      <div style="font-size:12px;color:var(--muted)" id="loadText">读取配置</div>
+      <div class="bar"><i id="bar"></i></div>
+    </div>
+  </div>
+
+  <aside class="hud">
+    <h1 id="title">诗琚 · 吊起悬停</h1>
+    <p id="desc">相位可指向整段 WebP 或逐帧目录。改 <code>track_struct.json</code> 后刷新。</p>
+    <div class="row" id="phaseRow"></div>
+    <div class="row" style="margin-top:8px">
+      <span class="pill" id="framePill">—</span>
+      <span class="pill" id="assetPill">—</span>
+      <span class="pill" id="verPill">v—</span>
+    </div>
+  </aside>
+
+  <div class="hint">按住拖动 · 松手放下 · 改 JSON 后 Ctrl+F5</div>
+  <div class="stage" id="stage">
+    <div class="floor"></div>
+    <div class="hit" id="hit"></div>
+    <div class="pet" id="pet">
+      <canvas id="cv" width="180" height="240"></canvas>
+      <img class="clip" id="clip" alt="" draggable="false" />
+    </div>
+  </div>
+
+<script>
+(() => {
+  const STRUCT_URL = "track_struct.json";
+  const cv = document.getElementById("cv");
+  const ctx = cv.getContext("2d");
+  const pet = document.getElementById("pet");
+  const clip = document.getElementById("clip");
+  const hit = document.getElementById("hit");
+  const stage = document.getElementById("stage");
+  const loader = document.getElementById("loader");
+  const bar = document.getElementById("bar");
+  const loadText = document.getElementById("loadText");
+  const framePill = document.getElementById("framePill");
+  const assetPill = document.getElementById("assetPill");
+  const verPill = document.getElementById("verPill");
+  const phaseRow = document.getElementById("phaseRow");
+
+  let cfg = null;
+  /** @type {Record<string, any>} */
+  let phaseMap = {};
+  /** sequence frames: phase -> Image[] indexed by absolute frame number */
+  /** @type {Record<string, Record<number, HTMLImageElement>>} */
+  const seqCache = {};
+  let fw = 180, fh = 240, fps = 24, frameDur = 1000 / 24;
+
+  let phase = "idle";
+  let frame = 1; // for frameSequence
+  let holding = false;
+  let pointerId = null;
+  let grabDX = 0, grabDY = 0;
+  let home = { x: 0, y: 0 };
+  let pos = { x: 0, y: 0 };
+  let lastTick = 0, acc = 0;
+  let pills = [];
+  let webpClock = 0; // for display only
+
+  function resolveAsset(asset) {
+    // legacy: frames.from/to without asset
+    if (!asset && arguments[1]) {
+      const ph = arguments[1];
+      if (ph.frames) {
+        return {
+          type: "frameSequence",
+          dir: (cfg.paths && cfg.paths.tracksDir) || "tracks",
+          pattern: "frame{NNN}.webp",
+          zeroPad: (cfg.format && cfg.format.zeroPad) || 3,
+          from: ph.frames.from,
+          to: ph.frames.to,
+        };
+      }
+    }
+    return asset;
+  }
+
+  function pad(n, z) {
+    return String(n).padStart(z || 3, "0");
+  }
+
+  function seqURL(asset, i) {
+    const pattern = asset.pattern || "frame{NNN}.webp";
+    const name = pattern.replace("{NNN}", pad(i, asset.zeroPad || 3));
+    return `${asset.dir.replace(/\/$/, "")}/${name}`;
+  }
+
+  function buildPills() {
+    phaseRow.innerHTML = "";
+    pills = Object.entries(phaseMap).map(([key, ph]) => {
+      const el = document.createElement("span");
+      el.className = "pill";
+      el.dataset.phase = key;
+      const a = ph.asset;
+      const tag = a.type === "animatedWebp" ? "webp" : `${a.from}–${a.to}`;
+      el.textContent = `${ph.label || key} · ${tag}`;
+      phaseRow.appendChild(el);
+      return el;
+    });
+  }
+
+  function setVisualMode(asset) {
+    if (asset.type === "animatedWebp") {
+      pet.classList.add("mode-webp");
+      clip.src = asset.src;
+      assetPill.textContent = "animatedWebp";
+    } else {
+      pet.classList.remove("mode-webp");
+      assetPill.textContent = "frameSequence";
+    }
+  }
+
+  function setPhase(p) {
+    if (!phaseMap[p]) return;
+    phase = p;
+    const ph = phaseMap[p];
+    const a = ph.asset;
+    setVisualMode(a);
+    if (a.type === "frameSequence") {
+      if (frame < a.from || frame > a.to) frame = a.from;
+    } else {
+      // restart animated webp by cache-bust once when entering
+      clip.src = a.src + (a.src.includes("?") ? "&" : "?") + "re=" + Date.now();
+      webpClock = 0;
+    }
+    pills.forEach((el) => el.classList.toggle("on", el.dataset.phase === p));
+  }
+
+  function place(x, y) {
+    const padX = 8, padY = 8;
+    const maxX = stage.clientWidth - fw - padX;
+    const maxY = stage.clientHeight - fh - padY;
+    pos.x = Math.min(maxX, Math.max(padX, x));
+    pos.y = Math.min(maxY, Math.max(padY, y));
+    pet.style.left = pos.x + "px";
+    pet.style.top = pos.y + "px";
+    pet.style.width = fw + "px";
+    pet.style.height = fh + "px";
+    pet.style.transform = "none";
+    hit.style.left = (pos.x + fw / 2) + "px";
+    hit.style.top = (pos.y + fh * 0.42) + "px";
+    hit.style.transform = "translate(-50%, -50%)";
+  }
+
+  function layoutHome() {
+    home = { x: (stage.clientWidth - fw) / 2, y: stage.clientHeight * 0.58 - fh / 2 };
+    if (!holding && phase === "idle") place(home.x, home.y);
+  }
+
+  function draw() {
+    const ph = phaseMap[phase];
+    const a = ph.asset;
+    if (a.type === "animatedWebp") {
+      framePill.textContent = "webp loop";
+      return; // <img> paints itself
+    }
+    const img = (seqCache[phase] || {})[frame];
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    if (img && img.complete) ctx.drawImage(img, 0, 0, fw, fh);
+    framePill.textContent = `frame ${pad(frame, a.zeroPad)}`;
+  }
+
+  function advance() {
+    const ph = phaseMap[phase];
+    const a = ph.asset;
+    if (a.type === "animatedWebp") {
+      // native img loops; nothing to advance on canvas
+      return;
+    }
+    if (frame < a.to) {
+      frame += 1;
+    } else if (ph.playback === "loop") {
+      frame = a.from;
+    } else if (phase === "lift") {
+      setPhase(holding ? "hover" : "drop");
+    } else if (phase === "drop") {
+      place(home.x, home.y);
+      setPhase("idle");
+    }
+  }
+
+  function tick(t) {
+    if (!lastTick) lastTick = t;
+    acc += t - lastTick;
+    lastTick = t;
+    while (acc >= frameDur) {
+      acc -= frameDur;
+      advance();
+    }
+    draw();
+    requestAnimationFrame(tick);
+  }
+
+  function onDown(e) {
+    if (!holding && e.target !== hit && !hit.contains(e.target)) return;
+    e.preventDefault();
+    holding = true;
+    pointerId = e.pointerId;
+    stage.classList.add("dragging");
+    try { hit.setPointerCapture(pointerId); } catch (_) {}
+    grabDX = e.clientX - pos.x;
+    grabDY = e.clientY - pos.y;
+    if (phase === "idle" || phase === "drop") {
+      setPhase("lift");
+      const a = phaseMap.lift.asset;
+      if (a.type === "frameSequence") frame = a.from;
+    }
+  }
+
+  function onMove(e) {
+    if (!holding || e.pointerId !== pointerId) return;
+    e.preventDefault();
+    place(e.clientX - grabDX, e.clientY - grabDY);
+    const a = phaseMap.lift && phaseMap.lift.asset;
+    if (phase === "lift" && a && a.type === "frameSequence" && frame >= a.to) {
+      setPhase("hover");
+    }
+  }
+
+  function onUp(e) {
+    if (!holding || (pointerId != null && e.pointerId !== pointerId)) return;
+    holding = false;
+    stage.classList.remove("dragging");
+    try { hit.releasePointerCapture(pointerId); } catch (_) {}
+    pointerId = null;
+    if (phase === "lift" || phase === "hover") {
+      setPhase("drop");
+      const a = phaseMap.drop.asset;
+      if (a.type === "frameSequence") frame = a.from;
+    }
+  }
+
+  async function loadImage(url) {
+    const img = new Image();
+    img.decoding = "async";
+    await new Promise((res, rej) => {
+      img.onload = res;
+      img.onerror = () => rej(new Error("fail " + url));
+      img.src = url;
+    });
+    return img;
+  }
+
+  async function preload() {
+    // collect all frameSequence urls + animatedWebp
+    const jobs = [];
+    for (const [name, ph] of Object.entries(phaseMap)) {
+      const a = ph.asset;
+      if (a.type === "animatedWebp") {
+        jobs.push({ kind: "webp", name, url: a.src });
+      } else {
+        seqCache[name] = {};
+        for (let i = a.from; i <= a.to; i++) {
+          jobs.push({ kind: "seq", name, i, url: seqURL(a, i) });
+        }
+      }
+    }
+    let done = 0;
+    const total = jobs.length;
+    const conc = 12;
+    let idx = 0;
+    async function worker() {
+      while (idx < jobs.length) {
+        const job = jobs[idx++];
+        if (job.kind === "webp") {
+          await loadImage(job.url);
+        } else {
+          seqCache[job.name][job.i] = await loadImage(job.url);
+        }
+        done++;
+        bar.style.width = ((done / total) * 100).toFixed(1) + "%";
+        loadText.textContent = `${done} / ${total}`;
+      }
+    }
+    await Promise.all(Array.from({ length: conc }, () => worker()));
+  }
+
+  async function loadStruct() {
+    const res = await fetch(STRUCT_URL + "?t=" + Date.now());
+    if (!res.ok) throw new Error("无法读取 " + STRUCT_URL);
+    cfg = await res.json();
+    fps = cfg.fps || 24;
+    frameDur = 1000 / fps;
+    fw = (cfg.frameSize && cfg.frameSize.width) || 180;
+    fh = (cfg.frameSize && cfg.frameSize.height) || 240;
+    cv.width = fw; cv.height = fh;
+
+    phaseMap = {};
+    for (const [k, v] of Object.entries(cfg.phases || {})) {
+      const asset = resolveAsset(v.asset, v);
+      if (!asset) throw new Error("phase " + k + " 缺少 asset");
+      phaseMap[k] = { ...v, asset };
+    }
+
+    document.getElementById("title").textContent = cfg.displayName || "诗琚";
+    document.getElementById("desc").innerHTML =
+      "idle 可指向 <code>public/pet/idle.webp</code> 这类整段 WebP；lift/hover/drop 仍可用逐帧。改 JSON 后刷新。";
+    verPill.textContent = "v" + (cfg.version || "?");
+    buildPills();
+  }
+
+  hit.addEventListener("pointerdown", onDown);
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+  window.addEventListener("pointercancel", onUp);
+  window.addEventListener("resize", () => {
+    layoutHome();
+    if (!holding) place(pos.x || home.x, pos.y || home.y);
+  });
+
+  (async () => {
+    try {
+      await loadStruct();
+      await preload();
+      loader.classList.add("hidden");
+      layoutHome();
+      place(home.x, home.y);
+      setPhase("idle");
+      draw();
+      requestAnimationFrame(tick);
+    } catch (err) {
+      loadText.textContent = "加载失败：" + err;
+      console.error(err);
+    }
+  })();
+})();
+</script>
+</body>
+</html>

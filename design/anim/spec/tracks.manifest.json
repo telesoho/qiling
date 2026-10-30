@@ -1,0 +1,31 @@
+{
+  "_comment": "多轨目录契约（文档副本）。运行时加载 design/anim/tracks.manifest.json。每个 track.path 相对 design/anim/；track_struct 内 asset.src / frameSequence.dir 相对该 track_struct.json 所在目录。demo-tracks.html 先拉 manifest，再按 id 切换并解析路径。",
+  "version": "1.0.0",
+  "defaultTrack": "shiju-pickup-hover",
+  "tracks": [
+    {
+      "id": "shiju-pickup-hover",
+      "displayName": "诗琚·吊起悬停",
+      "path": "诗琚-吊起/track_struct.json",
+      "tags": ["pickup", "shiju"]
+    },
+    {
+      "id": "shiju-idle",
+      "displayName": "诗琚·待机",
+      "path": "诗琚-待机/track_struct.json",
+      "tags": ["idle", "shiju"]
+    },
+    {
+      "id": "shiju-butterfly",
+      "displayName": "诗琚·追蝴蝶",
+      "path": "诗琚-追蝴蝶/track_struct.json",
+      "tags": ["butterfly", "shiju"]
+    },
+    {
+      "id": "shiju-angry",
+      "displayName": "诗琚·生气",
+      "path": "诗琚-生气/track_struct.json",
+      "tags": ["angry", "shiju"]
+    }
+  ]
+}
