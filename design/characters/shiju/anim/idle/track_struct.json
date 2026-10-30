@@ -1,7 +1,7 @@
 {
-  "id": "shiju-angry",
-  "displayName": "诗琚·生气",
-  "description": "仅 idle 循环：public/pet/angry.webp。用于多轨切换演示。",
+  "id": "shiju-idle",
+  "displayName": "诗琚·待机",
+  "description": "仅 idle 循环：public/pet/idle.webp。用于多轨切换演示。",
   "version": "0.5.0",
   "fps": 24,
   "frameSize": {
@@ -22,7 +22,7 @@
       "playback": "loop",
       "asset": {
         "type": "animatedWebp",
-        "src": "../../../public/pet/angry.webp",
+        "src": "../../../../../public/pet/idle.webp",
         "fps": 24,
         "note": "一体化循环 WebP；本轨仅 idle，无 lift/hover/drop"
       },

@@ -22,7 +22,7 @@
       "playback": "loop",
       "asset": {
         "type": "animatedWebp",
-        "src": "../../../public/pet/butterfly.webp",
+        "src": "../../../../../public/pet/butterfly.webp",
         "fps": 24,
         "note": "一体化循环 WebP；本轨仅 idle，无 lift/hover/drop"
       },

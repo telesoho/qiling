@@ -149,7 +149,7 @@
 
   let manifest = null;
   let currentTrackId = null;
-  let trackDir = ""; // e.g. "诗琚-吊起" relative to design/anim/
+  let trackDir = ""; // e.g. "../characters/shiju/anim/pickup" relative to design/anim/
   let cfg = null;
   /** @type {Record<string, any>} */
   let phaseMap = {};
@@ -449,7 +449,7 @@
   }
 
   function trackDirFromPath(path) {
-    // "诗琚-吊起/track_struct.json" → "诗琚-吊起"
+    // "../characters/shiju/anim/pickup/track_struct.json" → "../characters/shiju/anim/pickup"
     const parts = path.replace(/\\/g, "/").split("/");
     parts.pop();
     return parts.join("/") || ".";

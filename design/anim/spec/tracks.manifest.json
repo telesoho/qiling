@@ -6,25 +6,25 @@
     {
       "id": "shiju-pickup-hover",
       "displayName": "诗琚·吊起悬停",
-      "path": "诗琚-吊起/track_struct.json",
+      "path": "../characters/shiju/anim/pickup/track_struct.json",
       "tags": ["pickup", "shiju"]
     },
     {
       "id": "shiju-idle",
       "displayName": "诗琚·待机",
-      "path": "诗琚-待机/track_struct.json",
+      "path": "../characters/shiju/anim/idle/track_struct.json",
       "tags": ["idle", "shiju"]
     },
     {
       "id": "shiju-butterfly",
       "displayName": "诗琚·追蝴蝶",
-      "path": "诗琚-追蝴蝶/track_struct.json",
+      "path": "../characters/shiju/anim/butterfly/track_struct.json",
       "tags": ["butterfly", "shiju"]
     },
     {
       "id": "shiju-angry",
       "displayName": "诗琚·生气",
-      "path": "诗琚-生气/track_struct.json",
+      "path": "../characters/shiju/anim/angry/track_struct.json",
       "tags": ["angry", "shiju"]
     }
   ]

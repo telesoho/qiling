@@ -48,7 +48,7 @@
       "playback": "loop",
       "asset": {
         "type": "animatedWebp",
-        "src": "../../../public/pet/idle.webp",
+        "src": "../../../../../public/pet/idle.webp",
         "fps": 24,
         "note": "一体化循环 WebP；也可用绝对/其它相对路径"
       },
