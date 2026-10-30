@@ -4,5 +4,8 @@ dist
 src-tauri/target
 src-tauri/gen
 
+# 由 scripts/bake_pet_anim.mjs 从 design/anim/tracks.manifest.json 生成
+public/pet/anim/
+
 __pycache__/
 *.pyc

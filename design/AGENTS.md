@@ -81,15 +81,17 @@ design/
 `design/anim/tracks.manifest.json`：
 
 - `defaultTrack`：默认 id
-- `tracks[]`：`id`、`displayName`、`path`（相对 `design/anim/` **或** 改为相对 `design/` 的稳定路径；迁移后应改为相对 `design/` 或写 `characters/...`，并同步改 demo）
+- `tracks[]`：`id`、`displayName`、`path`（相对 `design/anim/` **或** 改为相对 `design/` 的稳定路径；迁移后应改为相对 `design/` 或写 `characters/...`，并同步改 demo）、`tags`
+- 当前 8 条：pickup + idle/butterfly/angry + explain/think/advantage/disadvantage（后四条是五态姿势轨，仅 idle 相位）
 - 演示：`design/anim/demo-tracks.html`（仓库根 `http://127.0.0.1:8765/...`）
+- 运行时：`npm run bake:anim` 把设计清单烘焙到 `public/pet/anim/`（生成物、gitignore），桌宠 fetch 该运行时清单；不要手改生成目录
 
 ## 与仓库其它目录的边界
 
 | 路径 | 职责 |
 | --- | --- |
 | `design/` | 设计源、契约、工坊、交付轨 |
-| `public/pet/` | 运行时已烘焙桌宠动画 |
+| `public/pet/` | 运行时已烘焙桌宠动画；`public/pet/anim/` 由 `npm run bake:anim` 生成（gitignore），勿手改 |
 | `src-tauri/icons/` | 应用图标导出（由 `_brand/icons` 源稿生成） |
 | `assets/qiling/` | 语音等非视觉资源 |
 | `docs/` | HTTP／OpenAPI，不放美术 |
@@ -112,12 +114,13 @@ design/
 已按目标树迁完：
 
 - `_brand/icons/`、`_brand/chrome/`：器灵图标与语言泡泡定稿
-- `characters/shiju/sheets|docs|anim/{pickup,idle,butterfly,angry}|_workshop/pickup/`
+- `characters/shiju/sheets|docs|anim/{pickup,idle,butterfly,angry,explain,think,advantage,disadvantage}|_workshop/pickup/`
 - `characters/dafeiyu/sheets|docs|anim(.gitkeep)|_workshop/`（绿幕源 mp4）
 - `anim/spec/` 未动；`anim/tracks.manifest.json` 与 `demo-tracks.html` 路径已更新
+- 运行时多轨：`npm run bake:anim` 从 `anim/tracks.manifest.json` 生成 `public/pet/anim/manifest.json` + 8 条轨（含 pickup 逐帧、7 条姿势 WebP 轨）；桌宠由 `src/pet/anim.ts` 在运行时 fetch，`?track=<id>` 可在浏览器预览锁定任一轨
 
 已知残留：
 
 - `design/anim/诗琚-吊起/` 为空目录；被仍在跑的旧 `_serve_demo.py`（python PID 占用该路径，:8765）锁住。停掉该进程后删空目录即可。新脚本在 `characters/shiju/_workshop/pickup/_serve_demo.py`。
 
-`public/pet/` 未动。新建文件请直接写到目标路径。
+`public/pet/` 只保留姿势 WebP 源；`public/pet/anim/` 是生成目录，不进 git。新建文件请直接写到目标路径。

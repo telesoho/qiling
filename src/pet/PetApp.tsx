@@ -1,13 +1,17 @@
 import { invoke } from '@tauri-apps/api/core'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { QiLingPhase } from '../lib/phase'
 import { readLine, subscribeLine, type PetLine } from '../lib/line'
 import { closeSpeechBubble, loadQiLingSettings, saveQiLingSettings, watchQiLingSettings } from '../lib/settings'
 import { usePetSpeech } from '../lib/speech'
+import { loadAnimLibrary, phaseDurationMs, phaseImageUrl, preloadTrack, type AnimLibrary } from './anim'
 import { publishBubble } from './bubbleSync'
 import { PetSpeechBubble } from './PetControls'
+import { PickupSprite } from './PickupSprite'
+import { pickupPhaseAfterPress, pickupPhaseAfterRelease, pickupSegments, type PickupPhase } from './pickup'
 import { IDLE_BEATS, PET_STATES, bubbleLine, petState, pickIdleBeat, playbackFor, poseForLine, type IdleBeat, type LinePhase, type PetStateId } from './states'
 import { inTauri, petWindowIsOpen, publishPet, readPetState, setPetWindowOpen, subscribePet } from './sync'
+import { usePetDrag } from './usePetDrag'
 
 function speakPhase(phase: LinePhase): QiLingPhase {
   if (phase === 'thinking') return 'analyzing'
@@ -26,6 +30,8 @@ export default function PetApp(): JSX.Element {
     return readPetState()
   })
   const [beat, setBeat] = useState<IdleBeat>('breath')
+  const [pickup, setPickup] = useState<PickupPhase>('idle')
+  const [library, setLibrary] = useState<AnimLibrary | null>(null)
   const [shown, setShown] = useState(() => !inTauri())
   const [bubbleOpen, setBubbleOpen] = useState(() => loadQiLingSettings().bubble)
   const [ready, setReady] = useState(() => !inTauri())
@@ -36,6 +42,16 @@ export default function PetApp(): JSX.Element {
   const state = petState(stateId)
   const idle = stateId === 'idle' ? IDLE_BEATS[beat] : null
   const preview = !inTauri()
+  const forcedId =
+    preview && typeof window !== 'undefined'
+      ? new URLSearchParams(window.location.search).get('track')
+      : null
+  const forcedTrack = forcedId ? library?.byId.get(forcedId) : undefined
+  const pickupTrack = forcedTrack ?? library?.byTag('pickup')
+  const segments = useMemo(() => pickupSegments(pickupTrack), [pickupTrack])
+  const activeTrack = forcedTrack ?? (idle ? library?.byTag(idle.track) : library?.byTag(state.track))
+  const fallbackSrc = `/pet/${idle?.file ?? state.file}`
+  const poseSrc = phaseImageUrl(activeTrack, 'idle') ?? fallbackSrc
   const speechPhaseNow = ready ? speakPhase(line.phase) : 'idle'
   const speechText = ready ? line.text : ''
   const speech = usePetSpeech({
@@ -55,6 +71,42 @@ export default function PetApp(): JSX.Element {
   const bubbleText = bubbleLine(stateId, line.text, idle?.line)
   const interruptRef = useRef(speech.interrupt)
   interruptRef.current = speech.interrupt
+  const drag = usePetDrag({
+    onGrab: () => setPickup((phase) => pickupPhaseAfterPress(segments, phase)),
+    onRelease: () => setPickup((phase) => pickupPhaseAfterRelease(segments, phase)),
+  })
+
+  useEffect(() => {
+    let alive = true
+    loadAnimLibrary()
+      .then((next) => {
+        if (alive) setLibrary(next)
+      })
+      .catch((error) => {
+        console.warn('动画目录不可用', error)
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!library) return
+    const tracks = [
+      pickupTrack,
+      forcedTrack,
+      library.byTag('idle'),
+      library.byTag('butterfly'),
+      library.byTag('angry'),
+    ]
+    for (const track of tracks) {
+      if (track) void preloadTrack(track)
+    }
+  }, [library, pickupTrack, forcedTrack])
+
+  useEffect(() => {
+    if (!segments && pickup !== 'idle') setPickup('idle')
+  }, [segments, pickup])
 
   useEffect(() => subscribeLine(setLine), [])
 
@@ -91,10 +143,12 @@ export default function PetApp(): JSX.Element {
   }, [])
 
   useEffect(() => {
-    if (stateId !== 'idle') {
+    if (stateId !== 'idle' || forcedTrack) {
       setBeat('breath')
       return
     }
+    const beatMs = (name: IdleBeat) =>
+      phaseDurationMs(library?.byTag(IDLE_BEATS[name].track), 'idle') ?? IDLE_BEATS[name].ms
     let timer = 0
     const breathe = () => {
       setBeat('breath')
@@ -105,12 +159,12 @@ export default function PetApp(): JSX.Element {
           return
         }
         setBeat(next)
-        timer = window.setTimeout(breathe, IDLE_BEATS[next].ms)
-      }, IDLE_BEATS.breath.ms)
+        timer = window.setTimeout(breathe, beatMs(next))
+      }, beatMs('breath'))
     }
     breathe()
     return () => window.clearTimeout(timer)
-  }, [stateId])
+  }, [stateId, forcedTrack, library])
 
   useEffect(() => {
     if (!inTauri()) return
@@ -160,6 +214,7 @@ export default function PetApp(): JSX.Element {
       }
       if (message.type === 'visibility') {
         setShown(message.open)
+        if (!message.open) drag.cancel()
         if (!message.open && !inTauri()) window.close()
       }
     })
@@ -195,6 +250,7 @@ export default function PetApp(): JSX.Element {
   }
 
   function hide() {
+    drag.cancel()
     speech.interrupt()
     setShown(false)
     void setPetWindowOpen(false)
@@ -228,21 +284,36 @@ export default function PetApp(): JSX.Element {
           />
         )}
         <div
-          className="pet-sprite"
-          data-tauri-drag-region
+          className={`pet-sprite${drag.holding ? ' is-holding' : ''}`}
+          onPointerDown={drag.onPointerDown}
+          onPointerMove={drag.onPointerMove}
+          onPointerUp={drag.onPointerUp}
+          onPointerCancel={drag.onPointerCancel}
+          onLostPointerCapture={drag.onLostPointerCapture}
           onContextMenu={(event) => {
             if (!inTauri()) return
             event.preventDefault()
             void invoke('pet_menu')
           }}
         >
-          <img
-            key={state.id}
-            src={`/pet/${idle?.file ?? state.file}`}
-            alt={`诗琚，${state.label}`}
-            draggable={false}
-            className="pet-arrive"
-          />
+          {pickup !== 'idle' && pickupTrack && segments ? (
+            <PickupSprite
+              track={pickupTrack}
+              segments={segments}
+              phase={pickup}
+              holding={drag.holding}
+              fallbackSrc={poseSrc}
+              onAdvance={setPickup}
+            />
+          ) : (
+            <img
+              key={state.id}
+              src={poseSrc}
+              alt={forcedTrack?.displayName ?? `诗琚，${state.label}`}
+              draggable={false}
+              className="pet-arrive"
+            />
+          )}
         </div>
       </div>
     </div>

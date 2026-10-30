@@ -44,6 +44,22 @@ design/characters/shiju/anim/pickup/   # 例：诗琚吊起交付
 - 落下中再按下 → 重播 lift
 - 连点 → lift 遇 up 切 drop，结束回 idle
 
+## 运行时播放（桌宠，v0.5.0）
+
+- 设计源仍是 `design/anim/tracks.manifest.json`。`npm run bake:anim`（`predev` / `prebuild` / `pretest` 自动跑）把它烘焙成运行时多轨目录：
+  - `public/pet/anim/manifest.json`（运行时索引，`path` 已归一化）
+  - `public/pet/anim/<track-id>/track_struct.json`
+  - `public/pet/anim/<track-id>/frames/*.webp`（只拷相位用到的 from–to）
+- 该目录是生成物（`.gitignore`），安装包里没有 `design/`。`animatedWebp` 若本来就在 `public/` 下，会归一化成 `/pet/...`；否则拷进轨目录。
+- bake 会读动画 WebP 的 ANMF 帧时长，给 `animatedWebp` 资产补 `durationMs`；待机节拍从轨里取时长，`states.ts` 的 `ms` 只作回退。
+- 运行时 `src/pet/anim.ts` fetch manifest 与全部 `track_struct.json`；轨按 tags 取用：
+  - `pickup` → 吊起/悬空/落下（`src/pet/pickup.ts` 相位机）
+  - `idle` / `butterfly` / `angry` → 待机节拍
+  - `pose` 下的 `explain` / `think` / `advantage` / `disadvantage` → 五个说话姿势
+- `src/pet/usePetDrag.ts` 按住拖动窗口，`pointerup` 切 drop；轨里没有完整三段时按 idle-only 处理，拖拽只移动窗口。
+- 浏览器预览（`?pet=1`）可拖；加 `&track=<id>` 锁定任一条运行时轨，窗口不动但相位照走。
+- `src/pet/anim.test.ts` 校验烘焙后的 manifest、轨结构与帧文件；`pickup.test.ts` 校验相位机。
+
 ## 不放进交付目录的
 
 - 源视频、绿幕/白底未抠原片、rembg 对比样张 → `characters/<id>/_workshop/<action>/`（如 `shiju/_workshop/pickup/white-frames/`）

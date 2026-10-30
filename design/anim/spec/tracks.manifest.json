@@ -1,5 +1,5 @@
 {
-  "_comment": "多轨目录契约（文档副本）。运行时加载 design/anim/tracks.manifest.json。每个 track.path 相对 design/anim/；track_struct 内 asset.src / frameSequence.dir 相对该 track_struct.json 所在目录。demo-tracks.html 先拉 manifest，再按 id 切换并解析路径。",
+  "_comment": "多轨目录契约（文档副本）。设计源为 design/anim/tracks.manifest.json；scripts/bake_pet_anim.mjs 把它烘焙成 public/pet/anim/manifest.json + <id>/track_struct.json 供运行时加载。每个 track.path 相对 design/anim/；track_struct 内 asset.src / frameSequence.dir 相对该 track_struct.json 所在目录。demo-tracks.html 直接读设计源 manifest。",
   "version": "1.0.0",
   "defaultTrack": "shiju-pickup-hover",
   "tracks": [
@@ -26,6 +26,30 @@
       "displayName": "诗琚·生气",
       "path": "../characters/shiju/anim/angry/track_struct.json",
       "tags": ["angry", "shiju"]
+    },
+    {
+      "id": "shiju-explain",
+      "displayName": "诗琚·讲解",
+      "path": "../characters/shiju/anim/explain/track_struct.json",
+      "tags": ["pose", "explain", "shiju"]
+    },
+    {
+      "id": "shiju-think",
+      "displayName": "诗琚·思考",
+      "path": "../characters/shiju/anim/think/track_struct.json",
+      "tags": ["pose", "think", "shiju"]
+    },
+    {
+      "id": "shiju-advantage",
+      "displayName": "诗琚·优势",
+      "path": "../characters/shiju/anim/advantage/track_struct.json",
+      "tags": ["pose", "advantage", "shiju"]
+    },
+    {
+      "id": "shiju-disadvantage",
+      "displayName": "诗琚·劣势",
+      "path": "../characters/shiju/anim/disadvantage/track_struct.json",
+      "tags": ["pose", "disadvantage", "shiju"]
     }
   ]
 }

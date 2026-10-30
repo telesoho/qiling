@@ -52,9 +52,10 @@ html.pet-window #root {
 
 .pet-sprite {
   cursor: grab;
+  touch-action: none;
 }
 
-.pet-sprite:active {
+.pet-sprite.is-holding {
   cursor: grabbing;
 }
 
@@ -65,6 +66,13 @@ html.pet-window #root {
   max-width: none;
   pointer-events: none;
   -webkit-user-drag: none;
+}
+
+.pet-pickup {
+  display: block;
+  pointer-events: none;
+  -webkit-user-drag: none;
+  filter: drop-shadow(0 12px 8px rgb(80 48 28 / 0.22));
 }
 
 .pet-bubble {

@@ -2,7 +2,9 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { publishLine } from '../lib/line'
 import { saveQiLingSettings, loadQiLingSettings } from '../lib/settings'
+import type { AnimTrack } from './anim'
 import PetApp from './PetApp'
+import { PickupSprite } from './PickupSprite'
 
 const memory = () => {
   const store = new Map<string, string>()
@@ -43,5 +45,38 @@ describe('器灵桌宠', () => {
     const pet = renderToStaticMarkup(<PetApp />)
     expect(pet).toContain('/pet/think.webp')
     expect(pet).not.toContain('pet-bubble')
+  })
+
+  it('draws pickup phases on the contract canvas', () => {
+    const track: AnimTrack = {
+      id: 'shiju-pickup-hover',
+      fps: 24,
+      frameSize: { width: 180, height: 260 },
+      tags: ['pickup'],
+      baseUrl: 'http://test/pet/anim/shiju-pickup-hover/track_struct.json',
+      phases: {
+        lift: {
+          playback: 'once',
+          asset: { type: 'frameSequence', dir: 'frames', pattern: 'frame{NNN}.webp', zeroPad: 3, from: 30, to: 72 },
+        },
+      },
+    }
+    const html = renderToStaticMarkup(
+      <PickupSprite
+        track={track}
+        segments={{
+          lift: { from: 30, to: 72, loop: false },
+          hover: { from: 73, to: 100, loop: true },
+          drop: { from: 101, to: 193, loop: false },
+        }}
+        phase="lift"
+        holding
+        fallbackSrc="/pet/idle.webp"
+        onAdvance={() => {}}
+      />,
+    )
+    expect(html).toContain('class="pet-pickup"')
+    expect(html).toContain('width="180"')
+    expect(html).toContain('height="260"')
   })
 })

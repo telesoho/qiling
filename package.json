@@ -4,11 +4,15 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "bake:anim": "node scripts/bake_pet_anim.mjs",
+    "predev": "npm run bake:anim",
     "dev": "vite",
+    "prebuild": "npm run bake:anim",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "tauri": "tauri",
-    "test": "vitest run"
+    "pretest": "npm run bake:anim",
+    "test": "vitest run",
+    "tauri": "tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
