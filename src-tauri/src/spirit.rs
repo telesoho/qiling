@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::{
-    sync::{oneshot, OwnedSemaphorePermit},
+    sync::{mpsc, oneshot, OwnedSemaphorePermit},
     time::timeout,
 };
 use tokio_util::sync::CancellationToken;
@@ -28,6 +28,7 @@ const MAX_CONNECTIONS: usize = 32;
 const MAX_EVENTS_PER_MINUTE: u8 = 60;
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(5);
 const PAIR_APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+pub const DEFAULT_ACTION_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -100,6 +101,20 @@ pub struct AuthorizedClientView {
     pub client: ClientInfo,
     pub capabilities: CapabilityManifest,
     pub created_at: u64,
+    pub connected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NarrationResult {
+    pub text: String,
+    pub mood: String,
+}
+
+struct ActionDispatch {
+    request_id: String,
+    timeout_ms: u64,
+    response: oneshot::Sender<Result<NarrationResult, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,6 +142,8 @@ struct PendingPairing {
 struct ActiveSession {
     session_id: String,
     cancelled: CancellationToken,
+    action_tx: mpsc::UnboundedSender<ActionDispatch>,
+    pending_action_id: Option<String>,
 }
 
 #[derive(Default)]
@@ -364,6 +381,7 @@ impl PairingManager {
                 client: record.client.clone(),
                 capabilities: record.capabilities.clone(),
                 created_at: record.created_at,
+                connected: inner.sessions.contains_key(&record.client_key),
             })
             .collect();
         clients.sort_by(|left, right| left.client.name.cmp(&right.client.name));
@@ -395,7 +413,11 @@ impl PairingManager {
             .ok_or_else(|| "not_authorized".into())
     }
 
-    fn open_session(&self, client_key: &str) -> Result<(String, CancellationToken), String> {
+    fn open_session(
+        &self,
+        client_key: &str,
+        action_tx: mpsc::UnboundedSender<ActionDispatch>,
+    ) -> Result<(String, CancellationToken), String> {
         let mut inner = self.inner.lock().map_err(|_| "pairing_state_unavailable")?;
         if !inner.clients.contains_key(client_key) {
             return Err("not_authorized".into());
@@ -410,9 +432,86 @@ impl PairingManager {
             ActiveSession {
                 session_id: session_id.clone(),
                 cancelled: cancelled.clone(),
+                action_tx,
+                pending_action_id: None,
             },
         );
         Ok((session_id, cancelled))
+    }
+
+    pub async fn invoke_narrate_current(
+        &self,
+        client_id: &str,
+        action_timeout: Duration,
+    ) -> Result<NarrationResult, String> {
+        let started_at = Instant::now();
+        let timeout_ms = u64::try_from(action_timeout.as_millis())
+            .unwrap_or(u64::MAX)
+            .clamp(1_000, 120_000);
+        let client_key = {
+            let inner = self.inner.lock().map_err(|_| "pairing_state_unavailable")?;
+            let record = inner
+                .clients
+                .values()
+                .find(|record| record.client.id == client_id)
+                .ok_or_else(|| "not_authorized".to_string())?;
+            if !record
+                .capabilities
+                .actions
+                .iter()
+                .any(|action| action.id == "siju.narrate_current")
+            {
+                return Err("not_authorized".into());
+            }
+            record.client_key.clone()
+        };
+        let request_id = Uuid::new_v4().to_string();
+        let (response_tx, response_rx) = oneshot::channel();
+        {
+            let mut inner = self.inner.lock().map_err(|_| "pairing_state_unavailable")?;
+            let session = inner
+                .sessions
+                .get_mut(&client_key)
+                .ok_or_else(|| "client_unavailable".to_string())?;
+            if session.pending_action_id.is_some() {
+                return Err("busy".into());
+            }
+            session.pending_action_id = Some(request_id.clone());
+            if session
+                .action_tx
+                .send(ActionDispatch {
+                    request_id: request_id.clone(),
+                    timeout_ms,
+                    response: response_tx,
+                })
+                .is_err()
+            {
+                session.pending_action_id = None;
+                return Err("client_unavailable".into());
+            }
+        }
+
+        let outcome = match timeout(action_timeout, response_rx).await {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(_)) => Err("client_unavailable".into()),
+            Err(_) => Err("deadline_exceeded".into()),
+        };
+        if let Ok(mut inner) = self.inner.lock() {
+            if let Some(session) = inner.sessions.get_mut(&client_key) {
+                if session.pending_action_id.as_deref() == Some(&request_id) {
+                    session.pending_action_id = None;
+                }
+            }
+        }
+        let status = outcome
+            .as_ref()
+            .map(|_| "success")
+            .unwrap_or_else(|code| code.as_str());
+        eprintln!(
+            "[Spirit Action] request_id={request_id} client_id={client_id} action=siju.narrate_current outcome={status} elapsed_ms={}",
+            started_at.elapsed().as_millis()
+        );
+        outcome
     }
 
     fn close_session(&self, client_key: &str, session_id: &str) {
@@ -734,7 +833,8 @@ async fn authenticated_session(
         let _ = send_json(&mut socket, &rpc_error(id, -32000, "not_authorized", false)).await;
         return;
     }
-    let (session_id, cancelled) = match manager.open_session(&client.client_key) {
+    let (action_tx, mut action_rx) = mpsc::unbounded_channel();
+    let (session_id, cancelled) = match manager.open_session(&client.client_key, action_tx) {
         Ok(session) => session,
         Err(code) => {
             let _ = send_json(&mut socket, &rpc_error(id, -32000, &code, false)).await;
@@ -769,11 +869,38 @@ async fn authenticated_session(
 
     let mut event_window_start = Instant::now();
     let mut event_count = 0u8;
+    let mut pending_actions: HashMap<String, oneshot::Sender<Result<NarrationResult, String>>> =
+        HashMap::new();
     loop {
         tokio::select! {
             _ = cancelled.cancelled() => {
                 let _ = socket.send(Message::Close(None)).await;
                 break;
+            }
+            dispatch = action_rx.recv() => {
+                let Some(dispatch) = dispatch else { break };
+                pending_actions.retain(|_, response| !response.is_closed());
+                if !pending_actions.is_empty() {
+                    let _ = dispatch.response.send(Err("busy".into()));
+                    continue;
+                }
+                let request = json!({
+                    "jsonrpc": "2.0",
+                    "id": dispatch.request_id,
+                    "method": "action.invoke",
+                    "params": {
+                        "action": "siju.narrate_current",
+                        "arguments": {},
+                        "timeoutMs": dispatch.timeout_ms
+                    }
+                });
+                pending_actions.insert(
+                    request["id"].as_str().unwrap_or_default().to_string(),
+                    dispatch.response,
+                );
+                if send_json(&mut socket, &request).await.is_err() {
+                    break;
+                }
             }
             message = socket.recv() => {
                 match message {
@@ -785,6 +912,21 @@ async fn authenticated_session(
                         if event_window_start.elapsed() >= Duration::from_secs(60) {
                             event_window_start = Instant::now();
                             event_count = 0;
+                        }
+                        if let Ok(response) = serde_json::from_str::<Value>(&text) {
+                            if let Some(id) = response.get("id").and_then(Value::as_str) {
+                                if let Some(reply) = pending_actions.remove(id) {
+                                    let _ = reply.send(parse_narration_response(&response, id));
+                                    continue;
+                                }
+                            }
+                            if response.get("method").is_none()
+                                && response.get("id").is_some()
+                                && (response.get("result").is_some()
+                                    || response.get("error").is_some())
+                            {
+                                continue;
+                            }
                         }
                         if !handle_client_message(
                             &mut socket,
@@ -814,6 +956,39 @@ async fn authenticated_session(
         }
     }
     manager.close_session(&client.client_key, &session_id);
+}
+
+fn parse_narration_response(message: &Value, request_id: &str) -> Result<NarrationResult, String> {
+    let object = message
+        .as_object()
+        .ok_or_else(|| "invalid_action_response".to_string())?;
+    if object.len() != 3
+        || message.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+        || message.get("id").and_then(Value::as_str) != Some(request_id)
+    {
+        return Err("invalid_action_response".into());
+    }
+    if let Some(error) = message.get("error") {
+        return Err(error
+            .get("data")
+            .and_then(|data| data.get("code"))
+            .and_then(Value::as_str)
+            .unwrap_or("internal_error")
+            .to_string());
+    }
+    let result = message
+        .get("result")
+        .cloned()
+        .ok_or_else(|| "invalid_action_response".to_string())?;
+    let result: NarrationResult =
+        serde_json::from_value(result).map_err(|_| "invalid_action_response".to_string())?;
+    if result.text.trim().is_empty()
+        || result.text.chars().count() > 400
+        || !matches!(result.mood.as_str(), "neutral" | "up" | "down")
+    {
+        return Err("invalid_action_response".into());
+    }
+    Ok(result)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1149,7 +1324,8 @@ mod tests {
         let pairing = manager.begin_pairing().unwrap();
         let _token = approve(&manager, &pairing.code);
         let client_key = manager.list_clients().unwrap()[0].client_key.clone();
-        let (_, cancelled) = manager.open_session(&client_key).unwrap();
+        let (action_tx, _) = mpsc::unbounded_channel();
+        let (_, cancelled) = manager.open_session(&client_key, action_tx).unwrap();
         manager.revoke_client(&client_key).unwrap();
         assert!(cancelled.is_cancelled());
         fs::remove_dir_all(directory).unwrap();
@@ -1327,6 +1503,61 @@ mod tests {
             .unwrap();
         assert_eq!(event["clientId"], "com.siju.app");
         assert_eq!(event["payload"]["status"], "ready");
+
+        let invoke_manager = Arc::clone(&manager);
+        let invocation = tokio::spawn(async move {
+            invoke_manager
+                .invoke_narrate_current("com.siju.app", Duration::from_secs(2))
+                .await
+        });
+        let action_request = receive_client_json(&mut client_socket).await;
+        assert_eq!(action_request["method"], "action.invoke");
+        assert_eq!(action_request["params"]["action"], "siju.narrate_current");
+        assert_eq!(action_request["params"]["arguments"], json!({}));
+        assert_eq!(
+            manager
+                .invoke_narrate_current("com.siju.app", Duration::from_secs(2))
+                .await
+                .unwrap_err(),
+            "busy"
+        );
+        send_client_json(
+            &mut client_socket,
+            json!({
+                "jsonrpc": "2.0",
+                "id": action_request["id"],
+                "result": { "text": "当前局面红方略优。", "mood": "up" }
+            }),
+        )
+        .await;
+        assert_eq!(
+            invocation.await.unwrap().unwrap(),
+            NarrationResult {
+                text: "当前局面红方略优。".into(),
+                mood: "up".into()
+            }
+        );
+
+        let timeout_manager = Arc::clone(&manager);
+        let timed_invocation = tokio::spawn(async move {
+            timeout_manager
+                .invoke_narrate_current("com.siju.app", Duration::from_millis(20))
+                .await
+        });
+        let late_action_request = receive_client_json(&mut client_socket).await;
+        assert_eq!(
+            timed_invocation.await.unwrap().unwrap_err(),
+            "deadline_exceeded"
+        );
+        send_client_json(
+            &mut client_socket,
+            json!({
+                "jsonrpc": "2.0",
+                "id": late_action_request["id"],
+                "result": { "text": "迟到的结果不能算成功。", "mood": "neutral" }
+            }),
+        )
+        .await;
 
         send_client_json(
             &mut client_socket,

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:qiling:spirit-protocol:v1",
   "title": "Spirit Protocol V1 message envelope",
-  "description": "Approved JSON-RPC 2.0 message shapes for Spirit Protocol V1. This schema describes the contract; runtime support is not yet implemented.",
+  "description": "JSON-RPC 2.0 message shapes for Spirit Protocol V1, including the implemented pairing, status-event, and siju.narrate_current Action contracts.",
   "oneOf": [
     { "$ref": "#/$defs/clientPairRequest" },
     { "$ref": "#/$defs/clientAuthenticateRequest" },

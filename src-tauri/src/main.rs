@@ -246,6 +246,51 @@ fn spirit_revoke_client(state: State<AppState>, client_key: String) -> Result<()
     state.protocol.revoke_client(&client_key)
 }
 
+#[tauri::command]
+async fn spirit_invoke_narrate_current(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    app.emit(
+        "qiling-line",
+        serde_json::json!({ "phase": "thinking", "text": "", "mood": "neutral" }),
+    )
+    .map_err(|error| format!("narration_feedback_unavailable:{error}"))?;
+    match state
+        .protocol
+        .invoke_narrate_current("com.siju.app", spirit::DEFAULT_ACTION_TIMEOUT)
+        .await
+    {
+        Ok(result) => app
+            .emit(
+                "qiling-line",
+                serde_json::json!({
+                    "phase": "say",
+                    "text": result.text,
+                    "mood": result.mood
+                }),
+            )
+            .map_err(|error| format!("narration_display_failed:{error}")),
+        Err(code) => {
+            let message = match code.as_str() {
+                "client_unavailable" => "识局当前未连接，暂时无法重新解说。",
+                "not_authorized" => "识局尚未获准提供重新解说能力。",
+                "busy" => "识局正在处理另一条解说请求，请稍后再试。",
+                "state_unavailable" => "识局当前没有可用的局面分析。",
+                "state_stale" => "局面已经变化，请等待识局更新分析后再试。",
+                "summarizer_unavailable" => "识局当前的解说服务不可用，请检查解说设置。",
+                "deadline_exceeded" => "重新解说超时，请确认识局状态后再试。",
+                _ => "重新解说失败，请检查识局状态后重试。",
+            };
+            let _ = app.emit(
+                "qiling-line",
+                serde_json::json!({ "phase": "say", "text": message, "mood": "down" }),
+            );
+            Err(code)
+        }
+    }
+}
+
 fn open_settings(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("settings") {
         let _ = window.unminimize();
@@ -352,6 +397,7 @@ fn main() {
             spirit_reject_pairing,
             spirit_list_clients,
             spirit_revoke_client,
+            spirit_invoke_narrate_current,
             bubble_present,
             pet_menu
         ])

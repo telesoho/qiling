@@ -18,5 +18,6 @@ commands.allow = [
   "spirit_reject_pairing",
   "spirit_list_clients",
   "spirit_revoke_client",
+  "spirit_invoke_narrate_current",
   "pet_menu"
 ]

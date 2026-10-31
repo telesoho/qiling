@@ -24,6 +24,13 @@ interface AuthorizedClient {
   client: ClientInfo
   capabilities: CapabilityManifest
   createdAt: number
+  connected: boolean
+}
+
+interface SpiritEvent {
+  clientId: string
+  eventType: string
+  payload: { status?: string }
 }
 
 interface PairingCode {
@@ -42,10 +49,37 @@ export default function SettingsApp(): JSX.Element {
   const [pairingCode, setPairingCode] = useState<PairingCode | null>(null)
   const [pending, setPending] = useState<PairingRequest[]>([])
   const [clients, setClients] = useState<AuthorizedClient[]>([])
+  const [spiritEvent, setSpiritEvent] = useState<SpiritEvent | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [actionStatus, setActionStatus] = useState('')
+  const [actionError, setActionError] = useState('')
 
   useEffect(() => watchQiLingSettings(setSettings), [])
+
+  useEffect(() => {
+    let active = true
+    let unlisten: (() => void) | undefined
+    void import('@tauri-apps/api/event')
+      .then(({ listen }) =>
+        listen<SpiritEvent>('spirit-event', ({ payload }) => {
+          if (active && payload.eventType === 'siju.analysis.status') {
+            setSpiritEvent(payload)
+          }
+        }),
+      )
+      .then((stop) => {
+        if (active) unlisten = stop
+        else stop()
+      })
+      .catch((reason: unknown) => {
+        if (active) setError(`无法订阅识局状态事件：${String(reason)}`)
+      })
+    return () => {
+      active = false
+      unlisten?.()
+    }
+  }, [])
 
   useEffect(() => {
     let active = true
@@ -113,6 +147,35 @@ export default function SettingsApp(): JSX.Element {
     }
   }
 
+  async function requestNarration() {
+    setBusy(true)
+    setError('')
+    setActionStatus('')
+    setActionError('')
+    try {
+      await invoke('spirit_invoke_narrate_current')
+      setActionStatus('识局已返回新解说，器灵正在反馈。')
+    } catch (reason) {
+      const code = String(reason)
+      const message = code.includes('client_unavailable')
+        ? '识局当前未连接。'
+        : code.includes('state_unavailable')
+          ? '识局当前没有可用的局面分析。'
+          : code.includes('state_stale')
+            ? '局面分析已过期，请等待更新后重试。'
+            : code.includes('summarizer_unavailable')
+              ? '识局当前的解说服务不可用。'
+              : code.includes('deadline_exceeded')
+                ? '重新解说超时。'
+                : code.includes('busy')
+                  ? '识局正在处理另一条解说请求。'
+                  : `请求解说失败：${code}`
+      setActionError(message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <main className="pet-settings" aria-label="设定">
       <section className="settings-section">
@@ -171,21 +234,39 @@ export default function SettingsApp(): JSX.Element {
         <div className="settings-list">
           <h3>已授权</h3>
           {clients.length === 0 && <p>暂无已授权客户端。</p>}
-          {clients.map((client) => (
-            <article className="settings-card" key={client.clientKey}>
-              <strong>{client.client.name}</strong>
-              <span>{client.client.id} · {client.client.version}</span>
-              <span>已授权：{capabilitySummary(client.capabilities)}</span>
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => void revokeClient(client.clientKey)}
-              >
-                撤销授权
-              </button>
-            </article>
-          ))}
+          {clients.map((client) => {
+            const clientEvent = spiritEvent?.clientId === client.client.id ? spiritEvent : null
+            return (
+              <article className="settings-card" key={client.clientKey}>
+                <strong>{client.client.name}</strong>
+                <span>{client.client.id} · {client.client.version}</span>
+                <span>已授权：{capabilitySummary(client.capabilities)}</span>
+                <span>
+                  连接状态：{client.connected ? '已连接' : '未连接'}
+                  {clientEvent && ` · ${clientEvent.payload.status === 'ready' ? '可解说' : '当前不可解说'}`}
+                </span>
+                {client.capabilities.actions.some((action) => action.id === 'siju.narrate_current') && (
+                  <button
+                    type="button"
+                    disabled={busy || !client.connected || clientEvent?.payload.status === 'unavailable'}
+                    onClick={() => void requestNarration()}
+                  >
+                    {busy ? '正在请求…' : '请识局重新解说当前局面'}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void revokeClient(client.clientKey)}
+                >
+                  撤销授权
+                </button>
+              </article>
+            )
+          })}
         </div>
+        {actionStatus && <p className="settings-status" role="status">{actionStatus}</p>}
+        {actionError && <p className="settings-error" role="alert">{actionError}</p>}
         {error && <p className="settings-error" role="alert">{error}</p>}
       </section>
     </main>
