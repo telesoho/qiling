@@ -9,6 +9,7 @@
     "dev": "vite",
     "prebuild": "npm run bake:anim",
     "build": "tsc --noEmit && vite build",
+    "sdk:build": "tsc -p sdk/typescript/tsconfig.json",
     "preview": "vite preview",
     "pretest": "npm run bake:anim",
     "test": "vitest run",

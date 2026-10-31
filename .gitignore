@@ -1,5 +1,6 @@
 node_modules
 dist
+sdk/typescript/dist
 .venv
 src-tauri/target
 src-tauri/gen

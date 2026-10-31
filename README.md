@@ -3,7 +3,7 @@
 桌宠。别的程序把写好的一句送到本机，器灵念出来。识局是第一个客户端。
 
 产品方向与阶段性开发路线见[器灵开发计划](docs/development-plan.md)。
-双向客户端通信协议已完成 V1 设计评审；本机 WebSocket、配对及撤销正进入实现。规格见[Spirit Protocol V1](docs/spirit-protocol-v1.md)，协议尚不可用。
+Spirit Protocol V1 的本机 WebSocket、配对、撤销、状态事件和 `siju.narrate_current` 已通过实现与桌面验收。TypeScript 客户端 SDK 及参考示例也已通过阶段 4 验收，说明见 [SDK README](sdk/typescript/README.md)；协议规格见[Spirit Protocol V1](docs/spirit-protocol-v1.md)。
 
 只听 `127.0.0.1:8766`，可用 `QILING_PORT` 改。
 
@@ -17,7 +17,7 @@
 
 `thinking` 不张嘴。`mood` 决定优势、劣势或讲解。静音和收起气泡在宠物自己的气泡上。
 
-现有 HTTP 接口以 `docs/openapi.yaml` 为准，Swagger UI 资源内嵌在程序里，离线也能看：启动器灵后打开 `http://127.0.0.1:8766/docs`（改过 `QILING_PORT` 就换成对应端口）。HTTP CORS 仅允许已知本机应用 Origin。动现有接口时，`docs/openapi.yaml` 和 `src-tauri/src/http.rs` 要一起改；新协议的代码仍在实现中，完成前不能视为可用 API。
+现有 HTTP 接口以 `docs/openapi.yaml` 为准，Swagger UI 资源内嵌在程序里，离线也能看：启动器灵后打开 `http://127.0.0.1:8766/docs`（改过 `QILING_PORT` 就换成对应端口）。HTTP CORS 仅允许已知本机应用 Origin。动现有接口时，`docs/openapi.yaml` 和 `src-tauri/src/http.rs` 要一起改；Spirit WebSocket 当前只支持已文档化的 V1 客户端/能力子集，不应假设可调用任意应用 Action。
 
 ```bash
 # Get-Process qiling -ErrorAction SilentlyContinue | Stop-Process -Force 
