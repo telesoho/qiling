@@ -2,17 +2,19 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:qiling:spirit-protocol:v1",
   "title": "Spirit Protocol V1 message envelope",
-  "description": "Proposed JSON-RPC 2.0 message shapes for Spirit Protocol V1. This schema is not an implemented endpoint contract until the proposal is approved.",
+  "description": "Approved JSON-RPC 2.0 message shapes for Spirit Protocol V1. This schema describes the contract; runtime support is not yet implemented.",
   "oneOf": [
     { "$ref": "#/$defs/clientPairRequest" },
     { "$ref": "#/$defs/clientAuthenticateRequest" },
     { "$ref": "#/$defs/clientInitializeRequest" },
+    { "$ref": "#/$defs/clientUnpairRequest" },
     { "$ref": "#/$defs/actionInvokeRequest" },
     { "$ref": "#/$defs/eventPublishNotification" },
     { "$ref": "#/$defs/cancelNotification" },
     { "$ref": "#/$defs/pairResponse" },
     { "$ref": "#/$defs/authenticateResponse" },
     { "$ref": "#/$defs/initializeResponse" },
+    { "$ref": "#/$defs/clientUnpairResponse" },
     { "$ref": "#/$defs/actionSuccessResponse" },
     { "$ref": "#/$defs/errorResponse" }
   ],
@@ -124,9 +126,20 @@
           "name": "器灵",
           "version": "0.1.0"
         },
-        "runtimeCapabilities": ["voice.push_to_talk"],
+        "runtimeCapabilities": [],
         "grantedCapabilities": ["siju.narrate_current"]
       }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "unpair-1",
+      "method": "client.unpair",
+      "params": {}
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "unpair-1",
+      "result": { "unpaired": true }
     },
     {
       "jsonrpc": "2.0",
@@ -212,6 +225,37 @@
           "required": ["accessToken"],
           "properties": {
             "accessToken": { "type": "string", "minLength": 32 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "clientUnpairRequest": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/requestId" },
+        "method": { "const": "client.unpair" },
+        "params": {
+          "type": "object",
+          "maxProperties": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "clientUnpairResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/requestId" },
+        "result": {
+          "type": "object",
+          "required": ["unpaired"],
+          "properties": {
+            "unpaired": { "const": true }
           },
           "additionalProperties": false
         }

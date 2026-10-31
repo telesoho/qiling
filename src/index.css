@@ -214,18 +214,86 @@ html.pet-window #root {
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
   height: 100%;
   margin: 0;
-  padding: 20px 22px;
+  overflow-y: auto;
+  padding: 18px 20px;
   background: #fffaf6;
   color: #3a342e;
   font-family: "PingFang SC", "Noto Sans SC", "Microsoft YaHei", "Segoe UI", sans-serif;
   font-size: 14px;
 }
 
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-section h1,
+.settings-section h2,
+.settings-section h3,
+.settings-section p {
+  margin: 0;
+}
+
+.settings-section h1 {
+  font-size: 18px;
+}
+
+.settings-section h2 {
+  font-size: 15px;
+}
+
+.settings-section h3 {
+  font-size: 13px;
+}
+
+.settings-section p,
+.settings-card span {
+  color: #6b6259;
+  font-size: 12px;
+}
+
 .pet-settings label {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.settings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-card {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px;
+  border: 1px solid #e8d8c8;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.settings-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.pet-settings button {
+  width: fit-content;
+  padding: 5px 9px;
+}
+
+.pairing-code strong {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 18px;
+  letter-spacing: 0.12em;
+}
+
+.settings-error {
+  color: #b42318 !important;
 }

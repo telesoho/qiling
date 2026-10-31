@@ -31,4 +31,11 @@ describe('器灵设定', () => {
     expect(beforeLabel(page, '语音')).not.toContain('checked')
     expect(beforeLabel(page, '气泡')).toContain('checked')
   })
+
+  it('shows client pairing controls and the empty state', () => {
+    const page = renderToStaticMarkup(<SettingsApp />)
+    expect(page).toContain('已连接客户端')
+    expect(page).toContain('生成一次性配对码')
+    expect(page).toContain('暂无已授权客户端')
+  })
 })

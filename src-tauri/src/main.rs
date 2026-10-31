@@ -2,13 +2,14 @@
 
 mod cosyvoice;
 mod http;
+mod spirit;
 mod voice;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use tauri::utils::config::{BackgroundThrottlingPolicy, Color};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::utils::config::{BackgroundThrottlingPolicy, Color};
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, PhysicalPosition, Runtime, State,
     WebviewUrl, WebviewWindow, WebviewWindowBuilder,
@@ -21,6 +22,7 @@ const BUBBLE_GAP: f64 = 16.0;
 pub struct AppState {
     pet_placed: AtomicBool,
     voice: Arc<cosyvoice::VoiceHost>,
+    protocol: Arc<spirit::PairingManager>,
 }
 
 fn place_pet(pet: &WebviewWindow) {
@@ -63,7 +65,14 @@ fn bubble_size(width: f64, height: f64) -> (f64, f64) {
     (width.clamp(160.0, 280.0), height.clamp(72.0, 220.0))
 }
 
-fn bubble_origin(pet_x: i32, pet_y: i32, pet_w: i32, bubble_w: i32, bubble_h: i32, gap: i32) -> (i32, i32) {
+fn bubble_origin(
+    pet_x: i32,
+    pet_y: i32,
+    pet_w: i32,
+    bubble_w: i32,
+    bubble_h: i32,
+    gap: i32,
+) -> (i32, i32) {
     (pet_x + (pet_w - bubble_w) / 2, pet_y - bubble_h - gap)
 }
 
@@ -148,26 +157,27 @@ fn create_bubble<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
     let Some(pet) = app.get_webview_window("pet") else {
         return Ok(());
     };
-    let mut builder = WebviewWindowBuilder::new(app, "bubble", WebviewUrl::App("index.html".into()))
-        .title("器灵")
-        .inner_size(210.0, 120.0)
-        .resizable(false)
-        .maximizable(false)
-        .minimizable(false)
-        .closable(false)
-        .focused(false)
-        .focusable(true)
-        .transparent(true)
-        .decorations(false)
-        .always_on_top(true)
-        .visible_on_all_workspaces(true)
-        .skip_taskbar(true)
-        .shadow(false)
-        .visible(false)
-        .no_redirection_bitmap(true)
-        .zoom_hotkeys_enabled(false)
-        .background_color(Color(0, 0, 0, 0))
-        .background_throttling(BackgroundThrottlingPolicy::Disabled);
+    let mut builder =
+        WebviewWindowBuilder::new(app, "bubble", WebviewUrl::App("index.html".into()))
+            .title("器灵")
+            .inner_size(210.0, 120.0)
+            .resizable(false)
+            .maximizable(false)
+            .minimizable(false)
+            .closable(false)
+            .focused(false)
+            .focusable(true)
+            .transparent(true)
+            .decorations(false)
+            .always_on_top(true)
+            .visible_on_all_workspaces(true)
+            .skip_taskbar(true)
+            .shadow(false)
+            .visible(false)
+            .no_redirection_bitmap(true)
+            .zoom_hotkeys_enabled(false)
+            .background_color(Color(0, 0, 0, 0))
+            .background_throttling(BackgroundThrottlingPolicy::Disabled);
     #[cfg(windows)]
     {
         builder = builder.owner(&pet)?;
@@ -202,6 +212,40 @@ fn qiling_voice_cancel(state: State<AppState>) {
     state.voice.cancel();
 }
 
+#[tauri::command]
+fn spirit_start_pairing(state: State<AppState>) -> Result<spirit::PairingCode, String> {
+    state.protocol.begin_pairing()
+}
+
+#[tauri::command]
+fn spirit_pending_pairings(
+    state: State<AppState>,
+) -> Result<Vec<spirit::PairingRequestView>, String> {
+    state.protocol.pending_pairings()
+}
+
+#[tauri::command]
+fn spirit_approve_pairing(state: State<AppState>, request_id: String) -> Result<(), String> {
+    state.protocol.approve_pairing(&request_id)
+}
+
+#[tauri::command]
+fn spirit_reject_pairing(state: State<AppState>, request_id: String) -> Result<(), String> {
+    state.protocol.reject_pairing(&request_id)
+}
+
+#[tauri::command]
+fn spirit_list_clients(
+    state: State<AppState>,
+) -> Result<Vec<spirit::AuthorizedClientView>, String> {
+    state.protocol.list_clients()
+}
+
+#[tauri::command]
+fn spirit_revoke_client(state: State<AppState>, client_key: String) -> Result<(), String> {
+    state.protocol.revoke_client(&client_key)
+}
+
 fn open_settings(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("settings") {
         let _ = window.unminimize();
@@ -211,7 +255,7 @@ fn open_settings(app: &AppHandle) -> Result<(), String> {
     }
     WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
         .title("设定")
-        .inner_size(320.0, 220.0)
+        .inner_size(460.0, 580.0)
         .resizable(false)
         .maximizable(false)
         .minimizable(true)
@@ -235,8 +279,8 @@ fn pet_menu(app: AppHandle) -> Result<(), String> {
     let quit = MenuItem::with_id(&app, "quit", "退出", true, None::<&str>)
         .map_err(|err| err.to_string())?;
     let separator = PredefinedMenuItem::separator(&app).map_err(|err| err.to_string())?;
-    let menu = Menu::with_items(&app, &[&settings, &separator, &quit])
-        .map_err(|err| err.to_string())?;
+    let menu =
+        Menu::with_items(&app, &[&settings, &separator, &quit]).map_err(|err| err.to_string())?;
     let pet = app.get_webview_window("pet").ok_or("没有器灵窗口")?;
     pet.popup_menu(&menu).map_err(|err| err.to_string())
 }
@@ -244,9 +288,15 @@ fn pet_menu(app: AppHandle) -> Result<(), String> {
 fn main() {
     let app = tauri::Builder::default()
         .setup(|app| {
+            let protocol_dir = app.path().app_config_dir()?.join("spirit-clients");
+            let protocol = Arc::new(
+                spirit::PairingManager::load(protocol_dir)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?,
+            );
             app.manage(AppState {
                 pet_placed: AtomicBool::new(true),
                 voice: Arc::new(cosyvoice::VoiceHost::new()),
+                protocol: protocol.clone(),
             });
             if let Some(pet) = app.get_webview_window("pet") {
                 place_pet(&pet);
@@ -255,7 +305,7 @@ fn main() {
             }
             create_bubble(app)?;
             let handle = app.handle().clone();
-            std::thread::spawn(move || http::serve(handle));
+            std::thread::spawn(move || http::serve(handle, protocol));
             Ok(())
         })
         .on_window_event(|window, event| match event {
@@ -296,6 +346,12 @@ fn main() {
             qiling_voice_status,
             qiling_voice_synthesize,
             qiling_voice_cancel,
+            spirit_start_pairing,
+            spirit_pending_pairings,
+            spirit_approve_pairing,
+            spirit_reject_pairing,
+            spirit_list_clients,
+            spirit_revoke_client,
             bubble_present,
             pet_menu
         ])
