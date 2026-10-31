@@ -9,3 +9,4 @@ public/pet/anim/
 
 __pycache__/
 *.pyc
+graphify-out/
