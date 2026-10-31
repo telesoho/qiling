@@ -17,6 +17,7 @@
 协议以 `docs/openapi.yaml` 为准，Swagger UI 资源内嵌在程序里，离线也能看：启动器灵后打开 `http://127.0.0.1:8766/docs`（改过 `QILING_PORT` 就换成对应端口）。动接口时，`docs/openapi.yaml` 和 `src-tauri/src/http.rs` 要一起改。
 
 ```bash
+# $env:CARGO_TARGET_DIR = "C:\Users\telesoho\qiling-target-medium"
 npm install
 npm run tauri dev
 ```
