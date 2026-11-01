@@ -4,13 +4,43 @@ import unittest
 from pathlib import Path
 
 from voice_assistant import (
+    MAX_KEYWORD_VARIANTS,
     VoiceFlow,
     build_keyword_line,
+    build_keyword_lines,
     configure_logging,
     is_acknowledgment_echo,
     is_echo_of,
     is_interrupt_phrase,
+    is_wake_word_transcript,
+    keyword_from_result,
+    load_pypinyin,
     parse_command,
+    split_final_token,
+    syllable_similarity,
+    tone3_parts,
+    wake_word_similarity,
+    write_keyword_file,
+)
+
+PYPINYIN_AVAILABLE = load_pypinyin() is not None
+
+# A miniature pinyin token table: enough initials/finals to build variants.
+FAKE_TOKENS = "\n".join(
+    [
+        "<blk> 0",
+        "<sos/eos> 1",
+        "AA0 2",
+        "q 3",
+        "j 4",
+        "l 5",
+        "n 6",
+        "ī 7",
+        "íng 8",
+        "ín 9",
+        "ǚ 10",
+        "ér 11",
+    ]
 )
 
 
@@ -637,6 +667,34 @@ class VoiceFlowTests(unittest.TestCase):
         self.assertTrue(any("KWS matched wake phrase: 器灵" in line for line in logs.output))
         self.assertIn({"type": "debug_keyword", "text": "器灵"}, events)
 
+    def test_keyword_result_accepts_str_and_object_results(self):
+        self.assertEqual(keyword_from_result("七零七零#3"), "七零七零#3")
+        self.assertEqual(
+            keyword_from_result(type("Result", (), {"keyword": "器灵"})()), "器灵"
+        )
+        self.assertEqual(keyword_from_result(""), "")
+        self.assertEqual(keyword_from_result(None), "")
+
+    def test_a_string_keyword_result_wakes_the_pet(self):
+        # sherpa-onnx 2.x reports a plain string here; objects must not be required.
+        class StringKeywordSpotter(FakeKeywordSpotter):
+            def get_result(self, _stream):
+                if self.detect:
+                    self.detect = False
+                    return "七零七零#2"
+                return ""
+
+        events = []
+        kws = StringKeywordSpotter()
+        flow = VoiceFlow(kws, FakeRecognizer(), events.append, "七零七零")
+
+        flow.start()
+        kws.detect = True
+        flow.feed([0.1] * 1600, now=1.0)
+
+        self.assertEqual(flow.state, "wake_acknowledgment")
+        self.assertIn({"type": "debug_keyword", "text": "七零七零#2"}, events)
+
     def test_voice_diagnostics_are_written_to_the_configured_file(self):
         with tempfile.TemporaryDirectory() as directory:
             log_path = Path(directory) / "voice-assistant.log"
@@ -675,6 +733,137 @@ class VoiceFlowTests(unittest.TestCase):
 
         self.assertEqual(events[-1], {"type": "state", "state": "listening"})
         self.assertTrue(all(event["type"] != "transcript" for event in events))
+
+
+class WakeWordPhoneticsTests(unittest.TestCase):
+    """Layer 1 (keyword expansion) and layer 3 (pinyin fallback) of the plan."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.tokens_path = Path(self.temporary.name) / "tokens.txt"
+        self.tokens_path.write_text(FAKE_TOKENS, encoding="utf-8")
+
+    @staticmethod
+    def encode(token_list):
+        def encoder(_phrases, **_options):
+            return [list(token_list)]
+
+        return encoder
+
+    def test_splits_pinyin_tokens_into_sound_and_tone(self):
+        self.assertEqual(split_final_token("uì"), ("ui", "4"))
+        self.assertEqual(split_final_token("íng"), ("ing", "2"))
+        self.assertEqual(split_final_token("ǚ"), ("ü", "3"))
+        self.assertEqual(split_final_token("ér"), ("er", "2"))
+        self.assertEqual(split_final_token("de"), ("de", "5"))
+
+    def test_splits_tone3_syllables_into_initial_sound_and_tone(self):
+        self.assertEqual(tone3_parts("ling2"), ("l", "ing", "2"))
+        self.assertEqual(tone3_parts("nv3"), ("n", "ü", "3"))
+        self.assertEqual(tone3_parts("er2"), ("", "er", "2"))
+        self.assertEqual(tone3_parts("zhi1"), ("zh", "i", "1"))
+        self.assertEqual(tone3_parts("hui4"), ("h", "ui", "4"))
+
+    def test_keyword_variants_are_single_syllable_near_homophones(self):
+        # Same tone, one confused initial (q/j) or final (ing/in) per line.
+        lines = build_keyword_lines("七零", self.tokens_path, self.encode(["q", "ī", "l", "íng"]))
+
+        self.assertEqual(
+            lines,
+            [
+                "q ī l íng @七零",
+                "j ī l íng @七零#1",
+                "q ī n íng @七零#2",
+                "q ī l ín @七零#3",
+            ],
+        )
+
+    def test_keywords_stay_unchanged_when_a_token_is_not_pinyin(self):
+        # English or unknown tokens cannot be split; keep the plain rule.
+        lines = build_keyword_lines("七零", self.tokens_path, self.encode(["L", "AY1"]))
+
+        self.assertEqual(lines, ["L AY1 @七零"])
+
+    def test_unknown_token_table_only_writes_the_wake_word(self):
+        lines = build_keyword_lines(
+            "七零", Path(self.temporary.name) / "missing.txt", self.encode(["q", "ī"])
+        )
+
+        self.assertEqual(lines, ["q ī @七零"])
+
+    def test_keyword_variants_are_deduplicated_and_capped(self):
+        lines = build_keyword_lines("七零", self.tokens_path, self.encode(["q", "ī", "q", "ī"]))
+
+        self.assertLessEqual(len(lines), MAX_KEYWORD_VARIANTS + 1)
+        token_lines = [line.split(" @")[0] for line in lines]
+        self.assertEqual(len(token_lines), len(set(token_lines)))
+
+        capped = build_keyword_lines(
+            "七零", self.tokens_path, self.encode(["q", "ī", "l", "íng"]), limit=1
+        )
+        self.assertEqual(capped, ["q ī l íng @七零", "j ī l íng @七零#1"])
+
+    def test_keyword_file_holds_the_wake_word_and_its_variants(self):
+        destination = Path(self.temporary.name) / "keywords.txt"
+        write_keyword_file("七零", self.tokens_path, destination, self.encode(["q", "ī", "l", "íng"]))
+
+        written = destination.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(written[0], "q ī l íng @七零")
+        self.assertIn("j ī l íng @七零#1", written)
+        self.assertEqual(written[-1], "q ī l ín @七零#3")
+
+    def test_syllable_similarity_ranks_tone_above_new_phonemes(self):
+        tone_slip = syllable_similarity(tone3_parts("qi1"), tone3_parts("qi4"))
+        near_final = syllable_similarity(tone3_parts("lin2"), tone3_parts("ling2"))
+        shared_final = syllable_similarity(tone3_parts("si4"), tone3_parts("qi1"))
+        other_word = syllable_similarity(tone3_parts("si4"), tone3_parts("ling2"))
+
+        self.assertAlmostEqual(tone_slip, 0.8)
+        self.assertAlmostEqual(near_final, 0.82)
+        self.assertAlmostEqual(shared_final, 0.45)
+        self.assertEqual(other_word, 0.0)
+        self.assertEqual(syllable_similarity(tone3_parts("qi1"), tone3_parts("qi1")), 1.0)
+
+    def test_exact_transcript_needs_no_pinyin(self):
+        self.assertTrue(is_wake_word_transcript(" 器灵。", "器灵"))
+        self.assertFalse(is_wake_word_transcript("器", "器灵"))
+
+    @unittest.skipUnless(PYPINYIN_AVAILABLE, "pypinyin is installed with the voice runtime")
+    def test_homophone_transcripts_wake_the_pet(self):
+        for transcript in ("欺凌欺凌", "其零其零", "麒麟麒麟", "七凌七凌"):
+            with self.subTest(transcript=transcript):
+                self.assertTrue(is_wake_word_transcript(transcript, "七零七零"))
+
+    @unittest.skipUnless(PYPINYIN_AVAILABLE, "pypinyin is installed with the voice runtime")
+    def test_unrelated_or_longer_transcripts_stay_questions(self):
+        for transcript in ("四零四零", "七零七三", "我刚才说了七零七零", "帮我解释一下什么是闭包"):
+            with self.subTest(transcript=transcript):
+                self.assertFalse(is_wake_word_transcript(transcript, "七零七零"))
+        self.assertIsNone(wake_word_similarity("我刚才说了七零七零", "七零七零"))
+
+    @unittest.skipUnless(PYPINYIN_AVAILABLE, "pypinyin is installed with the voice runtime")
+    def test_a_two_syllable_wake_word_tolerates_one_tone_slip(self):
+        self.assertFalse(is_wake_word_transcript("西灵", "器灵"))
+        self.assertTrue(is_wake_word_transcript("七零", "器灵"))
+        self.assertTrue(is_wake_word_transcript("麒麟", "器灵"))
+
+    @unittest.skipUnless(PYPINYIN_AVAILABLE, "pypinyin is installed with the voice runtime")
+    def test_a_homophone_transcript_starts_the_wake_acknowledgment(self):
+        events = []
+        flow = VoiceFlow(
+            FakeKeywordSpotter(),
+            FakeRecognizer("欺凌欺凌"),
+            events.append,
+            "七零七零",
+        )
+
+        flow.start()
+        flow.recognizer.endpoint = True
+        flow.feed([0.1] * 1600, now=1.0)
+
+        self.assertEqual(flow.state, "wake_acknowledgment")
+        self.assertEqual(events[-1], {"type": "state", "state": "wake_acknowledgment"})
 
 
 if __name__ == "__main__":

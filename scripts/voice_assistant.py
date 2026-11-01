@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -11,6 +12,7 @@ import queue
 import sys
 import threading
 import time
+import unicodedata
 from pathlib import Path
 from typing import Callable
 
@@ -94,27 +96,304 @@ def is_valid_wake_word(wake_word: str) -> bool:
     )
 
 
-def build_keyword_line(wake_word: str, tokens_path: str, encoder=None) -> str:
+# --- Wake-word phonetics -----------------------------------------------------
+# sherpa-onnx KWS matches the *token* sequence exactly, and Chinese keywords are
+# encoded as pinyin initials + finals (ppinyin). Two consequences shape the
+# matching below:
+#  * characters that share pinyin and tone are one and the same to the spotter,
+#    so the keyword file never needs homophone characters;
+#  * a near-homophone (零/麟, 落实/罗石, 见/剑 …) is a different token sequence and
+#    can only ever hit when its pronunciation is written into keywords.txt.
+# Layer 1 writes those near-homophone pronunciations next to the wake word; the
+# ASR fallback compares pinyin instead of characters, so a tone slip (七/欺/其)
+# still wakes the pet even though the KWS token sequence differs.
+INITIALS = (
+    "zh", "ch", "sh", "b", "p", "m", "f", "d", "t", "n", "l", "g", "k",
+    "h", "j", "q", "x", "r", "z", "c", "s", "y", "w",
+)
+# Pairs the acoustic model actually confuses; checked in both directions.
+NEAR_INITIALS = (
+    ("zh", "z"), ("ch", "c"), ("sh", "s"), ("n", "l"), ("r", "l"), ("f", "h"),
+    ("b", "p"), ("d", "t"), ("g", "k"), ("j", "q"), ("z", "c"), ("zh", "ch"),
+)
+NEAR_FINALS = (
+    ("ing", "in"), ("eng", "en"), ("ang", "an"), ("iang", "ian"), ("uan", "uang"),
+)
+TONE_MARKS = {"\u0304": "1", "\u0301": "2", "\u030c": "3", "\u0300": "4"}
+# How close a whole transcript must be to the wake word before it wakes the pet,
+# and how close every single syllable must be. Tones weigh least because the
+# acoustic model mishears them most often.
+WAKE_SIMILARITY_THRESHOLD = 0.75
+MIN_SYLLABLE_SIMILARITY = 0.35
+INITIAL_WEIGHT = 0.35
+FINAL_WEIGHT = 0.45
+TONE_WEIGHT = 0.2
+NEAR_INITIAL_SCORE = 0.5
+NEAR_FINAL_SCORE = 0.6
+# Keyword lines are cheap to match but each one widens what counts as the wake
+# word, so the generated set stays small and single-substitution only.
+MAX_KEYWORD_VARIANTS = 24
+_PYPINYIN = None
+_PYPINYIN_LOADED = False
+
+
+def load_pypinyin():
+    """Import pypinyin on demand; the fallback stays exact-match without it."""
+    global _PYPINYIN, _PYPINYIN_LOADED
+    if not _PYPINYIN_LOADED:
+        _PYPINYIN_LOADED = True
+        try:
+            _PYPINYIN = importlib.import_module("pypinyin")
+        except ImportError:
+            LOGGER.info("pypinyin 不可用；唤醒词兜底退回逐字精确匹配。")
+            _PYPINYIN = None
+    return _PYPINYIN
+
+
+def split_final_token(token: str) -> tuple[str, str]:
+    """Split a ppinyin final such as `uì` into (sound, tone). Tone 5 = no mark."""
+    tone = "5"
+    letters = []
+    for char in unicodedata.normalize("NFD", token):
+        if char in TONE_MARKS:
+            tone = TONE_MARKS[char]
+        else:
+            letters.append(char)
+    sound = unicodedata.normalize("NFC", "".join(letters)).lower().replace("v", "ü")
+    return sound, tone
+
+
+def tone3_parts(syllable: str) -> tuple[str, str, str]:
+    """Split a TONE3 syllable such as `ling2` into (initial, sound, tone)."""
+    tone = "5"
+    if syllable and syllable[-1] in "12345":
+        tone = syllable[-1]
+        syllable = syllable[:-1]
+    sound = syllable.lower().replace("v", "ü").replace("u:", "ü")
+    for initial in INITIALS:
+        if sound.startswith(initial) and len(sound) > len(initial):
+            return initial, sound[len(initial) :], tone
+    return "", sound, tone
+
+
+def pinyin_parts(text: str) -> tuple[tuple[str, str, str], ...] | None:
+    """Pinyin syllables of `text`, or None when pypinyin is unavailable."""
+    pypinyin = load_pypinyin()
+    if pypinyin is None or not text:
+        return None
+    syllables = pypinyin.lazy_pinyin(text, style=pypinyin.Style.TONE3)
+    if not syllables:
+        return None
+    return tuple(tone3_parts(syllable) for syllable in syllables)
+
+
+def near_pair(left: str, right: str, pairs) -> bool:
+    return (left, right) in pairs or (right, left) in pairs
+
+
+def competing_side(value: str, pairs) -> str | None:
+    """The confusable counterpart of `value` in one of `pairs`, if any."""
+    for left, right in pairs:
+        if value == left:
+            return right
+        if value == right:
+            return left
+    return None
+
+
+def syllable_similarity(
+    heard: tuple[str, str, str], wanted: tuple[str, str, str]
+) -> float:
+    """How much two pinyin syllables have in common, 0.0–1.0."""
+    heard_initial, heard_sound, heard_tone = heard
+    wanted_initial, wanted_sound, wanted_tone = wanted
+    if heard_initial == wanted_initial:
+        initial = 1.0
+    elif near_pair(heard_initial, wanted_initial, NEAR_INITIALS):
+        initial = NEAR_INITIAL_SCORE
+    else:
+        initial = 0.0
+    if heard_sound == wanted_sound:
+        final = 1.0
+    elif near_pair(heard_sound, wanted_sound, NEAR_FINALS):
+        final = NEAR_FINAL_SCORE
+    else:
+        final = 0.0
+    if initial == 0.0 and final == 0.0:
+        # Sharing a tone alone is no evidence of the same syllable.
+        return 0.0
+    tone = 1.0 if heard_tone == wanted_tone else 0.0
+    return INITIAL_WEIGHT * initial + FINAL_WEIGHT * final + TONE_WEIGHT * tone
+
+
+def wake_word_similarity(text: str, wake_word: str) -> float | None:
+    """Pinyin similarity of a transcript to the wake word, or None if not comparable.
+
+    Only whole utterances are compared, so a wake word buried inside a longer
+    sentence stays a question rather than a wake-up.
+    """
+    heard = pinyin_parts(text)
+    wanted = pinyin_parts(wake_word)
+    if heard is None or wanted is None or len(heard) != len(wanted):
+        return None
+    scores = [
+        syllable_similarity(heard_syllable, wanted_syllable)
+        for heard_syllable, wanted_syllable in zip(heard, wanted)
+    ]
+    if min(scores) < MIN_SYLLABLE_SIMILARITY:
+        return None
+    return sum(scores) / len(scores)
+
+
+def is_wake_word_transcript(text: str, wake_word: str) -> bool:
+    spoken = text.strip().strip(" \t\r\n，。！？!?、,.；;:：")
+    if spoken == wake_word:
+        return True
+    similarity = wake_word_similarity(spoken, wake_word)
+    if similarity is None:
+        return False
+    LOGGER.debug("Wake-word pinyin similarity %.2f for transcript: %s", similarity, spoken)
+    return similarity >= WAKE_SIMILARITY_THRESHOLD
+
+
+def encode_wake_word(
+    wake_word: str, tokens_path: str | Path, encoder=None
+) -> list[str]:
     if not is_valid_wake_word(wake_word):
         raise ValueError("wake_word_invalid")
     if encoder is None:
         from sherpa_onnx import text2token
 
         encoder = text2token
-    encoded = encoder([wake_word], tokens=tokens_path, tokens_type="ppinyin")
+    encoded = encoder([wake_word], tokens=str(tokens_path), tokens_type="ppinyin")
     if not encoded or not encoded[0]:
         raise ValueError("wake_word_encoding_failed")
-    return f"{' '.join(encoded[0])} @{wake_word}"
+    return list(encoded[0])
 
 
-def is_wake_word_transcript(text: str, wake_word: str) -> bool:
-    return text.strip().strip(" \t\r\n，。！？!?、,.；;:：") == wake_word
+def load_keyword_vocabulary(
+    tokens_path: Path,
+) -> tuple[frozenset[str], dict[str, tuple[str, str]]]:
+    """Initials and (sound, tone) of every pinyin token in the KWS token table."""
+    initials: set[str] = set()
+    finals: dict[str, tuple[str, str]] = {}
+    for line in Path(tokens_path).read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if len(parts) != 2 or not parts[1].isdigit():
+            continue
+        token = parts[0]
+        if token in INITIALS:
+            initials.add(token)
+        elif token.isalpha():
+            # English tokens (AA0) and special tokens (<blk>) cannot be pinyin.
+            finals[token] = split_final_token(token)
+    return frozenset(initials), finals
 
 
-def write_keyword_file(wake_word: str, tokens_path: Path, destination: Path) -> None:
-    line = build_keyword_line(wake_word, str(tokens_path))
+def split_keyword_syllables(
+    tokens: list[str], initials: frozenset[str], finals: dict[str, tuple[str, str]]
+) -> list[tuple[str, str]] | None:
+    """Group a keyword's tokens as (initial, final) pairs, or None if unknown."""
+    syllables: list[tuple[str, str]] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in initials:
+            if index + 1 >= len(tokens) or tokens[index + 1] not in finals:
+                return None
+            syllables.append((token, tokens[index + 1]))
+            index += 2
+        elif token in finals:
+            syllables.append(("", token))
+            index += 1
+        else:
+            return None
+    return syllables
+
+
+def keyword_variants(
+    tokens: list[str], tokens_path: Path, limit: int = MAX_KEYWORD_VARIANTS
+) -> list[tuple[str, ...]]:
+    """Near-homophone pronunciations of the wake word for keywords.txt.
+
+    Each variant swaps exactly one syllable's initial or final for a sound the
+    model confuses, so one misheard syllable still lands on a keyword line.
+    """
+    try:
+        initials, finals = load_keyword_vocabulary(tokens_path)
+    except OSError:
+        return []
+    syllables = split_keyword_syllables(tokens, initials, finals)
+    if syllables is None:
+        return []
+    by_sound = {(sound, tone): token for token, (sound, tone) in finals.items()}
+    base = tuple(tokens)
+    variants: list[tuple[str, ...]] = []
+    for position, (initial, final) in enumerate(syllables):
+        sound, tone = finals[final]
+        replacements: list[tuple[str, str]] = []
+        near_initial = competing_side(initial, NEAR_INITIALS)
+        if near_initial is not None:
+            replacements.append((near_initial, final))
+        near_final = competing_side(sound, NEAR_FINALS)
+        if near_final is not None:
+            # Keep the tone: a tone slip is the ASR fallback's job, not the KWS's.
+            alternative = by_sound.get((near_final, tone))
+            if alternative is not None:
+                replacements.append((initial, alternative))
+        for new_initial, new_final in replacements:
+            modified = list(syllables)
+            modified[position] = (new_initial, new_final)
+            flat: list[str] = []
+            for part_initial, part_final in modified:
+                if part_initial:
+                    flat.append(part_initial)
+                flat.append(part_final)
+            variant = tuple(flat)
+            if variant != base and variant not in variants:
+                variants.append(variant)
+                if len(variants) >= limit:
+                    return variants
+    return variants
+
+
+def build_keyword_line(wake_word: str, tokens_path: str, encoder=None) -> str:
+    tokens = encode_wake_word(wake_word, tokens_path, encoder)
+    return f"{' '.join(tokens)} @{wake_word}"
+
+
+def build_keyword_lines(
+    wake_word: str,
+    tokens_path: str | Path,
+    encoder=None,
+    limit: int = MAX_KEYWORD_VARIANTS,
+) -> list[str]:
+    """The wake word plus its near-homophone variants, one keyword line each."""
+    tokens = encode_wake_word(wake_word, tokens_path, encoder)
+    lines = [f"{' '.join(tokens)} @{wake_word}"]
+    variants = keyword_variants(tokens, Path(tokens_path), limit)
+    for index, variant in enumerate(variants, start=1):
+        lines.append(f"{' '.join(variant)} @{wake_word}#{index}")
+    return lines
+
+
+def write_keyword_file(
+    wake_word: str, tokens_path: Path, destination: Path, encoder=None
+) -> None:
+    lines = build_keyword_lines(wake_word, tokens_path, encoder)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(f"{line}\n", encoding="utf-8")
+    destination.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def keyword_from_result(result) -> str:
+    """The matched keyword label of a spotter result.
+
+    sherpa-onnx returns a plain string here (2.x); older builds handed back an
+    object with a `keyword` field, and both shapes must keep working.
+    """
+    if isinstance(result, str):
+        return result.strip()
+    return str(getattr(result, "keyword", "")).strip()
 
 
 class VoiceFlow:
@@ -174,14 +453,14 @@ class VoiceFlow:
             if self.recognizer.is_endpoint(self.debug_stream):
                 text = self.recognizer.get_result(self.debug_stream).strip()
                 if text:
-                    exact_wake_match = is_wake_word_transcript(text, self.wake_word)
+                    wake_match = is_wake_word_transcript(text, self.wake_word)
                     LOGGER.info(
-                        "ASR wake-listening transcript: %s; exact_wake_match=%s",
+                        "ASR wake-listening transcript: %s; wake_match=%s",
                         text,
-                        exact_wake_match,
+                        wake_match,
                     )
                     self.emit({"type": "debug_transcript", "text": text})
-                    if exact_wake_match:
+                    if wake_match:
                         self._begin_wake_acknowledgment(current_time)
                         return
                 self.recognizer.reset(self.debug_stream)
@@ -189,8 +468,9 @@ class VoiceFlow:
             self.keyword_stream.accept_waveform(SAMPLE_RATE, samples)
             while self.keyword_spotter.is_ready(self.keyword_stream):
                 self.keyword_spotter.decode_stream(self.keyword_stream)
-                result = self.keyword_spotter.get_result(self.keyword_stream)
-                keyword = getattr(result, "keyword", "")
+                keyword = keyword_from_result(
+                    self.keyword_spotter.get_result(self.keyword_stream)
+                )
                 if keyword:
                     LOGGER.info("KWS matched wake phrase: %s", keyword)
                     self.emit({"type": "debug_keyword", "text": keyword})
@@ -687,7 +967,13 @@ def main(argv: list[str] | None = None) -> int:
             emit({"type": "error", "code": "wake_word_invalid"})
             return 2
         write_keyword_file(args.wake_word, args.kws_dir / "tokens.txt", args.keywords)
-        LOGGER.info("Generated KWS keyword rule: %s", args.keywords.read_text(encoding="utf-8").strip())
+        keyword_lines = args.keywords.read_text(encoding="utf-8").splitlines()
+        LOGGER.info(
+            "Generated %s KWS keyword rule(s) for %s: %s",
+            len(keyword_lines),
+            args.wake_word,
+            " | ".join(keyword_lines),
+        )
         spotter, recognizer = create_engines(args.kws_dir, args.asr_dir, args.keywords)
         run_microphone(VoiceFlow(spotter, recognizer, emit, args.wake_word))
         return 0
