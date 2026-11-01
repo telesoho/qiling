@@ -113,6 +113,7 @@ pub struct NarrationResult {
 
 struct ActionDispatch {
     request_id: String,
+    action_id: String,
     timeout_ms: u64,
     response: oneshot::Sender<Result<NarrationResult, String>>,
 }
@@ -202,7 +203,8 @@ impl PairingManager {
                 return Err("credential_record_invalid".into());
             }
             validate_client(&client.client).map_err(|_| "credential_record_invalid")?;
-            validate_capabilities(&client.capabilities).map_err(|_| "credential_record_invalid")?;
+            validate_capabilities(&client.client.id, &client.capabilities)
+                .map_err(|_| "credential_record_invalid")?;
             inner.clients.insert(client.client_key.clone(), client);
         }
 
@@ -244,7 +246,7 @@ impl PairingManager {
         String,
     > {
         validate_client(&params.client)?;
-        validate_capabilities(&params.requested_capabilities)?;
+        validate_capabilities(&params.client.id, &params.requested_capabilities)?;
         let requested_code = params.pairing_code.trim().to_ascii_uppercase();
         let mut inner = self.inner.lock().map_err(|_| "pairing_state_unavailable")?;
         let Some(pairing) = inner.pairing.as_mut() else {
@@ -444,6 +446,16 @@ impl PairingManager {
         client_id: &str,
         action_timeout: Duration,
     ) -> Result<NarrationResult, String> {
+        self.invoke_action(client_id, "siju.narrate_current", action_timeout)
+            .await
+    }
+
+    pub async fn invoke_action(
+        &self,
+        client_id: &str,
+        action_id: &str,
+        action_timeout: Duration,
+    ) -> Result<NarrationResult, String> {
         let started_at = Instant::now();
         let timeout_ms = u64::try_from(action_timeout.as_millis())
             .unwrap_or(u64::MAX)
@@ -459,12 +471,19 @@ impl PairingManager {
                 .capabilities
                 .actions
                 .iter()
-                .any(|action| action.id == "siju.narrate_current")
+                .any(|action| action.id == action_id)
             {
-                return Err("not_authorized".into());
+                return Err("action_not_found".into());
             }
             record.client_key.clone()
         };
+        if !matches!(
+            (client_id, action_id),
+            ("com.siju.app", "siju.narrate_current")
+                | ("com.qiling.vscode", "vscode.explain_selection")
+        ) {
+            return Err("action_not_found".into());
+        }
         let request_id = Uuid::new_v4().to_string();
         let (response_tx, response_rx) = oneshot::channel();
         {
@@ -481,6 +500,7 @@ impl PairingManager {
                 .action_tx
                 .send(ActionDispatch {
                     request_id: request_id.clone(),
+                    action_id: action_id.to_string(),
                     timeout_ms,
                     response: response_tx,
                 })
@@ -508,7 +528,7 @@ impl PairingManager {
             .map(|_| "success")
             .unwrap_or_else(|code| code.as_str());
         eprintln!(
-            "[Spirit Action] request_id={request_id} client_id={client_id} action=siju.narrate_current outcome={status} elapsed_ms={}",
+            "[Spirit Action] request_id={request_id} client_id={client_id} action={action_id} outcome={status} elapsed_ms={}",
             started_at.elapsed().as_millis()
         );
         outcome
@@ -565,35 +585,55 @@ fn validate_client(client: &ClientInfo) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_capabilities(capabilities: &CapabilityManifest) -> Result<(), String> {
-    let expected_input = json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {}
-    });
-    let expected_output = json!({
-        "type": "object",
-        "required": ["text", "mood"],
-        "properties": {
-            "text": { "type": "string", "maxLength": 400 },
-            "mood": { "type": "string", "enum": ["neutral", "up", "down"] }
+fn action_capability(id: &str, risk: &str) -> ActionCapability {
+    ActionCapability {
+        id: id.into(),
+        risk: risk.into(),
+        input_schema: json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {}
+        }),
+        output_schema: json!({
+            "type": "object",
+            "required": ["text", "mood"],
+            "properties": {
+                "text": { "type": "string", "maxLength": 400 },
+                "mood": { "type": "string", "enum": ["neutral", "up", "down"] }
+            },
+            "additionalProperties": false
+        }),
+        supports_cancellation: false,
+    }
+}
+
+fn siju_capabilities() -> CapabilityManifest {
+    CapabilityManifest {
+        actions: vec![action_capability("siju.narrate_current", "no_state_change")],
+        events: EventCapabilities {
+            publishes: vec!["siju.analysis.status".into()],
+            subscribes: vec![],
         },
-        "additionalProperties": false
-    });
-    if capabilities.actions.len() != 1
-        || capabilities.actions[0].id != "siju.narrate_current"
-        || capabilities.actions[0].risk != "no_state_change"
-        || capabilities.actions[0].input_schema != expected_input
-        || capabilities.actions[0].output_schema != expected_output
-        || capabilities.actions[0].supports_cancellation
-        || capabilities.events.subscribes.len() > 0
-        || capabilities.events.publishes.len() > 1
-        || capabilities
-            .events
-            .publishes
-            .iter()
-            .any(|event| event != "siju.analysis.status")
-    {
+    }
+}
+
+fn vscode_capabilities() -> CapabilityManifest {
+    CapabilityManifest {
+        actions: vec![action_capability("vscode.explain_selection", "sensitive")],
+        events: EventCapabilities {
+            publishes: vec!["vscode.editor.status".into()],
+            subscribes: vec![],
+        },
+    }
+}
+
+fn validate_capabilities(client_id: &str, capabilities: &CapabilityManifest) -> Result<(), String> {
+    let expected = match client_id {
+        "com.siju.app" => siju_capabilities(),
+        "com.qiling.vscode" => vscode_capabilities(),
+        _ => return Err("unsupported_client".into()),
+    };
+    if capabilities != &expected {
         return Err("unsupported_capabilities".into());
     }
     Ok(())
@@ -889,7 +929,7 @@ async fn authenticated_session(
                     "id": dispatch.request_id,
                     "method": "action.invoke",
                     "params": {
-                        "action": "siju.narrate_current",
+                        "action": dispatch.action_id,
                         "arguments": {},
                         "timeoutMs": dispatch.timeout_ms
                     }
@@ -1056,7 +1096,12 @@ async fn handle_client_message(
             Ok(params) => params,
             Err(_) => return false,
         };
-    if params.event_type != "siju.analysis.status"
+    let expected_event = match client.client.id.as_str() {
+        "com.siju.app" => "siju.analysis.status",
+        "com.qiling.vscode" => "vscode.editor.status",
+        _ => return false,
+    };
+    if params.event_type != expected_event
         || !client
             .capabilities
             .events
@@ -1137,31 +1182,11 @@ mod tests {
     }
 
     fn manifest() -> CapabilityManifest {
-        CapabilityManifest {
-            actions: vec![ActionCapability {
-                id: "siju.narrate_current".into(),
-                risk: "no_state_change".into(),
-                input_schema: json!({
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {}
-                }),
-                output_schema: json!({
-                    "type": "object",
-                    "required": ["text", "mood"],
-                    "properties": {
-                        "text": { "type": "string", "maxLength": 400 },
-                        "mood": { "type": "string", "enum": ["neutral", "up", "down"] }
-                    },
-                    "additionalProperties": false
-                }),
-                supports_cancellation: false,
-            }],
-            events: EventCapabilities {
-                publishes: vec!["siju.analysis.status".into()],
-                subscribes: vec![],
-            },
-        }
+        siju_capabilities()
+    }
+
+    fn vscode_manifest() -> CapabilityManifest {
+        vscode_capabilities()
     }
 
     fn pair_params(code: &str) -> PairParams {
@@ -1173,6 +1198,18 @@ mod tests {
                 version: "0.1.0".into(),
             },
             requested_capabilities: manifest(),
+        }
+    }
+
+    fn vscode_pair_params(code: &str) -> PairParams {
+        PairParams {
+            pairing_code: code.into(),
+            client: ClientInfo {
+                id: "com.qiling.vscode".into(),
+                name: "Visual Studio Code".into(),
+                version: "0.1.0".into(),
+            },
+            requested_capabilities: vscode_manifest(),
         }
     }
 
@@ -1282,6 +1319,12 @@ mod tests {
             manager.request_pairing(params).unwrap_err(),
             "unsupported_capabilities"
         );
+        let mut unknown_client = pair_params(&pairing.code);
+        unknown_client.client.id = "com.example.arbitrary".into();
+        assert_eq!(
+            manager.request_pairing(unknown_client).unwrap_err(),
+            "unsupported_client"
+        );
         assert_eq!(manager.list_clients().unwrap().len(), 0);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -1374,7 +1417,8 @@ mod tests {
             match method {
                 "client.pair" => {
                     let params: PairParams = serde_json::from_value(params).unwrap();
-                    validate_capabilities(&params.requested_capabilities).unwrap();
+                    validate_capabilities(&params.client.id, &params.requested_capabilities)
+                        .unwrap();
                     checked += 1;
                 }
                 "client.authenticate" => {
@@ -1385,13 +1429,13 @@ mod tests {
                 "client.initialize" => {
                     let params: InitializeParams = serde_json::from_value(params).unwrap();
                     assert_eq!(params.protocol_version, "1");
-                    validate_capabilities(&params.capabilities).unwrap();
+                    validate_capabilities(&params.client.id, &params.capabilities).unwrap();
                     checked += 1;
                 }
                 _ => {}
             }
         }
-        assert_eq!(checked, 3);
+        assert_eq!(checked, 4);
     }
 
     #[tokio::test]
@@ -1580,6 +1624,159 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(matches!(close, ClientMessage::Close(_)));
+
+        server.abort();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn vscode_client_pairs_initializes_and_publishes_editor_status_over_wire() {
+        let (manager, directory) = manager();
+        let manager = Arc::new(manager);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let emitter: Arc<dyn ProtocolEventEmitter> =
+            Arc::new(move |event| event_tx.send(event).map_err(|err| err.to_string()));
+        let app = Router::new()
+            .route("/v1/connect", get(test_connect))
+            .with_state(WebSocketTestState {
+                manager: Arc::clone(&manager),
+                emitter,
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let pairing = manager.begin_pairing().unwrap();
+        let (mut pairing_socket, _) = connect_async(format!("ws://{addr}/v1/connect"))
+            .await
+            .unwrap();
+        send_client_json(
+            &mut pairing_socket,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "vscode-pair",
+                "method": "client.pair",
+                "params": vscode_pair_params(&pairing.code)
+            }),
+        )
+        .await;
+        let pending = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(pending) = manager.pending_pairings().unwrap().into_iter().next() {
+                    break pending;
+                }
+                tokio::select! {
+                    message = pairing_socket.next() => {
+                        panic!("expected an approval request, got {message:?}");
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        manager.approve_pairing(&pending.request_id).unwrap();
+        let token = receive_client_json(&mut pairing_socket).await["result"]["accessToken"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        pairing_socket.close(None).await.unwrap();
+
+        let (mut client_socket, _) = connect_async(format!("ws://{addr}/v1/connect"))
+            .await
+            .unwrap();
+        send_client_json(
+            &mut client_socket,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "vscode-auth",
+                "method": "client.authenticate",
+                "params": { "accessToken": token }
+            }),
+        )
+        .await;
+        assert_eq!(
+            receive_client_json(&mut client_socket).await["result"]["authenticated"],
+            true
+        );
+        send_client_json(
+            &mut client_socket,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "vscode-init",
+                "method": "client.initialize",
+                "params": {
+                    "protocolVersion": "1",
+                    "client": vscode_pair_params("unused").client,
+                    "capabilities": vscode_manifest()
+                }
+            }),
+        )
+        .await;
+        assert_eq!(
+            receive_client_json(&mut client_socket).await["result"]["grantedCapabilities"],
+            json!([
+                "vscode.explain_selection",
+                "event.publish:vscode.editor.status"
+            ])
+        );
+
+        send_client_json(
+            &mut client_socket,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "event.publish",
+                "params": {
+                    "eventId": "vscode-event-1",
+                    "eventType": "vscode.editor.status",
+                    "occurredAt": "2026-11-01T00:00:00Z",
+                    "payload": { "status": "ready" }
+                }
+            }),
+        )
+        .await;
+        let event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event["clientId"], "com.qiling.vscode");
+        assert_eq!(event["eventType"], "vscode.editor.status");
+        assert_eq!(event["payload"]["status"], "ready");
+
+        let invoke_manager = Arc::clone(&manager);
+        let invocation = tokio::spawn(async move {
+            invoke_manager
+                .invoke_action(
+                    "com.qiling.vscode",
+                    "vscode.explain_selection",
+                    Duration::from_secs(2),
+                )
+                .await
+        });
+        let action_request = receive_client_json(&mut client_socket).await;
+        assert_eq!(action_request["method"], "action.invoke");
+        assert_eq!(
+            action_request["params"]["action"],
+            "vscode.explain_selection"
+        );
+        send_client_json(
+            &mut client_socket,
+            json!({
+                "jsonrpc": "2.0",
+                "id": action_request["id"],
+                "result": { "text": "const answer = 42;", "mood": "neutral" }
+            }),
+        )
+        .await;
+        assert_eq!(
+            invocation.await.unwrap().unwrap(),
+            NarrationResult {
+                text: "const answer = 42;".into(),
+                mood: "neutral".into()
+            }
+        );
 
         server.abort();
         fs::remove_dir_all(directory).unwrap();

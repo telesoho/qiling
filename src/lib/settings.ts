@@ -1,13 +1,29 @@
 const STORAGE_KEY = 'qiling.settings'
 
+export type VoiceEnginePreference = 'auto' | 'cosyvoice' | 'system'
+
 export interface PetSettings {
   voice: boolean
   bubble: boolean
+  voiceAssistant: boolean
+  wakeWord: string
+  voiceEngine: VoiceEnginePreference
 }
 
 export const defaultPetSettings: PetSettings = {
   voice: true,
   bubble: true,
+  voiceAssistant: false,
+  wakeWord: '器灵',
+  voiceEngine: 'auto',
+}
+
+export function isValidWakeWord(wakeWord: string): boolean {
+  return /^[\u4e00-\u9fff]{2,8}$/.test(wakeWord)
+}
+
+export function isVoiceEnginePreference(value: unknown): value is VoiceEnginePreference {
+  return value === 'auto' || value === 'cosyvoice' || value === 'system'
 }
 
 type StorageLike = Pick<Storage, 'getItem' | 'setItem'>
@@ -31,6 +47,13 @@ export function loadQiLingSettings(): PetSettings {
     return {
       voice: parsed.voice !== false,
       bubble: parsed.bubble !== false,
+      voiceAssistant: parsed.voiceAssistant === true,
+      wakeWord: typeof parsed.wakeWord === 'string' && isValidWakeWord(parsed.wakeWord)
+        ? parsed.wakeWord
+        : defaultPetSettings.wakeWord,
+      voiceEngine: isVoiceEnginePreference(parsed.voiceEngine)
+        ? parsed.voiceEngine
+        : defaultPetSettings.voiceEngine,
     }
   } catch {
     return { ...defaultPetSettings }
@@ -43,6 +66,13 @@ export function saveQiLingSettings(settings: PetSettings): void {
   const safe: PetSettings = {
     voice: settings.voice !== false,
     bubble: settings.bubble !== false,
+    voiceAssistant: settings.voiceAssistant === true,
+    wakeWord: isValidWakeWord(settings.wakeWord)
+      ? settings.wakeWord
+      : defaultPetSettings.wakeWord,
+    voiceEngine: isVoiceEnginePreference(settings.voiceEngine)
+      ? settings.voiceEngine
+      : defaultPetSettings.voiceEngine,
   }
   store.setItem(STORAGE_KEY, JSON.stringify(safe))
   if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('qiling-settings'))

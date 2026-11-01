@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { QiLingPhase } from './phase'
+import { loadQiLingSettings, type VoiceEnginePreference } from './settings'
 
 export interface VoiceChoice {
   lang: string
@@ -36,7 +37,12 @@ export function planUtterance(input: {
 }
 
 /** CosyVoice is primary only when the local service health check says it is ready. */
-export function voiceEngineFor(status: { ready?: boolean } | null | undefined): 'cosyvoice' | 'system' {
+export function voiceEngineFor(
+  status: { ready?: boolean } | null | undefined,
+  preference: VoiceEnginePreference = 'auto',
+): 'cosyvoice' | 'system' {
+  if (preference === 'system') return 'system'
+  if (preference === 'cosyvoice') return 'cosyvoice'
   return status?.ready ? 'cosyvoice' : 'system'
 }
 
@@ -82,6 +88,7 @@ export function streamSpeakResult(input: {
 export interface VoiceRoute {
   engine: 'cosyvoice' | 'system'
   detail: string
+  preference: VoiceEnginePreference
 }
 
 const SYSTEM_DETAIL = '本机 CosyVoice 服务没接上，先用系统语音。'
@@ -235,7 +242,11 @@ function classifyLocalError(error: unknown): 'cancelled' | 'unavailable' | 'fail
 }
 
 export function noteVoiceFallback(): void {
-  routeMemo = { engine: 'system', detail: FALLBACK_DETAIL }
+  routeMemo = {
+    engine: 'system',
+    detail: FALLBACK_DETAIL,
+    preference: loadQiLingSettings().voiceEngine,
+  }
   if (typeof window === 'undefined') return
   window.dispatchEvent(new CustomEvent('qiling-voice-fallback'))
   void import('@tauri-apps/api/event')
@@ -254,20 +265,30 @@ async function cancelCosyVoice(): Promise<void> {
 }
 
 export async function loadVoiceRoute(): Promise<VoiceRoute> {
-  if (routeMemo) return routeMemo
+  const preference = loadQiLingSettings().voiceEngine
+  if (routeMemo?.preference === preference) return routeMemo
   if (!inTauri()) {
-    routeMemo = { engine: 'system', detail: SYSTEM_DETAIL }
+    routeMemo = { engine: 'system', detail: SYSTEM_DETAIL, preference }
+    return routeMemo
+  }
+  if (preference === 'system') {
+    routeMemo = { engine: 'system', detail: '使用 Windows 系统语音。', preference }
+    return routeMemo
+  }
+  if (preference === 'cosyvoice') {
+    routeMemo = { engine: 'cosyvoice', detail: '优先使用本机 CosyVoice。', preference }
     return routeMemo
   }
   try {
     const { invoke } = await import('@tauri-apps/api/core')
     const status = await invoke<LocalVoiceStatus>('qiling_voice_status')
     routeMemo = {
-      engine: voiceEngineFor(status),
+      engine: voiceEngineFor(status, preference),
       detail: status?.detail || SYSTEM_DETAIL,
+      preference,
     }
   } catch {
-    routeMemo = { engine: 'system', detail: SYSTEM_DETAIL }
+    routeMemo = { engine: 'system', detail: SYSTEM_DETAIL, preference }
   }
   return routeMemo
 }

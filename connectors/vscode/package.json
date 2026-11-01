@@ -1,0 +1,49 @@
+{
+  "name": "qiling-spirit-vscode",
+  "displayName": "Qiling Spirit Connector",
+  "description": "Connect Visual Studio Code to the local Spirit Protocol runtime.",
+  "version": "0.1.1",
+  "publisher": "qiling",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./extension.cjs",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "package": "npm exec --yes --package @vscode/vsce -- vsce package --allow-missing-repository"
+  },
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:qilingSpirit.pair",
+    "onCommand:qilingSpirit.connect",
+    "onCommand:qilingSpirit.disconnect",
+    "onCommand:qilingSpirit.selectModel"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "qilingSpirit.pair",
+        "title": "器灵：配对"
+      },
+      {
+        "command": "qilingSpirit.connect",
+        "title": "器灵：连接"
+      },
+      {
+        "command": "qilingSpirit.disconnect",
+        "title": "器灵：断开连接"
+      },
+      {
+        "command": "qilingSpirit.selectModel",
+        "title": "器灵：选择解释模型"
+      }
+    ]
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  }
+}

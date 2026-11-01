@@ -43,6 +43,10 @@ export function readLine(): PetLine {
   }
 }
 
+export function initialPetLine(isNative: boolean): PetLine {
+  return isNative ? { ...idleLine } : readLine()
+}
+
 export function publishLine(line: PetLine): void {
   const safe = sanitizeLine(line)
   try {

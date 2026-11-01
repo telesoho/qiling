@@ -113,7 +113,7 @@ WebSocket 文本帧承载 JSON 对象，遵循 JSON-RPC 2.0 的三种基本形�
 
 `event.publish` 是单向通知。事件至少包含 `eventId`、带命名空间的 `eventType`、UTC `occurredAt` 和受该事件 Schema 约束的 `payload`。连接初始化时双方分别声明可发布/可订阅的事件；未订阅事件不得被转发。
 
-事件只承载完成订阅所需的最小数据。识局可以发布 `siju.analysis.status`（例如 `ready`、`unavailable`），但不应为此把 FEN、棋盘图像或完整着法历史发送给器灵。事件不能隐式执行 Action。
+事件只承载完成订阅所需的最小数据。识局可以发布 `siju.analysis.status`（例如 `ready`、`unavailable`），VS Code 客户端可以发布 `vscode.editor.status`；状态事件不应包含棋局、选区或文件内容。事件不能隐式执行 Action。
 
 ### 5.3 试点 Action
 
@@ -143,10 +143,40 @@ WebSocket 文本帧承载 JSON 对象，遵循 JSON-RPC 2.0 的三种基本形�
 
 器灵以 `action.invoke` 请求执行此能力，参数为空。识局在处理时读取当前局面，并复用现有解说模式/模型设置；必须验证分析数据仍属于当前局面。成功结果只返回新解说文本和 mood，不返回 FEN、棋盘、候选着法、密钥或原始提示词。文本超过器灵现有 400 Unicode 码点上限时应返回明确错误，不得静默截断。
 
+### 5.4 第二客户端：VS Code 选区解释（阶段 5）
+
+当前实现仅接受下面这个受限 VS Code 客户端配置；配对申请会将客户端 ID、Action 风险和事件类型展示给用户：
+
+```json
+{
+  "id": "vscode.explain_selection",
+  "risk": "sensitive",
+  "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["text", "mood"],
+    "properties": {
+      "text": { "type": "string", "maxLength": 400 },
+      "mood": { "type": "string", "enum": ["neutral", "up", "down"] }
+    },
+    "additionalProperties": false
+  },
+  "supportsCancellation": false
+}
+```
+
+此 Action 是敏感读取：用户首次批准 VS Code 客户端及其选区解释能力；之后每次由用户点击器灵设置中的“解释当前选区”明确触发，不再重复弹窗。VS Code Connector 只读取活动编辑器选区（最多 8,000 Unicode 码点），不读取整个文件、不修改文件、不执行命令、不记录选区。首次使用时用户在 VS Code 中选择模型，Connector 会在 VS Code 本机记住选择；用户可通过“器灵：选择解释模型”命令更换。无选区、过长、没有可用模型、用户取消、超时或断线均以明确错误结束。模型提供方可能在本机或云端运行；用户应只选择自己已配置并允许处理该内容的模型。此 V1 连接器不绕过 VS Code 的模型访问/确认机制。
+
+VS Code 发布 `vscode.editor.status`，仅表达当前是否有可解释选区，不包含选区文本。用户批准配对授予该客户端能力资格；用户每次点击“解释当前选区”触发单次读取，随时可撤销配对授权。
+
 ## 6. 语音请求流程
 
 1. 用户主动启用唤醒词功能。启用期间器灵的本机检测器持续监听唤醒词；唤醒前音频仅用于瞬时本地检测，不写盘、不上传，也不保留为可回放录音。界面应清晰显示监听状态，并提供立即关闭入口。
-2. 检测到唤醒词后，器灵采集本次命令并进行 STT。默认本机识别；若本机 STT 不可用，告知用户且不调用 Action。用户可另行显式开启云端 STT；开启前说明发送的音频/文本、接收方及保留方式。云端识别不得用于唤醒词检测。
+2. 检测到唤醒词后，器灵先语音回应“我在，请说。”；回应播放完成后再采集本次命令并进行 STT，避免将器灵自己的回应录入问题。默认本机识别；若本机 STT 不可用，告知用户且不调用 Action。用户可另行显式开启云端 STT；开启前说明发送的音频/文本、接收方及保留方式。云端识别不得用于唤醒词检测。
 3. 意图匹配器只识别试点意图“重新解说当前局面”。不能可靠识别、发现多个候选或识别到其他意图时，不调用任何客户端 Action；提示用户重说或说明暂不支持。
 4. 命中唯一意图后，器灵检查识局在线、能力已登记且用户已批准，然后发送 `action.invoke`。
 5. 识局返回成功后，器灵显示/朗读这次请求返回的新文本。不能复用先前 `/v1/say` 的旧文本冒充结果。

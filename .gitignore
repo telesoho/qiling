@@ -1,6 +1,8 @@
 node_modules
 dist
 sdk/typescript/dist
+connectors/vscode/lib
+connectors/vscode/*.vsix
 .venv
 src-tauri/target
 src-tauri/gen

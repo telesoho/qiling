@@ -30,6 +30,7 @@ html.pet-window #root {
 }
 
 .pet-stage {
+  position: relative;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
@@ -39,6 +40,28 @@ html.pet-window #root {
   height: 100%;
   padding-bottom: 10px;
   user-select: none;
+}
+
+.voice-assistant-indicator {
+  position: absolute;
+  z-index: 4;
+  top: 8px;
+  right: 8px;
+  max-width: calc(100% - 24px);
+  padding: 4px 8px;
+  border: 1px solid rgba(67, 117, 76, 0.28);
+  border-radius: 12px;
+  background: rgba(245, 255, 246, 0.94);
+  color: #285d36;
+  font: 11px/1.3 "PingFang SC", "Microsoft YaHei", sans-serif;
+  text-align: center;
+  pointer-events: none;
+}
+
+.voice-assistant-indicator.is-error {
+  border-color: rgba(180, 35, 24, 0.28);
+  background: rgba(255, 246, 244, 0.96);
+  color: #b42318;
 }
 
 .pet-stage.is-preview {
@@ -214,21 +237,49 @@ html.pet-window #root {
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 18px;
   height: 100%;
   margin: 0;
   overflow-y: auto;
-  padding: 18px 20px;
+  padding: 20px;
   background: #fffaf6;
   color: #3a342e;
   font-family: "PingFang SC", "Noto Sans SC", "Microsoft YaHei", "Segoe UI", sans-serif;
   font-size: 14px;
+  scrollbar-color: #b89a7d #f3e8dc;
+  scrollbar-width: thin;
+  accent-color: #8a6040;
+  caret-color: #8a6040;
+  color-scheme: light;
+}
+
+.pet-settings ::selection {
+  background: #ead4bd;
+  color: #3a342e;
+}
+
+.settings-header {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.settings-header h1,
+.settings-header p {
+  margin: 0;
+}
+
+.settings-header h1 {
+  font-size: 21px;
+  line-height: 1.3;
 }
 
 .settings-section {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #e8d8c8;
 }
 
 .settings-section h1,
@@ -243,7 +294,8 @@ html.pet-window #root {
 }
 
 .settings-section h2 {
-  font-size: 15px;
+  margin-bottom: 2px;
+  font-size: 16px;
 }
 
 .settings-section h3 {
@@ -251,15 +303,74 @@ html.pet-window #root {
 }
 
 .settings-section p,
+.settings-header p,
 .settings-card span {
   color: #6b6259;
   font-size: 12px;
+  line-height: 1.55;
 }
 
 .pet-settings label {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.settings-toggle-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.wake-word-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wake-word-controls input,
+.pet-settings select,
+.settings-section input[type="text"]:not(#voice-wake-word),
+.settings-section input[type="url"],
+.settings-section input[type="password"] {
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: 34px;
+  padding: 6px 9px;
+  border: 1px solid #cdb9a5;
+  border-radius: 6px;
+  background: #fff;
+  color: #3a342e;
+  font: inherit;
+}
+
+.wake-word-controls input {
+  width: 9em;
+}
+
+.pet-settings select {
+  max-width: 100%;
+}
+
+.settings-section input[type="text"]:not(#voice-wake-word),
+.settings-section input[type="url"],
+.settings-section input[type="password"] {
+  width: 100%;
+}
+
+.wake-word-controls input:focus-visible,
+.pet-settings select:focus-visible,
+.settings-section input[type="text"]:not(#voice-wake-word):focus-visible,
+.settings-section input[type="url"]:focus-visible,
+.settings-section input[type="password"]:focus-visible {
+  outline: 2px solid #8a6040;
+  outline-offset: 2px;
+}
+
+.wake-word-controls button:disabled,
+.pet-settings button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .settings-list {
@@ -280,12 +391,37 @@ html.pet-window #root {
 
 .settings-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
 .pet-settings button {
   width: fit-content;
   padding: 5px 9px;
+  border: 1px solid #cdb9a5;
+  border-radius: 6px;
+  background: #fff;
+  color: #3a342e;
+  font: inherit;
+  cursor: pointer;
+  transition: background-color 140ms ease-out, border-color 140ms ease-out;
+}
+
+.pet-settings button:hover:not(:disabled) {
+  border-color: #ad8967;
+  background: #f7eee5;
+}
+
+.pet-settings button:focus-visible {
+  outline: 2px solid #8a6040;
+  outline-offset: 2px;
+}
+
+.llm-privacy-note {
+  padding: 9px 10px;
+  border-radius: 7px;
+  background: #f3e8dc;
+  color: #594635 !important;
 }
 
 .pairing-code strong {
@@ -296,4 +432,12 @@ html.pet-window #root {
 
 .settings-error {
   color: #b42318 !important;
+}
+
+.settings-status {
+  color: #356344 !important;
+}
+
+.voice-transcript {
+  overflow-wrap: anywhere;
 }

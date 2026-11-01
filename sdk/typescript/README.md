@@ -2,6 +2,8 @@
 
 `@qiling/spirit-client` is the first reference SDK for Spirit Protocol V1. It targets Node.js 22+ and uses the built-in WebSocket implementation; the package has no runtime dependencies. The credential store is supplied by the host application so access tokens can be kept in the operating system credential vault rather than a plaintext file.
 
+Two constrained client profiles are supported: Siju (`com.siju.app`) and the experimental VS Code connector (`com.qiling.vscode`). The SDK rejects unknown client identities rather than accepting arbitrary capabilities.
+
 ## Build
 
 From the Qiling repository root:
@@ -40,7 +42,7 @@ Call `publishAnalysisStatus('unavailable')` when the action cannot run. `unpair(
 
 The console example is an intentionally small protocol smoke-test provider, not a chess engine. It publishes the readiness event and returns a fixed line for `siju.narrate_current`.
 
-The current Qiling V1 runtime supports the Siju identity/capability profile and allows only one authorization for `com.siju.app`. To run this sample against the desktop app:
+The console example uses the Siju identity and Qiling allows one authorization for `com.siju.app`. To run this sample against the desktop app:
 
 1. If the real Siju client is paired, revoke its authorization in Qiling settings and close Siju.
 2. In Qiling settings, generate a one-time pairing code.
@@ -56,10 +58,10 @@ The current Qiling V1 runtime supports the Siju identity/capability profile and 
 5. Trigger “请识局重新解说当前局面”. Qiling should display/speak the sample result.
 6. Stop the sample, revoke the sample's authorization in Qiling settings, then pair Siju again.
 
-The sample uses an in-memory credential store only for this process. Production applications must provide a system credential-vault adapter. The current Qiling runtime's Siju-only capability allowlist is a documented V1 limitation; supporting arbitrary client identities and capabilities requires a separate protocol/runtime change.
+The sample uses an in-memory credential store only for this process. Production applications must provide a system credential-vault adapter.
 
 ## Supported profile and compatibility
 
-This release implements pairing, authentication, initialization, `siju.analysis.status`, `siju.narrate_current`, unpairing, a 10-second default connection timeout, request timeouts, and connection loss handling for the profile in `docs/spirit-protocol-v1.md`. It does not implement cancellation, arbitrary event subscriptions, or generic Action dispatch. Unknown capabilities are not silently downgraded. The protocol's declared limits are a 64 KiB message and a default 60-second Action timeout.
+This release implements pairing, authentication, initialization, the Siju and VS Code profile-specific status events and Actions, unpairing, a 10-second default connection timeout, request timeouts, and connection loss handling. The VS Code profile reads a bounded active selection only after the user confirms the request in Qiling, then uses a language model selected in VS Code. It does not implement cancellation, arbitrary event subscriptions, or generic Action dispatch. Unknown capabilities are not silently downgraded. The protocol's declared limits are a 64 KiB message and a default 60-second Action timeout.
 
 The package follows semantic versioning. `0.x` is experimental: pin the version and review the changelog/contract tests when upgrading. Protocol version `"1"` is negotiated during `connect()`; an unsupported version or server authorization error rejects the connection.

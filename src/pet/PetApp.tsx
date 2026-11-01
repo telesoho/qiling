@@ -1,9 +1,15 @@
 import { invoke } from '@tauri-apps/api/core'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { QiLingPhase } from '../lib/phase'
-import { readLine, subscribeLine, type PetLine } from '../lib/line'
+import { idleLine, initialPetLine, publishLine, subscribeLine, type PetLine } from '../lib/line'
 import { closeSpeechBubble, loadQiLingSettings, saveQiLingSettings, watchQiLingSettings } from '../lib/settings'
 import { usePetSpeech } from '../lib/speech'
+import {
+  WAKE_ACKNOWLEDGMENT,
+  shouldResumeAfterWakeAcknowledgment,
+  voiceAssistantStateLabel,
+  type VoiceAssistantEvent,
+} from '../lib/voice-assistant'
 import { loadAnimLibrary, phaseDurationMs, phaseImageUrl, preloadTrack, type AnimLibrary } from './anim'
 import { publishBubble } from './bubbleSync'
 import { PetSpeechBubble } from './PetControls'
@@ -20,12 +26,11 @@ function speakPhase(phase: LinePhase): QiLingPhase {
 }
 
 export default function PetApp(): JSX.Element {
-  const [line, setLine] = useState<PetLine>(readLine)
+  const [line, setLine] = useState<PetLine>(() => initialPetLine(inTauri()))
   const [voice, setVoiceOn] = useState(() => loadQiLingSettings().voice)
   const [stateId, setStateId] = useState<PetStateId>(() => {
-    const current = readLine()
-    if (current.phase !== 'idle') {
-      return poseForLine({ ...current, voice: loadQiLingSettings().voice, playback: 'waiting' })
+    if (line.phase !== 'idle') {
+      return poseForLine({ ...line, voice: loadQiLingSettings().voice, playback: 'waiting' })
     }
     return readPetState()
   })
@@ -34,9 +39,14 @@ export default function PetApp(): JSX.Element {
   const [library, setLibrary] = useState<AnimLibrary | null>(null)
   const [shown, setShown] = useState(() => !inTauri())
   const [bubbleOpen, setBubbleOpen] = useState(() => loadQiLingSettings().bubble)
+  const [voiceAssistantState, setVoiceAssistantState] = useState(
+    () => loadQiLingSettings().voiceAssistant ? 'starting' : 'stopped',
+  )
   const [ready, setReady] = useState(() => !inTauri())
   const published = useRef<PetStateId | null>(null)
   const sawLine = useRef(false)
+  const wakeAcknowledgmentSpoken = useRef(false)
+  const wakeAcknowledgmentResumeRequested = useRef(false)
   const stateRef = useRef(stateId)
   stateRef.current = stateId
   const state = petState(stateId)
@@ -108,12 +118,125 @@ export default function PetApp(): JSX.Element {
     if (!segments && pickup !== 'idle') setPickup('idle')
   }, [segments, pickup])
 
-  useEffect(() => subscribeLine(setLine), [])
+  useEffect(() => {
+    if (inTauri()) publishLine(idleLine)
+    return subscribeLine(setLine)
+  }, [])
+
+  useEffect(() => {
+    if (voiceAssistantState !== 'wake_acknowledgment') {
+      wakeAcknowledgmentSpoken.current = false
+      wakeAcknowledgmentResumeRequested.current = false
+      return
+    }
+
+    if (
+      voice &&
+      line.phase === 'say' &&
+      line.text === WAKE_ACKNOWLEDGMENT &&
+      speech.audibleLine === WAKE_ACKNOWLEDGMENT
+    ) {
+      wakeAcknowledgmentSpoken.current = true
+    }
+
+    if (
+      !shouldResumeAfterWakeAcknowledgment({
+        state: voiceAssistantState,
+        voice,
+        acknowledgmentWasAudible: wakeAcknowledgmentSpoken.current,
+        speaking: speech.speaking,
+        heardLine: speech.heardLine,
+      })
+    ) return
+    if (wakeAcknowledgmentResumeRequested.current) return
+
+    wakeAcknowledgmentResumeRequested.current = true
+    void invoke('qiling_voice_assistant_listen').catch((error: unknown) => {
+      setVoiceAssistantState('error')
+      console.warn('唤醒回应后无法开始语音识别', String(error))
+    })
+  }, [
+    line.phase,
+    line.text,
+    speech.audibleLine,
+    speech.heardLine,
+    speech.speaking,
+    voice,
+    voiceAssistantState,
+  ])
 
   useEffect(() => watchQiLingSettings((next) => {
     setVoiceOn(next.voice)
     setBubbleOpen(next.bubble)
   }), [])
+
+  useEffect(() => {
+    if (!inTauri()) return
+    let active = true
+    let unlisten: (() => void) | undefined
+    let stateEventRevision = 0
+    const handledTranscripts = new Set<number>()
+    void import('@tauri-apps/api/event')
+      .then(async ({ listen }) => {
+        const applyState = (nextState: string) => {
+          setVoiceAssistantState(nextState)
+          if (nextState === 'wake_acknowledgment') {
+            publishLine({
+              phase: 'say',
+              text: WAKE_ACKNOWLEDGMENT,
+              mood: 'neutral',
+            })
+          }
+        }
+        const stop = await listen<VoiceAssistantEvent>(
+          'voice-assistant-event',
+          ({ payload }) => {
+            if (payload.type === 'state' && payload.state) {
+              stateEventRevision += 1
+              applyState(payload.state)
+            } else if (payload.type === 'error') {
+              stateEventRevision += 1
+              setVoiceAssistantState('error')
+            } else if (
+              payload.type === 'transcript' &&
+              typeof payload.id === 'number' &&
+              typeof payload.text === 'string' &&
+              !handledTranscripts.has(payload.id)
+            ) {
+              handledTranscripts.add(payload.id)
+              if (handledTranscripts.size > 64) {
+                const oldest = handledTranscripts.values().next().value
+                if (typeof oldest === 'number') handledTranscripts.delete(oldest)
+              }
+              void invoke('qiling_voice_assistant_respond', { text: payload.text }).catch((error: unknown) => {
+                console.warn('本机语音对话失败', String(error))
+              })
+            }
+          },
+        )
+        if (active) unlisten = stop
+        else stop()
+        if (active && loadQiLingSettings().voiceAssistant) {
+          setVoiceAssistantState('starting')
+          await invoke('qiling_voice_assistant_start', {
+            wakeWord: loadQiLingSettings().wakeWord,
+          })
+          const revision = stateEventRevision
+          const currentState = await invoke<string>('qiling_voice_assistant_status')
+          if (active && stateEventRevision === revision) applyState(currentState)
+        }
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setVoiceAssistantState('error')
+          console.warn('本机语音服务不可用', String(error))
+        }
+      })
+    return () => {
+      active = false
+      unlisten?.()
+    }
+  }, [])
 
   useEffect(() => {
     if (!inTauri()) return
@@ -252,6 +375,10 @@ export default function PetApp(): JSX.Element {
   function hide() {
     drag.cancel()
     speech.interrupt()
+    if (loadQiLingSettings().voiceAssistant) {
+      saveQiLingSettings({ ...loadQiLingSettings(), voiceAssistant: false })
+      setVoiceAssistantState('stopped')
+    }
     setShown(false)
     void setPetWindowOpen(false)
   }
@@ -316,6 +443,15 @@ export default function PetApp(): JSX.Element {
           )}
         </div>
       </div>
+      {inTauri() && voiceAssistantState !== 'stopped' && (
+        <div
+          className={`voice-assistant-indicator is-${voiceAssistantState}`}
+          role="status"
+          aria-live="polite"
+        >
+          {voiceAssistantStateLabel(voiceAssistantState)}
+        </div>
+      )}
     </div>
   )
 }

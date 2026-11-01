@@ -12,6 +12,15 @@ commands.allow = [
   "qiling_voice_status",
   "qiling_voice_synthesize",
   "qiling_voice_cancel",
+  "qiling_llm_get_settings",
+  "qiling_llm_save_settings",
+  "qiling_llm_test_connection",
+  "qiling_voice_assistant_start",
+  "qiling_voice_assistant_status",
+  "qiling_voice_assistant_cancel",
+  "qiling_voice_assistant_listen",
+  "qiling_voice_assistant_stop",
+  "qiling_voice_assistant_respond",
   "spirit_start_pairing",
   "spirit_pending_pairings",
   "spirit_approve_pairing",
@@ -19,5 +28,6 @@ commands.allow = [
   "spirit_list_clients",
   "spirit_revoke_client",
   "spirit_invoke_narrate_current",
+  "spirit_invoke_vscode_explain_selection",
   "pet_menu"
 ]

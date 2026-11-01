@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:qiling:spirit-protocol:v1",
   "title": "Spirit Protocol V1 message envelope",
-  "description": "JSON-RPC 2.0 message shapes for Spirit Protocol V1, including the implemented pairing, status-event, and siju.narrate_current Action contracts.",
+  "description": "JSON-RPC 2.0 message shapes for Spirit Protocol V1, including the constrained Siju and VS Code client profiles, status events, and approved Actions.",
   "oneOf": [
     { "$ref": "#/$defs/clientPairRequest" },
     { "$ref": "#/$defs/clientAuthenticateRequest" },
@@ -89,6 +89,52 @@
             "subscribes": []
           }
         }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "vscode-pair-1",
+      "method": "client.pair",
+      "params": {
+        "pairingCode": "ABCDEFGH",
+        "client": {
+          "id": "com.qiling.vscode",
+          "name": "Visual Studio Code",
+          "version": "0.1.0"
+        },
+        "requestedCapabilities": {
+          "actions": [
+            {
+              "id": "vscode.explain_selection",
+              "risk": "sensitive",
+              "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+              "outputSchema": {
+                "type": "object",
+                "required": ["text", "mood"],
+                "properties": {
+                  "text": { "type": "string", "maxLength": 400 },
+                  "mood": { "type": "string", "enum": ["neutral", "up", "down"] }
+                },
+                "additionalProperties": false
+              },
+              "supportsCancellation": false
+            }
+          ],
+          "events": {
+            "publishes": ["vscode.editor.status"],
+            "subscribes": []
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "vscode-action-1",
+      "method": "action.invoke",
+      "params": {
+        "action": "vscode.explain_selection",
+        "arguments": {},
+        "timeoutMs": 60000
       }
     },
     {

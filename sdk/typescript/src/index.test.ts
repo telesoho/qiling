@@ -80,6 +80,157 @@ function replyTo(socket: MockSocket, message: Record<string, unknown>, result: u
 }
 
 describe('SpiritClient', () => {
+  it('declares the VS Code capability profile for a second client identity', async () => {
+    const sockets: MockSocket[] = []
+    const client = new SpiritClient({
+      identity: {
+        id: 'com.qiling.vscode',
+        name: 'Visual Studio Code',
+        version: '0.1.0',
+      },
+      credentials: new MemoryCredentials(),
+      onExplainSelection: async () => ({ text: 'const answer = 42;', mood: 'neutral' }),
+      createWebSocket: () => {
+        const socket = new MockSocket((message) => {
+          if (message.method === 'client.pair') {
+            replyTo(socket, message, {
+              clientId: 'com.qiling.vscode',
+              accessToken: 'vscode-token-with-enough-length-123456',
+            })
+          }
+        })
+        sockets.push(socket)
+        return socket
+      },
+    })
+
+    await client.pair('ABCDEFGH')
+
+    expect(sockets[0].sent[0]).toMatchObject({
+      method: 'client.pair',
+      params: {
+        client: { id: 'com.qiling.vscode' },
+        requestedCapabilities: {
+          actions: [{ id: 'vscode.explain_selection', risk: 'sensitive' }],
+          events: { publishes: ['vscode.editor.status'] },
+        },
+      },
+    })
+  })
+
+  it('connects a VS Code client, publishes editor status, and returns bounded selection text', async () => {
+    const credentials = new MemoryCredentials()
+    const sockets: MockSocket[] = []
+    const client = new SpiritClient({
+      identity: {
+        id: 'com.qiling.vscode',
+        name: 'Visual Studio Code',
+        version: '0.1.0',
+      },
+      credentials,
+      onExplainSelection: async () => ({ text: 'const answer = 42;', mood: 'neutral' }),
+      createWebSocket: () => {
+        const socket = new MockSocket((message) => {
+          if (message.method === 'client.pair') {
+            replyTo(socket, message, {
+              clientId: 'com.qiling.vscode',
+              accessToken: 'vscode-token-with-enough-length-123456',
+            })
+          } else if (message.method === 'client.authenticate') {
+            replyTo(socket, message, {
+              authenticated: true,
+              clientId: 'com.qiling.vscode',
+            })
+          } else if (message.method === 'client.initialize') {
+            replyTo(socket, message, {
+              protocolVersion: '1',
+              grantedCapabilities: [
+                'vscode.explain_selection',
+                'event.publish:vscode.editor.status',
+              ],
+            })
+          }
+        })
+        sockets.push(socket)
+        return socket
+      },
+    })
+
+    await client.pair('ABCDEFGH')
+    await client.connect()
+    expect(client.connectionState).toBe('connected')
+    await client.publishEditorStatus('ready')
+    expect(sockets[1].sent.at(-1)).toMatchObject({
+      method: 'event.publish',
+      params: {
+        eventType: 'vscode.editor.status',
+        payload: { status: 'ready' },
+      },
+    })
+
+    sockets[1].notify({
+      jsonrpc: '2.0',
+      id: 'selection-1',
+      method: 'action.invoke',
+      params: { action: 'vscode.explain_selection', arguments: {}, timeoutMs: 1_000 },
+    })
+    await viWaitFor(() =>
+      expect(sockets[1].sent.at(-1)).toMatchObject({
+        id: 'selection-1',
+        result: { text: 'const answer = 42;', mood: 'neutral' },
+      }),
+    )
+  })
+
+  it('aborts a running Action handler when its connection is closed', async () => {
+    const credentials = new MemoryCredentials()
+    credentials.token = 'vscode-token-with-enough-length-123456'
+    const sockets: MockSocket[] = []
+    let actionSignal: AbortSignal | undefined
+    const client = new SpiritClient({
+      identity: {
+        id: 'com.qiling.vscode',
+        name: 'Visual Studio Code',
+        version: '0.1.0',
+      },
+      credentials,
+      onExplainSelection: (signal) => {
+        actionSignal = signal
+        return new Promise(() => {})
+      },
+      createWebSocket: () => {
+        const socket = new MockSocket((message) => {
+          if (message.method === 'client.authenticate') {
+            replyTo(socket, message, { authenticated: true, clientId: 'com.qiling.vscode' })
+          } else if (message.method === 'client.initialize') {
+            replyTo(socket, message, {
+              protocolVersion: '1',
+              grantedCapabilities: [
+                'vscode.explain_selection',
+                'event.publish:vscode.editor.status',
+              ],
+            })
+          }
+        })
+        sockets.push(socket)
+        return socket
+      },
+    })
+
+    await client.connect()
+    sockets[0].notify({
+      jsonrpc: '2.0',
+      id: 'selection-2',
+      method: 'action.invoke',
+      params: { action: 'vscode.explain_selection', arguments: {}, timeoutMs: 60_000 },
+    })
+    await viWaitFor(() => expect(actionSignal).toBeDefined())
+
+    sockets[0].close()
+
+    expect(actionSignal?.aborted).toBe(true)
+  })
+
   it('pairs, authenticates, publishes status, handles the approved Action, and unpairs', async () => {
     const credentials = new MemoryCredentials()
     const sockets: MockSocket[] = []
