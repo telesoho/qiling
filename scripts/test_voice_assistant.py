@@ -227,7 +227,7 @@ class VoiceFlowTests(unittest.TestCase):
         asr.endpoint = True
         flow.feed([0.2] * 1600, now=2.4)
 
-        self.assertEqual(flow.state, "listening")
+        self.assertEqual(flow.state, "conversing")
         self.assertTrue(all(event["type"] != "transcript" for event in events))
 
     def test_acknowledgment_echo_matching_ignores_punctuation(self):
@@ -236,13 +236,13 @@ class VoiceFlowTests(unittest.TestCase):
         self.assertFalse(is_acknowledgment_echo("今天天气怎么样"))
         self.assertFalse(is_acknowledgment_echo("，"))
 
-    def test_listening_resumes_only_after_the_speaker_tail_settles(self):
+    def test_the_conversation_resumes_only_after_the_speaker_tail_settles(self):
         events = []
         flow = VoiceFlow(FakeKeywordSpotter(), FakeRecognizer(), events.append, "器灵")
 
         flow.start()
-        flow._begin_wake_acknowledgment()
-        flow.begin_recognition(now=1.0)
+        flow._begin_wake_acknowledgment(now=1.0)
+        flow.begin_recognition(now=1.2)
         flow.recognizer.endpoint = True
         flow.feed([0.1] * 1600, now=2.0)
         self.assertEqual(flow.state, "responding")
@@ -253,8 +253,8 @@ class VoiceFlowTests(unittest.TestCase):
         self.assertEqual(flow.state, "settle")
 
         flow.feed([0.1] * 1600, now=3.5)
-        self.assertEqual(flow.state, "listening")
-        self.assertEqual(events[-1], {"type": "state", "state": "listening"})
+        self.assertEqual(flow.state, "conversing")
+        self.assertEqual(events[-1], {"type": "state", "state": "conversing"})
 
     def test_listen_starts_the_question_after_the_wake_acknowledgment(self):
         events = []
@@ -449,21 +449,166 @@ class VoiceFlowTests(unittest.TestCase):
 
         self.assertEqual(flow.state, "recognizing")
 
-    def test_a_reply_that_never_reports_back_releases_the_microphone(self):
+    def test_a_reply_that_never_reports_back_returns_to_the_conversation(self):
         events = []
         flow = VoiceFlow(FakeKeywordSpotter(), FakeRecognizer(), events.append, "器灵")
 
         flow.start()
-        flow._begin_wake_acknowledgment()
-        flow.begin_recognition(now=1.0)
+        flow._begin_wake_acknowledgment(now=1.0)
+        flow.begin_recognition(now=1.2)
         flow.recognizer.endpoint = True
         flow.feed([0.1] * 1600, now=2.0)
         self.assertEqual(flow.state, "responding")
 
         flow.feed([0.1] * 1600, now=2.0 + 61.0)
+        self.assertEqual(flow.state, "settle")
+        flow.feed([0.1] * 1600, now=63.5)
 
+        self.assertEqual(flow.state, "conversing")
+        self.assertEqual(events[-1], {"type": "state", "state": "conversing"})
+
+    def test_a_follow_up_question_needs_no_wake_word(self):
+        events = []
+        kws = FakeKeywordSpotter()
+        asr = FakeRecognizer()
+        flow = VoiceFlow(kws, asr, events.append, "器灵")
+
+        flow.start()
+        kws.detect = True
+        flow.feed([0.1] * 1600, now=1.0)
+        flow.begin_recognition(now=2.0)
+        asr.endpoint = True
+        flow.feed([0.2] * 1600, now=3.0)
+        self.assertEqual(flow.state, "responding")
+
+        flow.spoken(now=3.2)
+        flow.feed([0.2] * 1600, now=3.7)
+        self.assertEqual(flow.state, "conversing")
+
+        # No keyword detector hit is needed for the next question.
+        asr.result = "那闭包有什么用"
+        asr.endpoint = True
+        flow.feed([0.3] * 1600, now=4.0)
+
+        self.assertEqual(flow.state, "responding")
+        self.assertEqual(
+            events[-1],
+            {"type": "transcript", "id": 2, "text": "那闭包有什么用"},
+        )
+
+    def test_waiting_after_the_wake_word_stays_awake_until_the_timeout(self):
+        events = []
+        asr = FakeRecognizer()
+        flow = VoiceFlow(FakeKeywordSpotter(), asr, events.append, "器灵")
+
+        flow.start()
+        flow._begin_wake_acknowledgment(now=1.0)
+        flow.begin_recognition(now=2.0)
+
+        # Starting to speak too late only restarts the question, not the whole wake.
+        flow.feed([0.1] * 1600, now=14.1)
+        self.assertEqual(flow.state, "conversing")
+
+        flow.feed([0.1] * 1600, now=301.0)
         self.assertEqual(flow.state, "listening")
         self.assertEqual(events[-1], {"type": "state", "state": "listening"})
+
+        # Back to non-awake: a new question needs the wake word again.
+        asr.result = "继续问"
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=302.0)
+        self.assertEqual(flow.state, "listening")
+        self.assertTrue(all(event["type"] != "transcript" for event in events))
+
+    def test_a_follow_up_question_refreshes_the_five_minute_window(self):
+        events = []
+        asr = FakeRecognizer()
+        flow = VoiceFlow(FakeKeywordSpotter(), asr, events.append, "器灵")
+
+        flow.start()
+        flow._begin_wake_acknowledgment(now=1.0)
+        flow.begin_recognition(now=2.0)
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=3.0)
+        flow.spoken(now=3.2)
+        flow.feed([0.1] * 1600, now=3.7)
+        self.assertEqual(flow.state, "conversing")
+
+        asr.result = "第二个问题"
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=290.0)
+        self.assertEqual(flow.state, "responding")
+
+        flow.spoken(now=290.5)
+        flow.feed([0.1] * 1600, now=291.0)
+        self.assertEqual(flow.state, "conversing")
+
+        # The last question moved the deadline from 303 s to 590 s.
+        flow.feed([0.1] * 1600, now=589.0)
+        self.assertEqual(flow.state, "conversing")
+        flow.feed([0.1] * 1600, now=590.0)
+        self.assertEqual(flow.state, "listening")
+
+    def test_cancel_while_conversing_returns_to_wake_listening(self):
+        flow = VoiceFlow(
+            FakeKeywordSpotter(), FakeRecognizer(), lambda _event: None, "器灵"
+        )
+
+        flow.start()
+        flow._begin_wake_acknowledgment(now=1.0)
+        flow.begin_recognition(now=2.0)
+        flow.recognizer.endpoint = True
+        flow.feed([0.1] * 1600, now=3.0)
+        flow.spoken(now=3.2)
+        flow.feed([0.1] * 1600, now=3.7)
+        self.assertEqual(flow.state, "conversing")
+
+        flow.cancel()
+
+        self.assertEqual(flow.state, "listening")
+        self.assertEqual(flow.awake_until, 0)
+
+    def test_another_client_line_does_not_end_the_conversation(self):
+        events = []
+        flow = VoiceFlow(FakeKeywordSpotter(), FakeRecognizer(), events.append, "器灵")
+
+        flow.start()
+        flow._begin_wake_acknowledgment(now=1.0)
+        flow.begin_recognition(now=2.0)
+        flow.recognizer.endpoint = True
+        flow.feed([0.1] * 1600, now=3.0)
+        flow.spoken(now=3.2)
+        flow.feed([0.1] * 1600, now=3.7)
+        self.assertEqual(flow.state, "conversing")
+
+        flow.speak("识局送来的一句解说。", now=4.0)
+        flow.feed([0.1] * 1600, now=5.0)
+        self.assertEqual(flow.state, "conversing")
+        flow.spoken(now=5.5)
+        self.assertEqual(flow.state, "settle")
+        flow.feed([0.1] * 1600, now=6.0)
+        self.assertEqual(flow.state, "conversing")
+
+    def test_repeating_the_wake_word_during_a_conversation_asks_again(self):
+        events = []
+        asr = FakeRecognizer()
+        flow = VoiceFlow(FakeKeywordSpotter(), asr, events.append, "器灵")
+
+        flow.start()
+        flow._begin_wake_acknowledgment(now=1.0)
+        flow.begin_recognition(now=2.0)
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=3.0)
+        flow.spoken(now=3.2)
+        flow.feed([0.1] * 1600, now=3.7)
+        self.assertEqual(flow.state, "conversing")
+
+        asr.result = "器灵"
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=4.0)
+
+        self.assertEqual(flow.state, "wake_acknowledgment")
+        self.assertEqual(events[-1], {"type": "state", "state": "wake_acknowledgment"})
 
     def test_cancel_during_a_reply_returns_to_wake_listening(self):
         flow = VoiceFlow(FakeKeywordSpotter(), FakeRecognizer(), lambda _event: None, "器灵")

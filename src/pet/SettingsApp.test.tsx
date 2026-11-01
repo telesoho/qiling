@@ -46,6 +46,8 @@ describe('器灵设定', () => {
     expect(page).toContain('2–8 个连续汉字')
     expect(page).toContain('最近识别到的语音：（等待识别）')
     expect(page).toContain('完整识别文本与唤醒词完全一致也会在本机触发')
+    expect(page).toContain('5 分钟内可以直接追问')
+    expect(page).toContain('连续 5 分钟没有新问题')
     expect(page).toContain('id="llm-provider"')
     expect(page).toContain('Ollama（本机）')
     expect(page).toContain('DeepSeek')

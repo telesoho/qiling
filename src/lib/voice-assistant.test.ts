@@ -67,7 +67,7 @@ describe('voice reply keeps the microphone closed until it is heard', () => {
     expect(shouldResumeListening(answer)).toBe(false)
   })
 
-  it('returns to wake listening only after the answer was spoken', () => {
+  it('hands the microphone back only after the answer was spoken', () => {
     expect(shouldResumeListening({ ...answer, speaking: false })).toBe(false)
     expect(
       shouldResumeListening({
@@ -96,5 +96,25 @@ describe('voice reply keeps the microphone closed until it is heard', () => {
   it('shows that the pet can be interrupted while it answers', () => {
     expect(voiceAssistantStateLabel('responding')).toContain('可以打断')
     expect(voiceAssistantStateLabel('settle')).toContain('恢复')
+  })
+})
+
+describe('awake conversation', () => {
+  it('shows that follow-up questions need no wake word', () => {
+    expect(voiceAssistantStateLabel('conversing')).toContain('追问')
+  })
+
+  it('does not pause the microphone for a new question', () => {
+    expect(
+      shouldResumeListening({
+        state: 'conversing',
+        voice: true,
+        phase: 'idle',
+        text: '',
+        speaking: false,
+        heardLine: '',
+        lineChanged: false,
+      }),
+    ).toBe(false)
   })
 })

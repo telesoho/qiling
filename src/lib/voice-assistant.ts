@@ -56,6 +56,7 @@ export function voiceAssistantStateLabel(state: string): string {
     listening: '本机监听唤醒词',
     wake_acknowledgment: '器灵正在回应，请接着说',
     recognizing: '本机正在识别语音',
+    conversing: '对话中，可以直接追问',
     responding: '器灵正在回答，可以打断',
     settle: '正在恢复监听',
     error: '不可用',

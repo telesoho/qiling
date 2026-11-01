@@ -736,7 +736,8 @@ export default function SettingsApp(): JSX.Element {
           最近识别到的语音：{voiceTranscript || '（等待识别）'}
         </p>
         <p>状态变为“器灵正在回应，请接着说”表示唤醒成功；唤醒词漏检时，完整识别文本与唤醒词完全一致也会在本机触发。</p>
-        <p>器灵回答时可以直接插话打断；它会继续识别，但把与自己播报文稿高度重合的结果当作回声丢弃，说完后再静音约半秒才恢复监听。</p>
+        <p>唤醒后器灵会保持对话状态，5 分钟内可以直接追问，不必再说唤醒词；连续 5 分钟没有新问题，才回到只监听唤醒词的状态。</p>
+        <p>器灵回答时可以直接插话打断；它会继续识别，但把与自己播报文稿高度重合的结果当作回声丢弃，说完后再静音约半秒才恢复对话。</p>
         {settings.voiceAssistant && (
           <button type="button" onClick={() => void cancelVoiceAssistantTurn()}>
             取消本轮对话
