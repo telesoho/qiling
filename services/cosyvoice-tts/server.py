@@ -22,6 +22,14 @@ running; it is never remembered against later ids.
 The model is loaded before the process listens. A rejected prompt or a
 failed load exits without serving, so /health is 200 only when synthesis
 can run.
+
+Synthesis uses fp16 autocast on CUDA and a short warmup line before the
+first request, so the pet's first sentence does not pay kernel and
+allocation costs. A line is cut at punctuation before it reaches the model
+(UTTERANCE_CHARS), which keeps the autoregressive prefix and the vocoder
+window bounded and lets the first audio frame leave early. Set
+QILING_COSYVOICE_FP16=0 to force fp32, QILING_COSYVOICE_WARMUP=0 to skip
+the warmup, and QILING_COSYVOICE_UTTERANCE_CHARS to change the cut.
 """
 
 from __future__ import annotations
@@ -32,6 +40,7 @@ import json
 import os
 import sys
 import threading
+import time
 import traceback
 import wave
 from collections.abc import Iterator
@@ -49,8 +58,17 @@ from prompt_check import ADULT_DEMO, assess, cosyvoice3_prompt, self_check as ch
 ENGINE = "cosyvoice3-0.5b"
 MODEL_NAME = "Fun-CosyVoice3-0.5B-2512"
 VOICE = "child-girl-zero-shot"
+# Registered from the reference clip; never sent by the caller.
+CHILD_SPK_ID = "shiju-girl"
 DEFAULT_PORT = 8765
 MAX_BODY = 16_000
+# One model call per this many characters. The pet's lines are short; a long
+# line would grow the autoregressive prefix and the vocoder window with it, and
+# the first audio frame would wait for the whole paragraph.
+UTTERANCE_CHARS = 48
+WARMUP_LINE = "你好呀，我在。"
+SENTENCE_ENDS = "。！？!?…\n"
+CLAUSE_ENDS = "，,、：:；;"
 MODEL_FILES = (
     "cosyvoice3.yaml",
     "llm.pt",
@@ -138,6 +156,7 @@ class HealthBody(BaseModel):
     voice: str = Field(description="音色。诗琚只用儿童女孩零样本。", examples=["child-girl-zero-shot"])
     sampleRate: int = Field(description="WAV 采样率。")
     device: str = Field(description="cpu 或 cuda。")
+    precision: str = Field(description="fp16 或 fp32。CUDA 上默认 fp16 autocast。")
     promptSeconds: float = Field(description="服务侧参考录音的秒数。")
 
 
@@ -200,6 +219,7 @@ GATE = EpochGate()
 MODEL = None
 SAMPLE_RATE = 24000
 DEVICE = "cpu"
+PRECISION = "fp32"
 PROMPT_SECONDS = 0.0
 # Tests replace this. Production leaves it None and uses the loaded model.
 SYNTHESIZE = None
@@ -251,6 +271,78 @@ def normalize_device(value: str | None) -> str:
     if token in {"cuda", "gpu"}:
         return "cuda"
     return "auto"
+
+
+def precision_from(environ: Mapping[str, str]) -> str:
+    """`QILING_COSYVOICE_FP16` is auto, fp16 or fp32. Auto means fp16 on CUDA."""
+    token = first_env(environ, "QILING_COSYVOICE_FP16", "SIJU_COSYVOICE_FP16").lower()
+    if token in {"1", "true", "yes", "on", "fp16", "half"}:
+        return "fp16"
+    if token in {"0", "false", "no", "off", "fp32", "full"}:
+        return "fp32"
+    return "auto"
+
+
+def use_fp16(precision: str, cuda: bool) -> bool:
+    """CPU has no half kernels; upstream resets fp16 there too."""
+    if not cuda:
+        return False
+    return precision != "fp32"
+
+
+def utterance_limit(environ: Mapping[str, str]) -> int:
+    raw = first_env(environ, "QILING_COSYVOICE_UTTERANCE_CHARS", "SIJU_COSYVOICE_UTTERANCE_CHARS")
+    try:
+        value = int(raw)
+    except ValueError:
+        return UTTERANCE_CHARS
+    return value if value >= 8 else UTTERANCE_CHARS
+
+
+def warmup_enabled(environ: Mapping[str, str]) -> bool:
+    token = first_env(environ, "QILING_COSYVOICE_WARMUP", "SIJU_COSYVOICE_WARMUP").lower()
+    return token not in {"0", "false", "no", "off"}
+
+
+def cut_index(line: str, limit: int) -> int:
+    """Cut after the last punctuation before `limit`; a sentence end beats a comma."""
+    window = line[:limit]
+    for marks in (SENTENCE_ENDS, CLAUSE_ENDS):
+        for index in range(len(window) - 1, 0, -1):
+            if window[index] in marks:
+                return index + 1
+    return limit
+
+
+def split_utterances(text: str, limit: int = UTTERANCE_CHARS) -> list[str]:
+    """Cut a line into model calls at punctuation, no longer than `limit`.
+
+    CosyVoice splits at punctuation itself, but a run of text without any is
+    one unbounded call. Cutting here bounds the prefix each call sees, so the
+    per-chunk cost does not climb and the first frame arrives sooner. A lone
+    trailing punctuation mark rides with the last piece (one character over).
+    """
+    line = " ".join(text.split())
+    if not line:
+        return []
+    if limit < 1:
+        return [line]
+    pieces: list[str] = []
+    rest = line
+    while len(rest) > limit:
+        cut = cut_index(rest, limit)
+        head = rest[:cut].strip()
+        rest = rest[cut:].strip()
+        if head:
+            pieces.append(head)
+    if rest:
+        pieces.append(rest)
+    # A trailing "。" on its own has nothing to say; keep it with the last words
+    # so the model still hears a sentence ending.
+    if len(pieces) > 1 and not any(ch.isalnum() for ch in pieces[-1]):
+        pieces[-2] = pieces[-2] + pieces[-1]
+        pieces.pop()
+    return pieces
 
 
 def parse_port(value: object | None, default: int = DEFAULT_PORT) -> int:
@@ -355,14 +447,30 @@ def repo_problem(repo: Path) -> str | None:
 def apply_device(device: str) -> None:
     if device == "cpu":
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    # 8GB cards rarely run out of total memory before they run out of unfragmented
+    # blocks. The next long sentence is the one that fails. Must be set before
+    # torch initialises CUDA in this process.
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 
-def load_model(repo: Path, model_dir: Path):
+def load_model(repo: Path, model_dir: Path, fp16: bool = False):
     sys.path.insert(0, str(repo))
     sys.path.insert(0, str(repo / "third_party" / "Matcha-TTS"))
+    import torch
+
     from cosyvoice.cli.cosyvoice import AutoModel
 
-    model = AutoModel(model_dir=str(model_dir))
+    torch.set_grad_enabled(False)
+    if fp16:
+        try:
+            model = AutoModel(model_dir=str(model_dir), fp16=True)
+        except TypeError as exc:
+            # An older checkout has no fp16 switch. Autocast only; the weights and
+            # the frontend features stay fp32, so nothing else has to change.
+            sys.stderr.write(f"这个 CosyVoice checkout 不接受 fp16，回退 fp32：{exc}\n")
+            model = AutoModel(model_dir=str(model_dir))
+    else:
+        model = AutoModel(model_dir=str(model_dir))
     name = model.__class__.__name__
     if name != "CosyVoice3":
         raise RuntimeError(f"需要 CosyVoice3，实际加载的是 {name}")
@@ -370,19 +478,9 @@ def load_model(repo: Path, model_dir: Path):
 
 
 def register_child_voice(model, prompt_text: str, prompt_wav: Path) -> None:
-    added = model.add_zero_shot_spk(prompt_text, str(prompt_wav), "shiju-girl")
+    added = model.add_zero_shot_spk(prompt_text, str(prompt_wav), CHILD_SPK_ID)
     if added is not True:
         raise RuntimeError("零样本参考音没有注册成功")
-
-
-def chunks_to_wav(chunks, sample_rate: int) -> bytes:
-    import numpy as np
-    import torch
-
-    audio = torch.cat([chunk.detach().float().cpu() for chunk in chunks], dim=-1).squeeze()
-    audio = audio.clamp(-1, 1).numpy()
-    pcm = (audio * 32767.0).astype(np.int16)
-    return pcm_to_wav(pcm.tobytes(), sample_rate)
 
 
 def pcm_to_wav(pcm: bytes, sample_rate: int) -> bytes:
@@ -411,6 +509,65 @@ def fail_frame(reason: str) -> bytes:
     return b"\x02" + text.encode("ascii")
 
 
+def model_pcm_chunks(request_id: int | str, piece: str):
+    """Yield s16le PCM for one short utterance as the model produces it."""
+    import torch
+
+    generator = MODEL.inference_zero_shot(
+        piece,
+        "",
+        "",
+        zero_shot_spk_id=CHILD_SPK_ID,
+        stream=True,
+        speed=1.0,
+    )
+    # This process only ever infers. Upstream decorates its own inference methods,
+    # but the glue around them (and the per-chunk copy to CPU) is not, so keep the
+    # whole chunk loop out of autograd bookkeeping.
+    with torch.inference_mode():
+        for item in generator:
+            if not GATE.allowed(request_id):
+                return
+            speech = item.get("tts_speech")
+            if speech is None:
+                continue
+            pcm = tensor_to_pcm(speech)
+            if pcm:
+                yield pcm
+
+
+def warmup(model, fp16: bool = False) -> None:
+    """Spend the first-call cost (kernel autotune, allocator growth) at startup."""
+    import torch
+
+    started = time.monotonic()
+    try:
+        with torch.inference_mode():
+            for _ in model.inference_zero_shot(
+                WARMUP_LINE,
+                "",
+                "",
+                zero_shot_spk_id=CHILD_SPK_ID,
+                stream=True,
+                speed=1.0,
+            ):
+                pass
+    except Exception as exc:
+        hint = "；如果是半精度不兼容，用 --fp32 或 QILING_COSYVOICE_FP16=0 启动" if fp16 else ""
+        sys.stderr.write(f"预热失败，不影响合成：{exc}{hint}\n")
+        return
+    sys.stderr.write(f"qiling cosyvoice3 warmup {time.monotonic() - started:.2f}s\n")
+
+
+def log_utterance(chars: int, chunks: int, audio: float, wall: float, first: float) -> None:
+    """One line per spoken sentence: first frame and RTF are what "卡壳" looks like."""
+    rtf = wall / audio if audio > 0 else 0.0
+    sys.stderr.write(
+        f"qiling cosyvoice3 chars={chars} chunks={chunks} audio={audio:.2f}s "
+        f"wall={wall:.2f}s first={first * 1000:.0f}ms rtf={rtf:.2f}\n"
+    )
+
+
 def synthesize(request_id: int | str, text: str) -> tuple[int, bytes, str]:
     line = " ".join(text.split())
     if not line:
@@ -422,30 +579,29 @@ def synthesize(request_id: int | str, text: str) -> tuple[int, bytes, str]:
             return 409, b'{"error":"cancelled"}', "application/json"
         if SYNTHESIZE is not None:
             return SYNTHESIZE(line)
-        pieces = []
+        started = time.monotonic()
+        first = 0.0
+        audio = 0.0
+        chunks = 0
+        pcm = bytearray()
         with GATE.infer_lock():
             if not GATE.allowed(request_id):
                 return 409, b'{"error":"cancelled"}', "application/json"
-            generator = MODEL.inference_zero_shot(
-                line,
-                "",
-                "",
-                zero_shot_spk_id="shiju-girl",
-                stream=True,
-                speed=1.0,
-            )
-            for item in generator:
+            for piece in split_utterances(line, UTTERANCE_CHARS):
                 if not GATE.allowed(request_id):
-                    return 409, b'{"error":"cancelled"}', "application/json"
-                speech = item.get("tts_speech")
-                if speech is None:
-                    continue
-                pieces.append(speech)
+                    break
+                for chunk in model_pcm_chunks(request_id, piece):
+                    if chunks == 0:
+                        first = time.monotonic() - started
+                    chunks += 1
+                    audio += len(chunk) / 2 / SAMPLE_RATE
+                    pcm.extend(chunk)
         if not GATE.allowed(request_id):
             return 409, b'{"error":"cancelled"}', "application/json"
-        if not pieces:
+        if not pcm:
             return 500, b'{"error":"empty_audio"}', "application/json"
-        return 200, chunks_to_wav(pieces, SAMPLE_RATE), "audio/wav"
+        log_utterance(len(line), chunks, audio, time.monotonic() - started, first)
+        return 200, pcm_to_wav(bytes(pcm), SAMPLE_RATE), "audio/wav"
 
 
 def health_payload() -> HealthBody:
@@ -456,6 +612,7 @@ def health_payload() -> HealthBody:
         voice=VOICE,
         sampleRate=SAMPLE_RATE,
         device=DEVICE,
+        precision=PRECISION,
         promptSeconds=PROMPT_SECONDS,
     )
 
@@ -508,23 +665,10 @@ def iter_model_pcm(request_id: str, line: str):
     if STREAM_ITER is not None:
         yield from STREAM_ITER()
         return
-    generator = MODEL.inference_zero_shot(
-        line,
-        "",
-        "",
-        zero_shot_spk_id="shiju-girl",
-        stream=True,
-        speed=1.0,
-    )
-    for item in generator:
+    for piece in split_utterances(line, UTTERANCE_CHARS):
         if not GATE.allowed(request_id):
             return
-        speech = item.get("tts_speech")
-        if speech is None:
-            continue
-        pcm = tensor_to_pcm(speech)
-        if pcm:
-            yield pcm
+        yield from model_pcm_chunks(request_id, piece)
 
 
 def stream_frames(request_id: str, line: str):
@@ -534,6 +678,10 @@ def stream_frames(request_id: str, line: str):
             yield fail_frame("cancelled")
             return
         emitted = False
+        started = time.monotonic()
+        first = 0.0
+        audio = 0.0
+        chunks = 0
         try:
             with GATE.infer_lock():
                 if not GATE.allowed(request_id):
@@ -543,6 +691,10 @@ def stream_frames(request_id: str, line: str):
                     if not GATE.allowed(request_id):
                         yield fail_frame("cancelled")
                         return
+                    if chunks == 0:
+                        first = time.monotonic() - started
+                    chunks += 1
+                    audio += len(pcm) / 2 / SAMPLE_RATE
                     emitted = True
                     yield pcm_frame(pcm)
                 if not GATE.allowed(request_id):
@@ -551,6 +703,7 @@ def stream_frames(request_id: str, line: str):
             if not emitted:
                 yield fail_frame("failed")
                 return
+            log_utterance(len(line), chunks, audio, time.monotonic() - started, first)
             yield b"\x00"
         except Exception as exc:
             sys.stderr.write(f"synthesize failed: {exc}\n")
@@ -788,6 +941,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--prompt-text", default="")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", default=None)
+    precision = parser.add_mutually_exclusive_group()
+    precision.add_argument("--fp16", dest="precision", action="store_const", const="fp16")
+    precision.add_argument("--fp32", dest="precision", action="store_const", const="fp32")
+    parser.set_defaults(precision=None)
     return parser.parse_args(argv)
 
 
@@ -796,7 +953,7 @@ def pcm_silence(samples: int, sample_rate: int = 16000) -> bytes:
 
 
 def self_check() -> None:
-    global SYNTHESIZE, SAMPLE_RATE, DEVICE, PROMPT_SECONDS
+    global SYNTHESIZE, SAMPLE_RATE, DEVICE, PRECISION, PROMPT_SECONDS
     gate = EpochGate()
     with gate.running(1) as live:
         assert live
@@ -830,6 +987,37 @@ def self_check() -> None:
         pass
     else:
         raise AssertionError("port 0")
+
+    assert precision_from({}) == "auto"
+    assert precision_from({"QILING_COSYVOICE_FP16": "1"}) == "fp16"
+    assert precision_from({"SIJU_COSYVOICE_FP16": "fp32"}) == "fp32"
+    assert precision_from({"QILING_COSYVOICE_FP16": "whatever"}) == "auto"
+    assert use_fp16("auto", True) is True
+    assert use_fp16("auto", False) is False
+    assert use_fp16("fp16", False) is False  # CPU has no half kernels
+    assert use_fp16("fp32", True) is False
+    assert utterance_limit({}) == UTTERANCE_CHARS
+    assert utterance_limit({"QILING_COSYVOICE_UTTERANCE_CHARS": "60"}) == 60
+    assert utterance_limit({"QILING_COSYVOICE_UTTERANCE_CHARS": "3"}) == UTTERANCE_CHARS
+    assert utterance_limit({"QILING_COSYVOICE_UTTERANCE_CHARS": "x"}) == UTTERANCE_CHARS
+    assert warmup_enabled({})
+    assert not warmup_enabled({"QILING_COSYVOICE_WARMUP": "0"})
+
+    assert split_utterances("   ") == []
+    assert split_utterances("红方略优。") == ["红方略优。"]
+    # A short line is one call: the model keeps its own prosody across it.
+    short = "红方略优。诗琚首选「炮二平五」。"
+    assert split_utterances(short) == [short]
+    long_line = "红方略优，炮二平五以后黑方要小心。马八进七以后局面还很复杂，需要慢慢算计。" * 3
+    pieces = split_utterances(long_line, 48)
+    assert len(pieces) > 1
+    assert all(0 < len(piece) <= 48 for piece in pieces), [len(piece) for piece in pieces]
+    assert "".join(pieces).replace(" ", "") == long_line.replace(" ", "")
+    assert all(piece[-1] in SENTENCE_ENDS + CLAUSE_ENDS for piece in pieces[:-1])
+    # A run of text with no punctuation is still cut, so one call stays bounded.
+    assert [len(piece) for piece in split_utterances("啊" * 130, 48)] == [48, 48, 34]
+    # A trailing full stop rides with the last words instead of being its own call.
+    assert split_utterances("啊" * 48 + "。", 48) == ["啊" * 48 + "。"]
 
     import tempfile
 
@@ -901,6 +1089,7 @@ def self_check() -> None:
     SYNTHESIZE = fake
     SAMPLE_RATE = 24000
     DEVICE = "cpu"
+    PRECISION = "fp32"
     PROMPT_SECONDS = 4.0
 
     import socket
@@ -947,6 +1136,7 @@ def self_check() -> None:
         assert health_json["engine"] == ENGINE
         assert health_json["voice"] == VOICE
         assert health_json["model"] == MODEL_NAME
+        assert health_json["precision"] in {"fp16", "fp32"}
         status, _, other = call("GET", "/v1/health")
         assert status == 200 and json.loads(other)["engine"] == ENGINE
 
@@ -1185,27 +1375,41 @@ def main(argv: list[str] | None = None) -> int:
         print(problem, file=sys.stderr)
         return 2
 
-    global MODEL, SAMPLE_RATE, DEVICE, PROMPT_SECONDS
+    global MODEL, SAMPLE_RATE, DEVICE, PRECISION, PROMPT_SECONDS, UTTERANCE_CHARS
     duration = wav_duration_secs(paths.prompt_wav)
     PROMPT_SECONDS = float(duration or 0)
+    UTTERANCE_CHARS = utterance_limit(os.environ)
     apply_device(paths.device)
-    print("正在加载 Fun-CosyVoice3-0.5B（儿童女孩零样本）", file=sys.stderr, flush=True)
     try:
-        MODEL = load_model(paths.repo, paths.model)
+        import torch
+
+        cuda = paths.device != "cpu" and torch.cuda.is_available()
+    except Exception:
+        cuda = False
+    DEVICE = "cuda" if cuda else "cpu"
+    fp16 = use_fp16(args.precision or precision_from(os.environ), cuda)
+    PRECISION = "fp16" if fp16 else "fp32"
+    print(
+        "正在加载 Fun-CosyVoice3-0.5B"
+        f"（儿童女孩零样本，device={DEVICE} precision={PRECISION}）",
+        file=sys.stderr,
+        flush=True,
+    )
+    try:
+        MODEL = load_model(paths.repo, paths.model, fp16)
         register_child_voice(MODEL, prompt, paths.prompt_wav.resolve())
     except Exception as exc:
         print(f"加载 Fun-CosyVoice3-0.5B 失败: {exc}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
         return 1
     SAMPLE_RATE = int(getattr(MODEL, "sample_rate", 24000) or 24000)
-    try:
-        import torch
-
-        DEVICE = "cuda" if paths.device != "cpu" and torch.cuda.is_available() else "cpu"
-    except Exception:
-        DEVICE = "cpu"
+    # The first call pays cuDNN/cuBLAS autotune and allocator growth. Do that
+    # before the pet's first line, not on it.
+    if cuda and warmup_enabled(os.environ):
+        warmup(MODEL, fp16)
     print(
-        f"siju cosyvoice3 ready voice={VOICE} device={DEVICE} sample_rate={SAMPLE_RATE}",
+        f"siju cosyvoice3 ready voice={VOICE} device={DEVICE} precision={PRECISION} "
+        f"sample_rate={SAMPLE_RATE} utterance_chars={UTTERANCE_CHARS}",
         file=sys.stderr,
         flush=True,
     )

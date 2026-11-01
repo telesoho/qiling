@@ -522,6 +522,21 @@ function decodeBase64(value: string): ArrayBuffer {
   return buffer
 }
 
+/**
+ * One AudioContext for the pet's voice. Creating and closing one per sentence
+ * restarts the Windows render device and adds a start-up gap before every line,
+ * which sounds like the pet stalling on its first word.
+ */
+let sharedAudio: AudioContext | null = null
+
+function audioContextFor(sampleRate: number): AudioContext {
+  if (!sharedAudio || sharedAudio.state === 'closed') {
+    sharedAudio = new AudioContext({ sampleRate })
+  }
+  if (sharedAudio.state === 'suspended') void sharedAudio.resume().catch(() => {})
+  return sharedAudio
+}
+
 function pcm16ToFloat(pcm: ArrayBuffer): Float32Array {
   const view = new DataView(pcm)
   const samples = Math.floor(pcm.byteLength / 2)
@@ -599,7 +614,7 @@ function startPcmStream(line: string, mine: number): {
     if (floats.length === 0 || !(chunk.sampleRate > 0)) return
     try {
       if (!ctx) {
-        ctx = new AudioContext({ sampleRate: chunk.sampleRate })
+        ctx = audioContextFor(chunk.sampleRate)
         cursor = ctx.currentTime
         origin = cursor
       }
@@ -640,9 +655,7 @@ function startPcmStream(line: string, mine: number): {
       }
     }
     sources.length = 0
-    const current = ctx
-    ctx = null
-    if (current) void current.close().catch(() => {})
+    // The context is shared, so it stays open for the next line.
     settle('cancelled')
   }
   playback.whenStarted = async (timeoutMs) => {

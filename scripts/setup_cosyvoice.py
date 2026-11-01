@@ -347,6 +347,7 @@ def main() -> int:
     print("放好参考音之后，在仓库根目录启动服务。器灵不会自己拉起 Python。")
     print("  python scripts/start_cosyvoice.py")
     print("默认监听 http://127.0.0.1:8765 。浏览器打开 http://127.0.0.1:8765/docs 看 Swagger。")
+    print("有 CUDA 时服务默认 fp16 autocast、启动预热，并按标点把长句切短；每句的 first/rtf 会打印在服务端 stderr。")
     print("器灵用 QILING_COSYVOICE_URL 连接，没有就看 SIJU_COSYVOICE_URL。服务没开就用系统语音。")
     print("环境变量 QILING_COSYVOICE_PROMPT_WAV / QILING_COSYVOICE_PROMPT_TEXT 可以改参考音。")
     return 0

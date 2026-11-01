@@ -39,6 +39,19 @@ python scripts/setup_cosyvoice.py
 python scripts/start_cosyvoice.py
 ```
 
+### 说话卡壳时
+
+宠物说话“卡壳”多半不是算力不够，而是首包等太久，或者一句太长把延迟拖长。服务现在默认做了这些事，并且在 stderr 为每一句打印一行 `chars=… chunks=… first=…ms rtf=…`：
+
+- **流式是默认路径**：器灵请求里带 `stream: true`，服务每合成一块就回一块 PCM（`0x01` 帧，结束 `0x00`），播放端边收边播，不等整句合成完。
+- **CUDA 上默认 fp16 autocast**：`QILING_COSYVOICE_FP16=0` 关掉，`=1` 强制开；也可以用 `--fp16` / `--fp32`。这里用上游的 autocast，而不是把权重 `.half()`：CosyVoice3 的 frontend 特征和 HiFT/F0 路径给的是 float32，裸 `.half()` 会撞 dtype；autocast 只让矩阵乘和卷积走半精度，省的是激活和算力，权重仍留 fp32。
+- **启动时先预热一句**（`QILING_COSYVOICE_WARMUP=0` 可关）：cuDNN/cuBLAS 的首次自动调优和显存增长算在启动里，不算在第一句台词上。
+- **每句按标点切成不超过 48 字**（`QILING_COSYVOICE_UTTERANCE_CHARS` 可改，最小 8）：自回归前缀和声码器窗口有上限，第一块音频更早出来，长句也不会“越说越慢”。
+- **显存碎片**：没设过 `PYTORCH_CUDA_ALLOC_CONF` 时设为 `expandable_segments:True`，8GB 卡上少一次长句分配失败。
+- **单请求串行**：一把推理锁，不做批处理，桌面宠物没有并发可批。
+
+还是卡就先看那行日志：`first` 大是首包问题，`rtf` 持续大于 1 说明这张卡跟不上，得换后端（llama.cpp 的 GGUF，或在 Ampere 及更新的卡上试 TensorRT）。0.5B 的模型不值得上 8-bit 量化，权重本来只有 1–2GB，量化的计算开销抵不过显存收益。
+
 可选的唤醒词与中文识别使用本机 sherpa-onnx。语音识别文字会发送给设定页中选择的对话模型；默认是本机 Ollama，也可使用 DeepSeek 或自定义 OpenAI 兼容云端服务。云端服务只接收识别文字，不会收到麦克风音频。安装前请审阅依赖和模型的上游许可；安装会下载模型，但不会打开麦克风：
 
 ```powershell
