@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import {
   isVoiceEnginePreference,
@@ -8,6 +8,7 @@ import {
   watchQiLingSettings,
   type PetSettings,
 } from '../lib/settings'
+import { startVoiceTest, type VoiceTestPlayback } from '../lib/speech'
 import {
   voiceAssistantErrorMessage,
   voiceAssistantStateLabel,
@@ -87,6 +88,36 @@ function llmSettingsErrorMessage(reason: unknown): string {
   return messages[code] ?? `语言模型操作失败：${code}`
 }
 
+function modelListErrorMessage(reason: unknown): string {
+  const code = String(reason)
+  if (code.includes('ollama_must_use_loopback')) return 'Ollama 只能读取本机地址上的模型。'
+  if (code.includes('invalid_llm_url')) return '服务地址格式无效，读不到模型列表。'
+  if (code.includes('llm_unavailable')) return '无法连接 Ollama，请确认它已经启动。'
+  return `无法读取已安装模型：${code}`
+}
+
+/** Installed models first; keep a saved name that Ollama no longer lists selectable. */
+export function modelOptions(
+  installed: readonly string[],
+  current: string,
+): Array<{ value: string; label: string }> {
+  const model = current.trim()
+  const options = installed.map((name) => ({ value: name, label: name }))
+  if (model && !installed.includes(model)) {
+    options.unshift({ value: model, label: `${model}（未在已安装列表）` })
+  }
+  return options
+}
+
+/** `qwen3` that Ollama only knows as `qwen3:latest` becomes a real installed name. */
+export function normalizeModelName(installed: readonly string[], current: string): string {
+  const model = current.trim()
+  if (!model) return current
+  if (installed.includes(model)) return model
+  const latest = `${model}:latest`
+  return installed.includes(latest) ? latest : model
+}
+
 export function capabilitySummary(capabilities: CapabilityManifest): string {
   const actionLabels: Record<string, string> = {
     'siju.narrate_current': '识局：重新解说当前局面（只读）',
@@ -132,9 +163,21 @@ export default function SettingsApp(): JSX.Element {
   const [testingLlmConnection, setTestingLlmConnection] = useState(false)
   const [llmError, setLlmError] = useState('')
   const [llmStatus, setLlmStatus] = useState('')
+  const [installedModels, setInstalledModels] = useState<string[] | null>(null)
+  const [loadingModels, setLoadingModels] = useState(false)
+  const [modelListError, setModelListError] = useState('')
+  const modelRequest = useRef(0)
+  const [testingVoice, setTestingVoice] = useState(false)
+  const [voiceTestStatus, setVoiceTestStatus] = useState('')
+  const voiceTest = useRef<VoiceTestPlayback | null>(null)
 
   useEffect(() => watchQiLingSettings(setSettings), [])
   useEffect(() => setWakeWordDraft(settings.wakeWord), [settings.wakeWord])
+
+  useEffect(() => () => {
+    voiceTest.current?.stop()
+    voiceTest.current = null
+  }, [])
 
   useEffect(() => {
     let active = true
@@ -156,6 +199,17 @@ export default function SettingsApp(): JSX.Element {
       active = false
     }
   }, [])
+
+  useEffect(() => {
+    if (!llmSettingsLoaded || llmSettings.provider !== 'ollama') {
+      setInstalledModels(null)
+      setModelListError('')
+      return
+    }
+    void refreshModels(llmSettings.baseUrl)
+    // Only re-read when the provider changes; the address has its own refresh button.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [llmSettingsLoaded, llmSettings.provider])
 
   useEffect(() => {
     let active = true
@@ -265,6 +319,55 @@ export default function SettingsApp(): JSX.Element {
 
   function patch(next: Partial<PetSettings>) {
     saveQiLingSettings({ ...loadQiLingSettings(), ...next })
+  }
+
+  async function refreshModels(baseUrl: string) {
+    const request = modelRequest.current + 1
+    modelRequest.current = request
+    setLoadingModels(true)
+    setModelListError('')
+    try {
+      const models = await invoke<string[]>('qiling_llm_list_models', { baseUrl })
+      if (modelRequest.current !== request) return
+      setInstalledModels(models)
+      setLlmSettings((current) => {
+        if (current.provider !== 'ollama') return current
+        const model = normalizeModelName(models, current.model)
+        return model === current.model ? current : { ...current, model }
+      })
+    } catch (reason) {
+      if (modelRequest.current !== request) return
+      setInstalledModels(null)
+      setModelListError(modelListErrorMessage(reason))
+    } finally {
+      if (modelRequest.current === request) setLoadingModels(false)
+    }
+  }
+
+  function playVoiceTest() {
+    if (voiceTest.current) {
+      voiceTest.current.stop()
+      voiceTest.current = null
+      setTestingVoice(false)
+      setVoiceTestStatus('已停止试听。')
+      return
+    }
+    setVoiceTestStatus('正在用当前播报声音试听…')
+    const playback = startVoiceTest()
+    voiceTest.current = playback
+    setTestingVoice(true)
+    void playback.done.then((engine) => {
+      if (voiceTest.current !== playback) return
+      voiceTest.current = null
+      setTestingVoice(false)
+      setVoiceTestStatus(
+        engine === 'cosyvoice'
+          ? '试听已用本机 CosyVoice 播放。'
+          : engine === 'system'
+            ? '试听已改用 Windows 系统语音播放。'
+            : '暂时没法播放试听，请检查播报声音设置。',
+      )
+    })
   }
 
   async function saveLlmSettings(): Promise<LlmSettings | null> {
@@ -538,20 +641,32 @@ export default function SettingsApp(): JSX.Element {
           </label>
         </div>
         <label htmlFor="voice-engine">播报声音</label>
-        <select
-          id="voice-engine"
-          value={settings.voiceEngine}
-          aria-describedby="voice-engine-help"
-          onChange={(event) => {
-            const voiceEngine = event.target.value
-            if (isVoiceEnginePreference(voiceEngine)) patch({ voiceEngine })
-          }}
-        >
-          <option value="auto">自动：优先 CosyVoice，不可用时用系统语音</option>
-          <option value="cosyvoice">本机 CosyVoice</option>
-          <option value="system">Windows 系统语音</option>
-        </select>
-        <p id="voice-engine-help">播报引擎与对话模型是独立设置。CosyVoice 不可用时会回退到系统语音。</p>
+        <div className="voice-engine-controls">
+          <select
+            id="voice-engine"
+            value={settings.voiceEngine}
+            aria-describedby="voice-engine-help"
+            onChange={(event) => {
+              const voiceEngine = event.target.value
+              if (isVoiceEnginePreference(voiceEngine)) patch({ voiceEngine })
+            }}
+          >
+            <option value="auto">自动：优先 CosyVoice，不可用时用系统语音</option>
+            <option value="cosyvoice">本机 CosyVoice</option>
+            <option value="system">Windows 系统语音</option>
+          </select>
+          <button type="button" onClick={playVoiceTest}>
+            {testingVoice ? '停止试听' : '试听'}
+          </button>
+        </div>
+        <p id="voice-engine-help">
+          播报引擎与对话模型是独立设置。CosyVoice 不可用时会回退到系统语音；“试听”会用当前选择的声音读一句示例。
+        </p>
+        {voiceTestStatus && (
+          <p className="settings-status" role="status" aria-live="polite">
+            {voiceTestStatus}
+          </p>
+        )}
         <label>
           <input
             type="checkbox"
@@ -591,6 +706,7 @@ export default function SettingsApp(): JSX.Element {
           最近识别到的语音：{voiceTranscript || '（等待识别）'}
         </p>
         <p>状态变为“器灵正在回应，请接着说”表示唤醒成功；唤醒词漏检时，完整识别文本与唤醒词完全一致也会在本机触发。</p>
+        <p>器灵回答期间麦克风暂时关闭，回答播完后再继续监听唤醒词，避免把它自己的声音当成新问题。</p>
         {settings.voiceAssistant && (
           <button type="button" onClick={() => void cancelVoiceAssistantTurn()}>
             取消本轮对话
@@ -649,14 +765,67 @@ export default function SettingsApp(): JSX.Element {
           </>
         )}
         <label htmlFor="llm-model">模型名称</label>
-        <input
-          id="llm-model"
-          type="text"
-          value={llmSettings.model}
-          maxLength={128}
-          disabled={loadingLlmSettings || savingLlmSettings}
-          onChange={(event) => setLlmSettings((current) => ({ ...current, model: event.target.value }))}
-        />
+        {llmSettings.provider === 'ollama' ? (
+          <>
+            {installedModels === null ? (
+              <input
+                id="llm-model"
+                type="text"
+                value={llmSettings.model}
+                maxLength={128}
+                disabled={loadingLlmSettings || savingLlmSettings}
+                aria-describedby="llm-model-help"
+                onChange={(event) => setLlmSettings((current) => ({ ...current, model: event.target.value }))}
+              />
+            ) : (
+              <select
+                id="llm-model"
+                value={llmSettings.model}
+                disabled={loadingLlmSettings || savingLlmSettings || loadingModels}
+                aria-describedby="llm-model-help"
+                onChange={(event) => setLlmSettings((current) => ({ ...current, model: event.target.value }))}
+              >
+                {modelOptions(installedModels, llmSettings.model).map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            )}
+            <div className="settings-actions">
+              <button
+                type="button"
+                disabled={loadingModels || savingLlmSettings}
+                onClick={() => void refreshModels(llmSettings.baseUrl)}
+              >
+                {loadingModels ? '正在读取…' : '刷新已安装模型'}
+              </button>
+            </div>
+            <p id="llm-model-help">
+              {loadingModels
+                ? '正在从本机 Ollama 读取已安装的模型…'
+                : modelListError
+                  ? `${modelListError} 也可以直接填写模型名称。`
+                  : installedModels === null
+                    ? '正在读取本机 Ollama 的已安装模型…'
+                    : installedModels.length > 0
+                      ? `已安装 ${installedModels.length} 个可对话模型，从列表中选择要用的一个。`
+                      : 'Ollama 里还没有可对话的模型，先运行 ollama pull 安装一个。'}
+            </p>
+          </>
+        ) : (
+          <>
+            <input
+              id="llm-model"
+              type="text"
+              value={llmSettings.model}
+              maxLength={128}
+              disabled={loadingLlmSettings || savingLlmSettings}
+              onChange={(event) => setLlmSettings((current) => ({ ...current, model: event.target.value }))}
+            />
+            <p>填写服务商提供的模型名称，例如 deepseek-chat。</p>
+          </>
+        )}
         {llmSettings.provider !== 'ollama' && (
           <>
             <label htmlFor="llm-api-key">API 密钥</label>

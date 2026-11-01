@@ -6,7 +6,8 @@ import { closeSpeechBubble, loadQiLingSettings, saveQiLingSettings, watchQiLingS
 import { usePetSpeech } from '../lib/speech'
 import {
   WAKE_ACKNOWLEDGMENT,
-  shouldResumeAfterWakeAcknowledgment,
+  isListeningPaused,
+  shouldResumeListening,
   voiceAssistantStateLabel,
   type VoiceAssistantEvent,
 } from '../lib/voice-assistant'
@@ -45,8 +46,9 @@ export default function PetApp(): JSX.Element {
   const [ready, setReady] = useState(() => !inTauri())
   const published = useRef<PetStateId | null>(null)
   const sawLine = useRef(false)
-  const wakeAcknowledgmentSpoken = useRef(false)
-  const wakeAcknowledgmentResumeRequested = useRef(false)
+  const listeningResumeRequested = useRef(false)
+  const pausedEntryLine = useRef<{ phase: string; text: string } | null>(null)
+  const pausedLineChanged = useRef(false)
   const stateRef = useRef(stateId)
   stateRef.current = stateId
   const state = petState(stateId)
@@ -124,33 +126,45 @@ export default function PetApp(): JSX.Element {
   }, [])
 
   useEffect(() => {
-    if (voiceAssistantState !== 'wake_acknowledgment') {
-      wakeAcknowledgmentSpoken.current = false
-      wakeAcknowledgmentResumeRequested.current = false
+    if (!isListeningPaused(voiceAssistantState)) {
+      pausedEntryLine.current = null
+      pausedLineChanged.current = false
+      listeningResumeRequested.current = false
       return
     }
-
+    if (!pausedEntryLine.current) {
+      pausedEntryLine.current = { phase: line.phase, text: line.text }
+    } else if (
+      pausedEntryLine.current.phase !== line.phase ||
+      pausedEntryLine.current.text !== line.text
+    ) {
+      pausedLineChanged.current = true
+    }
+    const lineText = line.text.trim()
     if (
       voice &&
       line.phase === 'say' &&
-      line.text === WAKE_ACKNOWLEDGMENT &&
-      speech.audibleLine === WAKE_ACKNOWLEDGMENT
+      lineText !== '' &&
+      speech.audibleLine === lineText
     ) {
-      wakeAcknowledgmentSpoken.current = true
+      pausedLineChanged.current = true
     }
-
     if (
-      !shouldResumeAfterWakeAcknowledgment({
+      !shouldResumeListening({
         state: voiceAssistantState,
         voice,
-        acknowledgmentWasAudible: wakeAcknowledgmentSpoken.current,
+        phase: line.phase,
+        text: line.text,
         speaking: speech.speaking,
         heardLine: speech.heardLine,
+        lineChanged: pausedLineChanged.current,
       })
     ) return
-    if (wakeAcknowledgmentResumeRequested.current) return
+    if (listeningResumeRequested.current) return
 
-    wakeAcknowledgmentResumeRequested.current = true
+    listeningResumeRequested.current = true
+    // `listen` both starts the question recognizer after the wake acknowledgment
+    // and re-arms wake listening after a spoken reply.
     void invoke('qiling_voice_assistant_listen').catch((error: unknown) => {
       setVoiceAssistantState('error')
       console.warn('唤醒回应后无法开始语音识别', String(error))
@@ -158,7 +172,6 @@ export default function PetApp(): JSX.Element {
   }, [
     line.phase,
     line.text,
-    speech.audibleLine,
     speech.heardLine,
     speech.speaking,
     voice,

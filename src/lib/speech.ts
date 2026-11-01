@@ -241,6 +241,193 @@ function classifyLocalError(error: unknown): 'cancelled' | 'unavailable' | 'fail
   return 'failed'
 }
 
+export type VoiceTestEngine = 'cosyvoice' | 'system' | 'unavailable'
+
+export const VOICE_TEST_LINE = '你好，我是器灵。现在听到的是播报声音试听。'
+
+export interface VoiceTestPlayback {
+  /** `cosyvoice` / `system` say which engine was actually heard. */
+  done: Promise<VoiceTestEngine>
+  stop: () => void
+}
+
+let activeTest: { stop: () => void } | null = null
+
+/**
+ * Play one short line with the configured broadcast voice. This is a preview, not
+ * a narration: it never touches the pet's line, and it keeps its own player so the
+ * setting can be checked while the pet is quiet.
+ */
+export function startVoiceTest(text: string = VOICE_TEST_LINE): VoiceTestPlayback {
+  activeTest?.stop()
+  const line = text.trim()
+  let resolveDone: (engine: VoiceTestEngine) => void = () => {}
+  let finished = false
+  const done = new Promise<VoiceTestEngine>((resolve) => {
+    resolveDone = resolve
+  })
+  const settle = (engine: VoiceTestEngine) => {
+    if (finished) return
+    finished = true
+    resolveDone(engine)
+  }
+
+  // Create the audio context inside the click handler so the preview is allowed to sound.
+  let context: AudioContext | null = null
+  if (typeof AudioContext !== 'undefined') {
+    try {
+      context = new AudioContext()
+    } catch {
+      context = null
+    }
+  }
+  let cancelled = false
+  let stopAudio = () => {}
+  const stop = () => {
+    if (cancelled) return
+    cancelled = true
+    stopAudio()
+    const current = context
+    context = null
+    if (current) void current.close().catch(() => {})
+    try {
+      engine()?.cancel()
+    } catch {
+      // engines that throw on cancel still must not keep the button busy
+    }
+    settle('unavailable')
+  }
+  const playback: VoiceTestPlayback = { done, stop }
+  activeTest = playback
+  void done.then(() => {
+    if (activeTest === playback) activeTest = null
+  })
+
+  const finish = (engine: VoiceTestEngine) => {
+    if (!cancelled) settle(engine)
+  }
+
+  void (async () => {
+    try {
+      if (!line) {
+        settle('unavailable')
+        return
+      }
+      const route: VoiceRoute = inTauri()
+        ? await loadVoiceRoute()
+        : { engine: 'system', detail: SYSTEM_DETAIL, preference: loadQiLingSettings().voiceEngine }
+      if (cancelled) return
+
+      if (route.engine === 'cosyvoice' && context) {
+        const audio = context
+        const { Channel, invoke } = await import('@tauri-apps/api/core')
+        if (cancelled) return
+        let cursor = audio.currentTime
+        let lastEnd = cursor
+        let played = false
+        const sources: AudioBufferSourceNode[] = []
+        stopAudio = () => {
+          for (const source of sources) {
+            try {
+              source.stop()
+            } catch {
+              // already stopped
+            }
+          }
+          sources.length = 0
+        }
+        const onChunk = new Channel<PcmChunk>()
+        onChunk.onmessage = (chunk) => {
+          if (cancelled) return
+          let floats: Float32Array
+          try {
+            floats = pcm16ToFloat(decodeBase64(chunk.pcmBase64))
+          } catch {
+            return
+          }
+          if (floats.length === 0 || !(chunk.sampleRate > 0)) return
+          try {
+            const buffer = audio.createBuffer(1, floats.length, chunk.sampleRate)
+            buffer.getChannelData(0).set(floats)
+            const slot = schedulePcmChunk(cursor, audio.currentTime, buffer.duration)
+            cursor = slot.next
+            lastEnd = cursor
+            const source = audio.createBufferSource()
+            source.buffer = buffer
+            source.connect(audio.destination)
+            source.start(slot.start)
+            sources.push(source)
+            played = true
+          } catch {
+            // a rejected chunk must not swallow the preview
+          }
+        }
+        try {
+          await invoke('qiling_voice_synthesize', { text: line, onChunk })
+        } catch {
+          // No local voice: fall back to the system voice below.
+        }
+        if (cancelled) return
+        if (played) {
+          const wait = Math.max(0, (lastEnd - audio.currentTime) * 1000) + 150
+          await new Promise((resolve) => window.setTimeout(resolve, wait))
+          if (cancelled) return
+          settle('cosyvoice')
+          return
+        }
+        context = null
+        void audio.close().catch(() => {})
+      }
+
+      if (cancelled) return
+      speakSystemTest(line, finish)
+    } catch {
+      finish('unavailable')
+    }
+  })()
+
+  return playback
+}
+
+function speakSystemTest(line: string, finish: (engine: VoiceTestEngine) => void): void {
+  const synth = engine()
+  if (!synth) {
+    finish('unavailable')
+    return
+  }
+  let utter: UtteranceLike
+  try {
+    const voices = synth.getVoices() as Array<VoiceChoice & SpeechSynthesisVoice>
+    const chosen = pickChineseVoice(voices)
+    utter = makeUtterance(line, (chosen as SpeechSynthesisVoice | undefined) ?? null)
+  } catch {
+    finish('unavailable')
+    return
+  }
+  const settleOnce = (engine: VoiceTestEngine) => {
+    clearTimeout(timer)
+    finish(engine)
+  }
+  // WebView2 occasionally drops the end event; the preview must still come back.
+  const timer = window.setTimeout(
+    () => settleOnce('system'),
+    (Array.from(line).length / SYSTEM_CHARS_PER_SEC + 5) * 1000,
+  )
+  utter.onend = () => settleOnce('system')
+  utter.onerror = () => settleOnce('unavailable')
+  try {
+    synth.resume?.()
+    synth.speak(utter)
+  } catch {
+    settleOnce('unavailable')
+  }
+}
+
+export function stopVoiceTest(): void {
+  activeTest?.stop()
+  activeTest = null
+}
+
 export function noteVoiceFallback(): void {
   routeMemo = {
     engine: 'system',

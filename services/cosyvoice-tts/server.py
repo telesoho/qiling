@@ -1159,8 +1159,8 @@ def main(argv: list[str] | None = None) -> int:
         file=sys.stderr,
         flush=True,
     )
-    print(f"siju cosyvoice3 listening http://{host}:{port}", flush=True)
-    print(f"siju cosyvoice3 docs http://{host}:{port}/docs", flush=True)
+    print(f"qiling cosyvoice3 listening http://{host}:{port}", flush=True)
+    print(f"qiling cosyvoice3 docs http://{host}:{port}/docs", flush=True)
     import uvicorn
 
     enable_tcp_nodelay()

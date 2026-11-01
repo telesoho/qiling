@@ -3,7 +3,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from voice_assistant import VoiceFlow, build_keyword_line, configure_logging
+from voice_assistant import (
+    VoiceFlow,
+    build_keyword_line,
+    configure_logging,
+    is_acknowledgment_echo,
+)
 
 
 class FakeKeywordStream:
@@ -156,16 +161,117 @@ class VoiceFlowTests(unittest.TestCase):
 
         self.assertEqual(
             [event["type"] for event in events],
-            ["state", "debug_keyword", "state", "state", "transcript", "state"],
+            ["state", "debug_keyword", "state", "state", "state", "transcript"],
         )
         self.assertEqual(events[0], {"type": "state", "state": "listening"})
         self.assertEqual(events[1], {"type": "debug_keyword", "text": "器灵"})
         self.assertEqual(events[2], {"type": "state", "state": "wake_acknowledgment"})
         self.assertEqual(events[3], {"type": "state", "state": "recognizing"})
-        self.assertEqual(events[4]["text"], "帮我解释一下什么是闭包")
+        self.assertEqual(events[4], {"type": "state", "state": "responding"})
+        self.assertEqual(events[5]["text"], "帮我解释一下什么是闭包")
         self.assertTrue(
             all("audio" not in event and "samples" not in event for event in events)
         )
+
+    def test_the_microphone_stays_closed_while_the_pet_answers(self):
+        events = []
+        kws = FakeKeywordSpotter()
+        asr = FakeRecognizer()
+        flow = VoiceFlow(kws, asr, events.append, "器灵")
+
+        flow.start()
+        kws.detect = True
+        flow.feed([0.1] * 1600, now=1.0)
+        flow.begin_recognition(now=2.0)
+        asr.endpoint = True
+        flow.feed([0.2] * 1600, now=3.0)
+        self.assertEqual(flow.state, "responding")
+
+        # The pet's own answer is on the speakers; it must not be heard as a new
+        # wake word or as the next question.
+        emitted = len(events)
+        kws.detect = True
+        asr.endpoint = True
+        flow.feed([0.3] * 1600, now=4.0)
+
+        self.assertEqual(flow.state, "responding")
+        self.assertEqual(len(events), emitted)
+
+    def test_the_wake_acknowledgment_heard_back_is_not_a_question(self):
+        events = []
+        kws = FakeKeywordSpotter()
+        asr = FakeRecognizer("我在，请说。")
+        flow = VoiceFlow(kws, asr, events.append, "器灵")
+
+        flow.start()
+        kws.detect = True
+        flow.feed([0.1] * 1600, now=1.0)
+        flow.begin_recognition(now=2.0)
+        asr.endpoint = True
+        flow.feed([0.2] * 1600, now=2.4)
+
+        self.assertEqual(flow.state, "listening")
+        self.assertTrue(all(event["type"] != "transcript" for event in events))
+
+    def test_acknowledgment_echo_matching_ignores_punctuation(self):
+        self.assertTrue(is_acknowledgment_echo("说。"))
+        self.assertTrue(is_acknowledgment_echo(" 我在，请说！"))
+        self.assertFalse(is_acknowledgment_echo("今天天气怎么样"))
+        self.assertFalse(is_acknowledgment_echo("，"))
+
+    def test_listening_resumes_after_the_reply_was_played(self):
+        events = []
+        flow = VoiceFlow(FakeKeywordSpotter(), FakeRecognizer(), events.append, "器灵")
+
+        flow.start()
+        flow._begin_wake_acknowledgment()
+        flow.begin_recognition(now=1.0)
+        flow.recognizer.endpoint = True
+        flow.feed([0.1] * 1600, now=2.0)
+        self.assertEqual(flow.state, "responding")
+
+        flow.listen()
+
+        self.assertEqual(flow.state, "listening")
+        self.assertEqual(events[-1], {"type": "state", "state": "listening"})
+
+    def test_listen_still_starts_recognition_after_the_wake_word(self):
+        flow = VoiceFlow(FakeKeywordSpotter(), FakeRecognizer(), lambda _event: None, "器灵")
+
+        flow.start()
+        flow._begin_wake_acknowledgment()
+        flow.listen(now=5.0)
+
+        self.assertEqual(flow.state, "recognizing")
+
+    def test_a_reply_that_never_reports_back_releases_the_microphone(self):
+        events = []
+        flow = VoiceFlow(FakeKeywordSpotter(), FakeRecognizer(), events.append, "器灵")
+
+        flow.start()
+        flow._begin_wake_acknowledgment()
+        flow.begin_recognition(now=1.0)
+        flow.recognizer.endpoint = True
+        flow.feed([0.1] * 1600, now=2.0)
+        self.assertEqual(flow.state, "responding")
+
+        flow.feed([0.1] * 1600, now=2.0 + 61.0)
+
+        self.assertEqual(flow.state, "listening")
+        self.assertEqual(events[-1], {"type": "state", "state": "listening"})
+
+    def test_cancel_during_a_reply_returns_to_wake_listening(self):
+        flow = VoiceFlow(FakeKeywordSpotter(), FakeRecognizer(), lambda _event: None, "器灵")
+
+        flow.start()
+        flow._begin_wake_acknowledgment()
+        flow.begin_recognition(now=1.0)
+        flow.recognizer.endpoint = True
+        flow.feed([0.1] * 1600, now=2.0)
+
+        flow.cancel()
+
+        self.assertEqual(flow.state, "listening")
 
     def test_detector_match_is_written_to_local_diagnostics(self):
         events = []

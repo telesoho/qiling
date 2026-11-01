@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { saveQiLingSettings } from '../lib/settings'
-import SettingsApp, { capabilitySummary } from './SettingsApp'
+import SettingsApp, {
+  capabilitySummary,
+  modelOptions,
+  normalizeModelName,
+} from './SettingsApp'
 
 const memory = () => {
   const store = new Map<string, string>()
@@ -66,5 +70,31 @@ describe('器灵设定', () => {
         events: { publishes: ['vscode.editor.status'], subscribes: [] },
       }),
     ).toBe('VS Code：解释当前选区（读取所选文本）；发布事件：VS Code 编辑器状态')
+  })
+
+  it('offers an installed-model choice and a voice preview', () => {
+    const page = renderToStaticMarkup(<SettingsApp />)
+    expect(page).toContain('id="llm-model"')
+    expect(page).toContain('刷新已安装模型')
+    expect(page).toContain('读取本机 Ollama 的已安装模型')
+    expect(page).toContain('>试听</button>')
+    expect(page).toContain('避免把它自己的声音当成新问题')
+  })
+
+  it('keeps the saved model selectable even before Ollama reports it', () => {
+    expect(modelOptions(['qwen3.5:4b', 'qwen3:latest'], 'qwen3.5:4b')).toEqual([
+      { value: 'qwen3.5:4b', label: 'qwen3.5:4b' },
+      { value: 'qwen3:latest', label: 'qwen3:latest' },
+    ])
+    expect(modelOptions(['qwen3:latest'], 'qwen3')).toEqual([
+      { value: 'qwen3', label: 'qwen3（未在已安装列表）' },
+      { value: 'qwen3:latest', label: 'qwen3:latest' },
+    ])
+  })
+
+  it('resolves the implicit latest tag to a real installed model name', () => {
+    expect(normalizeModelName(['qwen3:latest'], 'qwen3')).toBe('qwen3:latest')
+    expect(normalizeModelName(['qwen3:0.6b'], 'qwen3')).toBe('qwen3')
+    expect(normalizeModelName(['qwen3.5:4b'], ' qwen3.5:4b ')).toBe('qwen3.5:4b')
   })
 })

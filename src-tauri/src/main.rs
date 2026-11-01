@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::utils::config::{BackgroundThrottlingPolicy, Color};
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, PhysicalPosition, Runtime, State,
@@ -20,6 +21,7 @@ use tauri::{
 const PET_FALLBACK_W: f64 = 210.0;
 const PET_FALLBACK_H: f64 = 270.0;
 const BUBBLE_GAP: f64 = 16.0;
+const TRAY_ID: &str = "qiling-tray";
 
 pub struct AppState {
     pet_placed: AtomicBool,
@@ -106,8 +108,13 @@ fn glue_bubble(pet: &WebviewWindow, bubble: &WebviewWindow, bubble_w: i32, bubbl
 }
 
 #[tauri::command]
-fn pet_set_open(app: AppHandle, state: State<AppState>, open: bool) -> Result<bool, String> {
+fn pet_set_open(app: AppHandle, open: bool) -> Result<bool, String> {
+    set_pet_open(&app, open)
+}
+
+fn set_pet_open(app: &AppHandle, open: bool) -> Result<bool, String> {
     let pet = app.get_webview_window("pet").ok_or("没有器灵窗口")?;
+    let state = app.state::<AppState>();
     if open {
         if !state.pet_placed.swap(true, Ordering::SeqCst) {
             place_pet(&pet);
@@ -117,16 +124,18 @@ fn pet_set_open(app: AppHandle, state: State<AppState>, open: bool) -> Result<bo
     } else {
         state.local_llm.cancel();
         state.voice.cancel();
-        state.voice_assistant.stop()?;
+        let stopped = state.voice_assistant.stop();
         let _ = app.emit("qiling-interrupt", ());
         let _ = app.emit(
             "voice-assistant-event",
             serde_json::json!({ "type": "state", "state": "stopped" }),
         );
-        hide_bubble(&app);
+        hide_bubble(app);
         pet.hide().map_err(|err| err.to_string())?;
+        stopped?;
     }
     let _ = app.emit("pet-visibility", open);
+    refresh_tray(app);
     Ok(open)
 }
 
@@ -255,6 +264,17 @@ async fn qiling_llm_test_connection(state: State<'_, AppState>) -> Result<(), St
     tauri::async_runtime::spawn_blocking(move || llm.test_connection())
         .await
         .map_err(|error| format!("llm_test_failed:{error}"))?
+}
+
+#[tauri::command]
+async fn qiling_llm_list_models(
+    state: State<'_, AppState>,
+    base_url: String,
+) -> Result<Vec<String>, String> {
+    let llm = Arc::clone(&state.local_llm);
+    tauri::async_runtime::spawn_blocking(move || llm.list_ollama_models(&base_url))
+        .await
+        .map_err(|error| format!("llm_models_failed:{error}"))?
 }
 
 #[tauri::command]
@@ -529,6 +549,80 @@ fn pet_menu(app: AppHandle) -> Result<(), String> {
     pet.popup_menu(&menu).map_err(|err| err.to_string())
 }
 
+fn pet_is_visible(app: &AppHandle) -> bool {
+    app.get_webview_window("pet")
+        .and_then(|pet| pet.is_visible().ok())
+        .unwrap_or(false)
+}
+
+fn tray_menu(app: &AppHandle, visible: bool) -> tauri::Result<Menu<tauri::Wry>> {
+    let toggle = MenuItem::with_id(
+        app,
+        "tray-toggle",
+        if visible { "隐藏器灵" } else { "显示器灵" },
+        true,
+        None::<&str>,
+    )?;
+    let settings = MenuItem::with_id(app, "tray-settings", "设定…", true, None::<&str>)?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let quit = MenuItem::with_id(app, "tray-quit", "退出器灵", true, None::<&str>)?;
+    Menu::with_items(app, &[&toggle, &settings, &separator, &quit])
+}
+
+/// Keep the tray menu label and tooltip in step with the pet window.
+fn refresh_tray(app: &AppHandle) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+    let visible = pet_is_visible(app);
+    if let Ok(menu) = tray_menu(app, visible) {
+        let _ = tray.set_menu(Some(menu));
+    }
+    let _ = tray.set_tooltip(Some(if visible {
+        "器灵"
+    } else {
+        "器灵（已隐藏）"
+    }));
+}
+
+fn toggle_pet_from_tray(app: &AppHandle) {
+    let open = !pet_is_visible(app);
+    let _ = set_pet_open(app, open);
+}
+
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    let menu = tray_menu(app, pet_is_visible(app))?;
+    let icon = match app.default_window_icon() {
+        Some(icon) => icon.clone(),
+        None => tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))?,
+    };
+    TrayIconBuilder::with_id(TRAY_ID)
+        .icon(icon)
+        .tooltip("器灵")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "tray-toggle" => toggle_pet_from_tray(app),
+            "tray-settings" => {
+                let _ = open_settings(app);
+            }
+            "tray-quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                toggle_pet_from_tray(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
 fn main() {
     let app = tauri::Builder::default()
         .setup(|app| {
@@ -569,6 +663,7 @@ fn main() {
                 let _ = pet.show();
             }
             create_bubble(app)?;
+            build_tray(app.handle())?;
             let handle = app.handle().clone();
             std::thread::spawn(move || http::serve(handle, protocol));
             Ok(())
@@ -577,16 +672,12 @@ fn main() {
             tauri::WindowEvent::CloseRequested { api, .. } if window.label() == "bubble" => {
                 api.prevent_close();
             }
-            tauri::WindowEvent::CloseRequested { .. } if window.label() == "pet" => {
-                let state = window.app_handle().state::<AppState>();
-                state.local_llm.cancel();
-                state.voice.cancel();
-                state.voice_assistant.shutdown();
-                let _ = window.app_handle().emit(
-                    "voice-assistant-event",
-                    serde_json::json!({ "type": "state", "state": "stopped" }),
-                );
-                hide_bubble(window.app_handle());
+            tauri::WindowEvent::CloseRequested { api, .. } if window.label() == "pet" => {
+                // The tray keeps the pet reachable; closing hides it instead of
+                // shutting the app down with no way back.
+                api.prevent_close();
+                let app = window.app_handle().clone();
+                let _ = set_pet_open(&app, false);
             }
             tauri::WindowEvent::Moved(_) if window.label() == "pet" => {
                 let app = window.app_handle();
@@ -623,6 +714,7 @@ fn main() {
             qiling_llm_get_settings,
             qiling_llm_save_settings,
             qiling_llm_test_connection,
+            qiling_llm_list_models,
             qiling_voice_assistant_status,
             qiling_voice_assistant_cancel,
             qiling_voice_assistant_listen,

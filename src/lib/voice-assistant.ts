@@ -8,20 +8,36 @@ export interface VoiceAssistantEvent {
 
 export const WAKE_ACKNOWLEDGMENT = '我在，请说。'
 
-export function shouldResumeAfterWakeAcknowledgment(input: {
+/** States where the pet speaks one line before the microphone is armed again. */
+export function isListeningPaused(state: string): boolean {
+  return state === 'wake_acknowledgment' || state === 'responding'
+}
+
+/**
+ * The microphone stays closed while the pet speaks, so the pet cannot hear itself
+ * and answer the same question twice. Recognize/resume once the line is done:
+ * right away when voice is off, otherwise after the current `say` line was heard.
+ *
+ * `lineChanged` says the paused state has already shown a different line. It keeps
+ * the previous answer (still on screen when the next turn starts) from being
+ * mistaken for a finished reply.
+ */
+export function shouldResumeListening(input: {
   state: string
   voice: boolean
-  acknowledgmentWasAudible: boolean
+  phase: string
+  text: string
   speaking: boolean
   heardLine: string
+  lineChanged: boolean
 }): boolean {
-  if (input.state !== 'wake_acknowledgment') return false
+  if (!isListeningPaused(input.state)) return false
   if (!input.voice) return true
-  return (
-    input.acknowledgmentWasAudible &&
-    !input.speaking &&
-    input.heardLine === WAKE_ACKNOWLEDGMENT
-  )
+  if (input.state === 'responding' && !input.lineChanged) return false
+  const text = input.text.trim()
+  if (input.phase !== 'say' || !text) return false
+  if (input.state === 'wake_acknowledgment' && text !== WAKE_ACKNOWLEDGMENT) return false
+  return !input.speaking && input.heardLine === text
 }
 
 export function voiceAssistantStateLabel(state: string): string {
@@ -31,6 +47,7 @@ export function voiceAssistantStateLabel(state: string): string {
     listening: '本机监听唤醒词',
     wake_acknowledgment: '器灵正在回应，请接着说',
     recognizing: '本机正在识别语音',
+    responding: '器灵正在回答，暂不收音',
     error: '不可用',
   }
   return labels[state] ?? state

@@ -352,6 +352,17 @@ html.pet-window #root {
   max-width: 100%;
 }
 
+.voice-engine-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.voice-engine-controls select {
+  flex: 1;
+  min-width: 0;
+}
+
 .settings-section input[type="text"]:not(#voice-wake-word),
 .settings-section input[type="url"],
 .settings-section input[type="password"] {

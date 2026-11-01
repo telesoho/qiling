@@ -4,8 +4,10 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        RwLock,
+        mpsc::{self, RecvTimeoutError, Sender},
+        Arc, RwLock,
     },
+    thread,
     time::{Duration, Instant},
 };
 
@@ -20,6 +22,13 @@ const DEFAULT_DEEPSEEK_URL: &str = "https://api.deepseek.com";
 const MAX_INPUT_CODE_POINTS: usize = 2_000;
 const MAX_OUTPUT_CODE_POINTS: usize = 400;
 const MAX_REQUEST_SECONDS: u64 = 120;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Ollama can spend this long loading a model before it even sends HTTP headers.
+/// A short read timeout turns that cold start into a bogus "cannot connect" error.
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
+const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -179,6 +188,53 @@ impl LocalLlm {
         self.respond("请只回复：连接成功").map(|_| ())
     }
 
+    /// Models the local Ollama has already pulled. Only chat-capable ones are listed
+    /// when Ollama reports capabilities; older servers simply report every model.
+    pub fn list_ollama_models(&self, base_url: &str) -> Result<Vec<String>, String> {
+        let base = validate_base_url(&LlmProvider::Ollama, base_url)?;
+        let url = format!("{base}/api/tags");
+        let response = ureq::AgentBuilder::new()
+            .redirects(0)
+            .timeout_connect(CONNECT_TIMEOUT)
+            .timeout_read(MODEL_LIST_TIMEOUT)
+            .timeout_write(WRITE_TIMEOUT)
+            .build()
+            .get(&url)
+            .call()
+            .map_err(|_| "llm_unavailable".to_string())?;
+        let body = response
+            .into_string()
+            .map_err(|_| "llm_unavailable".to_string())?;
+        let value: Value =
+            serde_json::from_str(&body).map_err(|_| "local_llm_failed".to_string())?;
+        let models = value
+            .get("models")
+            .and_then(Value::as_array)
+            .ok_or("local_llm_failed")?;
+        let mut names = Vec::new();
+        for model in models {
+            let Some(name) = model.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            if name.trim().is_empty() {
+                continue;
+            }
+            if let Some(capabilities) = model.get("capabilities").and_then(Value::as_array) {
+                let can_chat = capabilities
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|capability| capability == "completion");
+                if !can_chat {
+                    continue;
+                }
+            }
+            if !names.iter().any(|existing| existing == name) {
+                names.push(name.to_string());
+            }
+        }
+        Ok(names)
+    }
+
     pub fn respond(&self, input: &str) -> Result<String, String> {
         let prompt = input.trim();
         if prompt.is_empty() || prompt.chars().count() > MAX_INPUT_CODE_POINTS {
@@ -208,79 +264,47 @@ impl LocalLlm {
             )?),
         };
         let endpoint = settings.endpoint()?;
-        let agent = ureq::AgentBuilder::new()
-            .redirects(0)
-            .timeout_connect(Duration::from_secs(5))
-            .timeout_read(Duration::from_millis(100))
-            .timeout_write(Duration::from_secs(5))
-            .build();
-        let mut request = agent.post(&endpoint);
-        if let Some(api_key) = api_key.as_deref() {
-            request = request.set("Authorization", &["Bearer ", api_key].concat());
-        }
-        let response = request.send_json(settings.request_body(prompt));
-        let response = match response {
-            Ok(response) => response,
-            Err(ureq::Error::Status(401 | 403, _)) => return Err("llm_auth_failed".into()),
-            Err(ureq::Error::Status(404, _)) => return Err("model_unavailable".into()),
-            Err(ureq::Error::Status(_, _)) | Err(ureq::Error::Transport(_)) => {
-                return Err("llm_unavailable".into())
-            }
-        };
-        let mut reader = response.into_reader();
-        let mut bytes = [0u8; 4096];
-        let mut line = Vec::new();
-        let mut output = String::new();
-        let mut done = false;
+        let body = settings.request_body(prompt);
+        // The HTTP read is driven from its own thread so the caller keeps the busy
+        // flag for as long as it likes and can still cancel within 100 ms, even
+        // while the server is silent (a cold Ollama load can take many seconds).
+        let stopped = Arc::new(AtomicBool::new(false));
+        let worker_stopped = Arc::clone(&stopped);
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            stream_chat(endpoint, body, api_key, settings.provider, worker_stopped, sender);
+        });
+
         let deadline = Instant::now() + Duration::from_secs(MAX_REQUEST_SECONDS);
-        loop {
+        let mut output = String::new();
+        let result = loop {
             if self.generation.load(Ordering::SeqCst) != generation {
-                return Err("cancelled".into());
+                break Err("cancelled".to_string());
             }
             if Instant::now() >= deadline {
-                return Err("llm_timeout".into());
+                break Err("llm_timeout".to_string());
             }
-            match reader.read(&mut bytes) {
-                Ok(0) => {
-                    if !line.is_empty() {
-                        done = process_line(&line, &settings.provider, &mut output)?;
-                    }
-                    break;
-                }
-                Ok(count) => {
-                    for byte in &bytes[..count] {
-                        if *byte == b'\n' {
-                            done = process_line(&line, &settings.provider, &mut output)?;
-                            line.clear();
-                            if done {
-                                break;
-                            }
-                        } else {
-                            line.push(*byte);
-                            if line.len() > 16 * 1024 {
-                                return Err("local_llm_failed".into());
-                            }
-                        }
-                    }
-                    if done {
-                        break;
+            match receiver.recv_timeout(CANCEL_POLL_INTERVAL) {
+                Ok(StreamMessage::Fragment(fragment)) => {
+                    output.push_str(&fragment);
+                    if output.chars().count() > MAX_OUTPUT_CODE_POINTS {
+                        break Err("response_too_large".to_string());
                     }
                 }
-                Err(error)
-                    if error.kind() == ErrorKind::TimedOut
-                        || error.kind() == ErrorKind::WouldBlock
-                        || error.kind() == ErrorKind::Interrupted =>
-                {
-                    continue;
+                Ok(StreamMessage::Done) => break Ok(()),
+                Ok(StreamMessage::Failed(code)) => break Err(code),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    break Err("local_llm_failed".to_string())
                 }
-                Err(_) => return Err("local_llm_failed".into()),
             }
+        };
+        if result.is_err() {
+            stopped.store(true, Ordering::SeqCst);
         }
+        result?;
         if self.generation.load(Ordering::SeqCst) != generation {
             return Err("cancelled".into());
-        }
-        if !done {
-            return Err("local_llm_failed".into());
         }
         let answer = output.trim().to_string();
         if answer.is_empty() {
@@ -288,6 +312,159 @@ impl LocalLlm {
         }
         Ok(answer)
     }
+}
+
+enum StreamMessage {
+    Fragment(String),
+    Done,
+    Failed(String),
+}
+
+/// Read the chat completion stream on a worker thread and forward its text.
+/// A dropped receiver stops the loop at the next chunk, so cancellation never
+/// depends on the socket read timing.
+fn stream_chat(
+    endpoint: String,
+    body: Value,
+    api_key: Option<String>,
+    provider: LlmProvider,
+    stopped: Arc<AtomicBool>,
+    sender: Sender<StreamMessage>,
+) {
+    let agent = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout_connect(CONNECT_TIMEOUT)
+        .timeout_read(READ_TIMEOUT)
+        .timeout_write(WRITE_TIMEOUT)
+        .build();
+    let mut request = agent.post(&endpoint);
+    if let Some(api_key) = api_key.as_deref() {
+        request = request.set("Authorization", &["Bearer ", api_key].concat());
+    }
+    let response = match request.send_json(body) {
+        Ok(response) => response,
+        Err(ureq::Error::Status(401 | 403, _)) => {
+            let _ = sender.send(StreamMessage::Failed("llm_auth_failed".into()));
+            return;
+        }
+        Err(ureq::Error::Status(404, _)) => {
+            let _ = sender.send(StreamMessage::Failed("model_unavailable".into()));
+            return;
+        }
+        // Headers never arrived: the model is probably still loading, which is a
+        // timeout, not a wrong address.
+        Err(ureq::Error::Transport(error)) if is_transport_timeout(&error) => {
+            let _ = sender.send(StreamMessage::Failed("llm_timeout".into()));
+            return;
+        }
+        Err(ureq::Error::Status(_, _)) | Err(ureq::Error::Transport(_)) => {
+            let _ = sender.send(StreamMessage::Failed("llm_unavailable".into()));
+            return;
+        }
+    };
+    let mut reader = response.into_reader();
+    let mut bytes = [0u8; 4096];
+    let mut line = Vec::new();
+    let mut output = String::new();
+    let mut sent_len = 0usize;
+    let finish = |sender: &Sender<StreamMessage>| -> bool {
+        sender.send(StreamMessage::Done).is_ok()
+    };
+    loop {
+        if stopped.load(Ordering::SeqCst) {
+            return;
+        }
+        match reader.read(&mut bytes) {
+            Ok(0) => {
+                if !line.is_empty() {
+                    match process_line(&line, &provider, &mut output) {
+                        Ok(_) => {}
+                        Err(code) => {
+                            let _ = sender.send(StreamMessage::Failed(code));
+                            return;
+                        }
+                    }
+                    let _ = send_fragment(&sender, &output, &mut sent_len);
+                }
+                let _ = finish(&sender);
+                return;
+            }
+            Ok(count) => {
+                let mut done = false;
+                for byte in &bytes[..count] {
+                    if *byte == b'\n' {
+                        match process_line(&line, &provider, &mut output) {
+                            Ok(line_done) => done = line_done,
+                            Err(code) => {
+                                let _ = sender.send(StreamMessage::Failed(code));
+                                return;
+                            }
+                        }
+                        line.clear();
+                        if send_fragment(&sender, &output, &mut sent_len).is_err() {
+                            return;
+                        }
+                        if done {
+                            break;
+                        }
+                    } else {
+                        line.push(*byte);
+                        if line.len() > 16 * 1024 {
+                            let _ = sender.send(StreamMessage::Failed("local_llm_failed".into()));
+                            return;
+                        }
+                    }
+                }
+                if done {
+                    let _ = finish(&sender);
+                    return;
+                }
+            }
+            Err(error)
+                if error.kind() == ErrorKind::TimedOut
+                    || error.kind() == ErrorKind::WouldBlock
+                    || error.kind() == ErrorKind::Interrupted =>
+            {
+                continue;
+            }
+            Err(_) => {
+                let _ = sender.send(StreamMessage::Failed("local_llm_failed".into()));
+                return;
+            }
+        }
+    }
+}
+
+/// ureq reports a socket read timeout as an opaque transport error; walk to the
+/// underlying `io::Error` so a cold model load is not called a connection failure.
+fn is_transport_timeout(error: &ureq::Transport) -> bool {
+    let mut source = std::error::Error::source(error);
+    while let Some(inner) = source {
+        if let Some(io_error) = inner.downcast_ref::<std::io::Error>() {
+            return matches!(
+                io_error.kind(),
+                ErrorKind::TimedOut | ErrorKind::WouldBlock
+            );
+        }
+        source = inner.source();
+    }
+    error
+        .message()
+        .is_some_and(|message| message.contains("timed out"))
+}
+
+fn send_fragment(
+    sender: &Sender<StreamMessage>,
+    output: &str,
+    sent_len: &mut usize,
+) -> Result<(), ()> {    if output.len() <= *sent_len {
+        return Ok(());
+    }
+    let fragment = output[*sent_len..].to_string();
+    *sent_len = output.len();
+    sender
+        .send(StreamMessage::Fragment(fragment))
+        .map_err(|_| ())
 }
 
 impl LlmSettings {
@@ -321,6 +498,9 @@ impl LlmSettings {
             "temperature": 0.6
         });
         if self.provider == LlmProvider::Ollama {
+            // Thinking models otherwise burn the short token budget before they say
+            // anything, and older Ollama servers ignore this field.
+            body["think"] = json!(false);
             body["options"] = json!({"num_predict": 240});
         } else {
             body["max_tokens"] = json!(400);
@@ -330,7 +510,6 @@ impl LlmSettings {
 }
 
 fn validate_settings(mut settings: LlmSettings) -> Result<LlmSettings, String> {
-    settings.base_url = settings.base_url.trim().trim_end_matches('/').to_string();
     settings.model = settings.model.trim().to_string();
     if settings.model.is_empty()
         || settings.model.len() > 128
@@ -338,10 +517,17 @@ fn validate_settings(mut settings: LlmSettings) -> Result<LlmSettings, String> {
     {
         return Err("invalid_llm_model".into());
     }
-    if settings.provider == LlmProvider::Deepseek {
-        settings.base_url = DEFAULT_DEEPSEEK_URL.into();
-    }
-    let url = Url::parse(&settings.base_url).map_err(|_| "invalid_llm_url")?;
+    settings.base_url = if settings.provider == LlmProvider::Deepseek {
+        DEFAULT_DEEPSEEK_URL.into()
+    } else {
+        validate_base_url(&settings.provider, &settings.base_url)?
+    };
+    Ok(settings)
+}
+
+fn validate_base_url(provider: &LlmProvider, base_url: &str) -> Result<String, String> {
+    let base_url = base_url.trim().trim_end_matches('/');
+    let url = Url::parse(base_url).map_err(|_| "invalid_llm_url")?;
     if !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
@@ -350,7 +536,7 @@ fn validate_settings(mut settings: LlmSettings) -> Result<LlmSettings, String> {
         return Err("invalid_llm_url".into());
     }
     let host = url.host_str().ok_or("invalid_llm_url")?;
-    match &settings.provider {
+    match provider {
         LlmProvider::Ollama => {
             let loopback = host.eq_ignore_ascii_case("localhost")
                 || host
@@ -367,7 +553,7 @@ fn validate_settings(mut settings: LlmSettings) -> Result<LlmSettings, String> {
             }
         }
     }
-    Ok(settings)
+    Ok(base_url.to_string())
 }
 
 fn key_entry(provider: &LlmProvider) -> Result<Entry, String> {
@@ -458,14 +644,20 @@ mod tests {
         io::{Read, Write},
         net::TcpListener,
         thread,
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use super::{
         process_line, validate_settings, LlmProvider, LlmSettings, LocalLlm, DEFAULT_DEEPSEEK_URL,
     };
 
-    fn server(response_body: String) -> (String, thread::JoinHandle<()>) {
+    /// Accept one request, wait `delay`, then answer. The response is written even if
+    /// the client already gave up, so a cancelled request cannot panic the fake server.
+    fn reply_once(
+        content_type: &'static str,
+        response_body: String,
+        delay: Duration,
+    ) -> (String, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let handle = thread::spawn(move || {
@@ -486,30 +678,84 @@ mod tests {
                         .flatten()
                 })
                 .unwrap_or(0);
-            let mut body = vec![0; content_length];
-            stream.read_exact(&mut body).unwrap();
-            write!(
+            let mut request_body = vec![0; content_length];
+            stream.read_exact(&mut request_body).unwrap();
+            thread::sleep(delay);
+            let _ = write!(
                 stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 response_body.len(),
                 response_body
-            )
-            .unwrap();
+            );
         });
-        (format!("http://{address}/api/chat"), handle)
+        (format!("http://{address}"), handle)
     }
+
+    fn chat_server(response_body: String) -> (String, thread::JoinHandle<()>) {
+        let (base, handle) = reply_once(
+            "application/x-ndjson",
+            response_body,
+            Duration::from_millis(0),
+        );
+        (format!("{base}/api/chat"), handle)
+    }
+
+    const ANSWER: &str = concat!(
+        "{\"message\":{\"content\":\"本机回答\"},\"done\":false}\n",
+        "{\"message\":{\"content\":\"。\"},\"done\":true}\n"
+    );
 
     #[test]
     fn voice_response_uses_the_local_streaming_model_and_returns_its_answer() {
-        let body = concat!(
-            "{\"message\":{\"content\":\"本机回答\"},\"done\":false}\n",
-            "{\"message\":{\"content\":\"。\"},\"done\":true}\n"
-        );
-        let (endpoint, server) = server(body.into());
+        let (endpoint, server) = chat_server(ANSWER.into());
         let model = LocalLlm::for_test(endpoint);
 
         assert_eq!(model.respond("你好").unwrap(), "本机回答。");
         server.join().unwrap();
+    }
+
+    #[test]
+    fn a_slow_cold_start_is_not_reported_as_a_connection_failure() {
+        // Ollama answers only after it has loaded the model; that can take seconds
+        // before the first HTTP header byte arrives.
+        let (base, server) = reply_once(
+            "application/x-ndjson",
+            ANSWER.into(),
+            Duration::from_millis(400),
+        );
+        let model = LocalLlm::for_test(format!("{base}/api/chat"));
+
+        assert_eq!(model.respond("你好").unwrap(), "本机回答。");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn lists_installed_chat_models_from_the_local_ollama() {
+        let tags = r#"{"models":[
+            {"name":"qwen3.5:4b","capabilities":["completion","tools"]},
+            {"name":"bge-m3:latest","capabilities":["embedding"]},
+            {"name":"old-model:1"}
+        ]}"#;
+        let (base, server) = reply_once("application/json", tags.into(), Duration::from_millis(0));
+        let model = LocalLlm::for_test("http://127.0.0.1:1/api/chat".into());
+
+        assert_eq!(
+            model.list_ollama_models(&base).unwrap(),
+            vec!["qwen3.5:4b".to_string(), "old-model:1".to_string()]
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn model_listing_stays_on_loopback() {
+        let model = LocalLlm::for_test("http://127.0.0.1:1/api/chat".into());
+
+        assert_eq!(
+            model
+                .list_ollama_models("http://192.168.1.20:11434")
+                .unwrap_err(),
+            "ollama_must_use_loopback"
+        );
     }
 
     #[test]
@@ -569,6 +815,9 @@ mod tests {
             ollama.endpoint().unwrap(),
             "http://127.0.0.1:11434/api/chat"
         );
+        let body = ollama.request_body("你好");
+        assert_eq!(body["think"], false);
+        assert_eq!(body["options"]["num_predict"], 240);
 
         let deepseek = LlmSettings {
             provider: LlmProvider::Deepseek,
@@ -601,11 +850,10 @@ mod tests {
             let mut request = [0u8; 4096];
             let _ = stream.read(&mut request);
             let first = "{\"message\":{\"content\":\"稍后回答\"},\"done\":false}\n";
-            write!(
+            let _ = write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: keep-alive\r\n\r\n{first}"
-            )
-            .unwrap();
+            );
             started_tx.send(()).unwrap();
             thread::sleep(Duration::from_millis(300));
         });
@@ -616,6 +864,34 @@ mod tests {
         started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         model.cancel();
         assert_eq!(worker.join().unwrap().unwrap_err(), "cancelled");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn cancelling_while_the_model_is_loading_returns_without_waiting_for_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            // Stay silent, the way Ollama does while it loads a model.
+            thread::sleep(Duration::from_millis(1_500));
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+        });
+        let model = std::sync::Arc::new(LocalLlm::for_test(format!("http://{address}/api/chat")));
+        let worker_model = std::sync::Arc::clone(&model);
+        let worker = thread::spawn(move || worker_model.respond("你好"));
+        thread::sleep(Duration::from_millis(200));
+
+        let started = Instant::now();
+        model.cancel();
+        assert_eq!(worker.join().unwrap().unwrap_err(), "cancelled");
+        assert!(
+            started.elapsed() < Duration::from_millis(700),
+            "cancel waited {:?}",
+            started.elapsed()
+        );
         server.join().unwrap();
     }
 

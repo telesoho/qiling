@@ -15,6 +15,7 @@ commands.allow = [
   "qiling_llm_get_settings",
   "qiling_llm_save_settings",
   "qiling_llm_test_connection",
+  "qiling_llm_list_models",
   "qiling_voice_assistant_start",
   "qiling_voice_assistant_status",
   "qiling_voice_assistant_cancel",

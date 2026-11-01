@@ -17,7 +17,26 @@ from typing import Callable
 SAMPLE_RATE = 16_000
 FRAME_SAMPLES = 1_600
 UTTERANCE_TIMEOUT_SECONDS = 12
+# The microphone stays off until the app says the reply finished playing. This is
+# only the safety net for a reply that never reports back.
+RESPONSE_TIMEOUT_SECONDS = 60
+# Mirrors WAKE_ACKNOWLEDGMENT in src/lib/voice-assistant.ts. The speaker tail of
+# this line is sometimes picked up right after playback and must not become a question.
+ACKNOWLEDGMENT = "我在请说"
+ACK_ECHO_WINDOW_SECONDS = 3.0
 LOGGER = logging.getLogger("qiling.voice_assistant")
+
+
+def spoken_text(text: str) -> str:
+    """Drop punctuation and whitespace so ASR punctuation cannot change a match."""
+    return "".join(
+        char for char in text if char.isalnum() or "\u4e00" <= char <= "\u9fff"
+    )
+
+
+def is_acknowledgment_echo(text: str) -> bool:
+    heard = spoken_text(text)
+    return bool(heard) and heard in ACKNOWLEDGMENT
 
 
 def is_valid_wake_word(wake_word: str) -> bool:
@@ -67,6 +86,8 @@ class VoiceFlow:
         self.recognition_stream = None
         self.state = "stopped"
         self.recognition_deadline = 0.0
+        self.recognition_started_at = 0.0
+        self.responding_deadline = 0.0
         self.utterance_id = 0
 
     def start(self) -> None:
@@ -110,6 +131,12 @@ class VoiceFlow:
         if self.state == "wake_acknowledgment":
             return
 
+        if self.state == "responding":
+            current_time = now if now is not None else time.monotonic()
+            if current_time >= self.responding_deadline:
+                self._listen()
+            return
+
         if self.state != "recognizing":
             return
 
@@ -124,29 +151,48 @@ class VoiceFlow:
 
         if self.recognizer.is_endpoint(self.recognition_stream):
             text = self.recognizer.get_result(self.recognition_stream).strip()
-            if text:
-                self.utterance_id += 1
-                self.emit(
-                    {
-                        "type": "transcript",
-                        "id": self.utterance_id,
-                        "text": text,
-                    }
-                )
-            self._listen()
+            if not text:
+                self._listen()
+                return
+            if (
+                is_acknowledgment_echo(text)
+                and current_time - self.recognition_started_at <= ACK_ECHO_WINDOW_SECONDS
+            ):
+                LOGGER.info("Ignoring the wake acknowledgment heard back: %s", text)
+                self._listen()
+                return
+            self.utterance_id += 1
+            # Hold the microphone until the app says the reply finished, so the
+            # pet's own answer can never be heard as the next question.
+            self._responding(now)
+            self.emit(
+                {
+                    "type": "transcript",
+                    "id": self.utterance_id,
+                    "text": text,
+                }
+            )
 
     def begin_recognition(self, now: float | None = None) -> None:
         if self.state != "wake_acknowledgment":
             return
         self.recognition_stream = self.recognizer.create_stream()
+        self.recognition_started_at = now if now is not None else time.monotonic()
         self.recognition_deadline = (
-            now if now is not None else time.monotonic()
-        ) + UTTERANCE_TIMEOUT_SECONDS
+            self.recognition_started_at + UTTERANCE_TIMEOUT_SECONDS
+        )
         self.state = "recognizing"
         self.emit({"type": "state", "state": self.state})
 
+    def listen(self, now: float | None = None) -> None:
+        """The app asks for audio again: start the question, or re-arm the wake word."""
+        if self.state == "wake_acknowledgment":
+            self.begin_recognition(now)
+        elif self.state == "responding":
+            self._listen()
+
     def cancel(self) -> None:
-        if self.state in {"recognizing", "wake_acknowledgment"}:
+        if self.state in {"recognizing", "wake_acknowledgment", "responding"}:
             self._listen()
 
     def stop(self) -> None:
@@ -161,6 +207,16 @@ class VoiceFlow:
             self.recognition_stream = None
         self.debug_stream = self.recognizer.create_stream()
         self.state = "listening"
+        self.emit({"type": "state", "state": self.state})
+
+    def _responding(self, now: float | None = None) -> None:
+        if self.recognition_stream is not None:
+            self.recognizer.reset(self.recognition_stream)
+            self.recognition_stream = None
+        self.responding_deadline = (
+            now if now is not None else time.monotonic()
+        ) + RESPONSE_TIMEOUT_SECONDS
+        self.state = "responding"
         self.emit({"type": "state", "state": self.state})
 
     def _begin_wake_acknowledgment(self) -> None:
@@ -265,7 +321,7 @@ def run_microphone(flow: VoiceFlow) -> None:
                 if item[1] == "cancel":
                     flow.cancel()
                 else:
-                    flow.begin_recognition()
+                    flow.listen()
                 continue
             flow.feed(numpy.asarray(item, dtype=numpy.float32).reshape(-1))
 
