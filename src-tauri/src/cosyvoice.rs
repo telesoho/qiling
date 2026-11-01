@@ -46,7 +46,7 @@ impl VoiceHost {
                     voice::ready_report(voice::READY_DETAIL)
                 }
                 _ => voice::offline_report(
-                    "本机这个端口有响应，但不是诗琚的 CosyVoice 3 儿童音色。",
+                    "本机这个端口有响应，但不是器灵的 CosyVoice 3 语音服务。",
                 ),
             },
             Err(_) => voice::offline_report(format!(

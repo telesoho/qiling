@@ -7,13 +7,21 @@ transcript stay here, via the app-data directory or QILING_COSYVOICE_PROMPT_*.
 QILING_* wins; the older SIJU_COSYVOICE_* names still work.
 Requests carry the Chinese line to speak, never a board FEN.
 
+One model, many voices. `child-girl-zero-shot` is the builtin default and
+keeps its existing prompt resolution. Additional voices live under
+`<appdata>/cosyvoice/voices/<voice_id>/` (meta.json + prompt.wav) and are
+registered into CosyVoice at startup. POST /v1/voices uploads a new reference
+clip once; synthesis then picks a preset with `voice` (or `voice_id`), and an
+unknown id is 404 voice_not_found instead of silently using the default.
+
     python services/cosyvoice-tts/server.py --self-check
     <venv>/python services/cosyvoice-tts/server.py
 
 Then open http://127.0.0.1:8765/docs for Swagger, or /redoc.
 
 GET /health and GET /v1/health return 200 once the model is loaded.
-POST /v1/audio/speech accepts JSON `input` or `text` and returns audio/wav.
+POST /v1/audio/speech accepts JSON `input` or `text`, optional `voice`, and
+returns audio/wav (or PCM frames when `stream` is true).
 POST /v1/audio/cancel drops an in-flight line. The app can also discard
 the response. Request ids belong to one client process and start over when
 that process restarts, so a cancel only ever reaches a line that is still
@@ -38,30 +46,51 @@ import argparse
 import contextlib
 import json
 import os
+import re
+import shutil
 import sys
+import tempfile
 import threading
 import time
 import traceback
+import uuid
 import wave
 from collections.abc import Iterator
+from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Mapping
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from prompt_check import ADULT_DEMO, assess, cosyvoice3_prompt, self_check as check_prompt, wav_duration_secs
+import audio_io
+import voice_store
+from prompt_check import (
+    ADULT_DEMO,
+    assess,
+    cosyvoice3_prompt,
+    self_check as check_prompt,
+    spoken_body,
+    wav_duration_secs,
+)
 
 ENGINE = "cosyvoice3-0.5b"
 MODEL_NAME = "Fun-CosyVoice3-0.5B-2512"
-VOICE = "child-girl-zero-shot"
+# The builtin preset. Health keeps `voice` for old clients; its value is now
+# the default voice id, which may be a user preset.
+VOICE = voice_store.BUILTIN_ID
 # Registered from the reference clip; never sent by the caller.
-CHILD_SPK_ID = "shiju-girl"
+CHILD_SPK_ID = voice_store.BUILTIN_ID
 DEFAULT_PORT = 8765
-MAX_BODY = 16_000
+MAX_SPEECH_BODY = 16_000
+# Registration uploads one clip; this is the body cap, not the audio cap. The
+# audio itself is capped at 10 MB by audio_io, and multipart framing rides on
+# top of that.
+MAX_UPLOAD_BODY = audio_io.MAX_BYTES + 1_000_000
 # One model call per this many characters. The pet's lines are short; a long
 # line would grow the autoregressive prefix and the vocoder window with it, and
 # the first audio frame would wait for the whole paragraph.
@@ -140,6 +169,7 @@ class ServicePaths:
         prompt_text_inline: str | None,
         prompt_text_file: Path,
         device: str,
+        voices: Path,
     ) -> None:
         self.repo = repo
         self.model = model
@@ -147,21 +177,35 @@ class ServicePaths:
         self.prompt_text_inline = prompt_text_inline
         self.prompt_text_file = prompt_text_file
         self.device = device
+        self.voices = voices
 
 
 class HealthBody(BaseModel):
     ok: bool = Field(description="模型已经加载，可以合成。")
     engine: str = Field(description="引擎标识。识局认 cosyvoice3-0.5b。", examples=["cosyvoice3-0.5b"])
     model: str = Field(description="权重名。", examples=["Fun-CosyVoice3-0.5B-2512"])
-    voice: str = Field(description="音色。诗琚只用儿童女孩零样本。", examples=["child-girl-zero-shot"])
+    voice: str = Field(
+        description="默认音色。为兼容旧客户端保留；值等于 defaultVoice。",
+        examples=["child-girl-zero-shot"],
+    )
+    defaultVoice: str = Field(
+        description="默认音色 id。合成请求不传 voice 时用它。",
+        examples=["child-girl-zero-shot"],
+    )
+    voiceCount: int = Field(description="可用音色数量，含内置音色。", examples=[1])
     sampleRate: int = Field(description="WAV 采样率。")
     device: str = Field(description="cpu 或 cuda。")
     precision: str = Field(description="fp16 或 fp32。CUDA 上默认 fp16 autocast。")
-    promptSeconds: float = Field(description="服务侧参考录音的秒数。")
+    promptSeconds: float = Field(description="默认音色的参考录音秒数。")
 
 
 class ErrorBody(BaseModel):
-    error: str = Field(description="empty、too_long、cancelled、synthesize_failed 之一。")
+    error: str = Field(
+        description=(
+            "empty、too_long、cancelled、synthesize_failed、voice_not_found、"
+            "bad_audio、prompt_text_empty、voice_exists、builtin_voice 等。"
+        )
+    )
 
 
 class SpeechRequest(BaseModel):
@@ -169,7 +213,12 @@ class SpeechRequest(BaseModel):
 
     model_config = ConfigDict(
         extra="ignore",
-        json_schema_extra={"examples": [{"input": "红方略优。诗琚首选「炮二平五」。", "request_id": 1}]},
+        json_schema_extra={
+            "examples": [
+                {"input": "红方略优。诗琚首选「炮二平五」。", "request_id": 1},
+                {"input": "红方略优。", "voice": "pet-a", "request_id": 2, "stream": True},
+            ]
+        },
     )
     input: str | None = Field(
         default=None,
@@ -181,6 +230,12 @@ class SpeechRequest(BaseModel):
         description="要念的中文。input 缺省时使用。",
         examples=["黑方均势。"],
     )
+    voice: str | None = Field(
+        default=None,
+        description="音色 id。缺省用默认音色；找不到时返回 404 voice_not_found。",
+        examples=["pet-a"],
+    )
+    voice_id: str | None = Field(default=None, description="voice 的别名。")
     request_id: int | str | None = Field(
         default=None,
         description="这一句的编号。取消时带同一个编号，或用 before 丢掉更早的编号。",
@@ -191,7 +246,7 @@ class SpeechRequest(BaseModel):
         default=False,
         description=(
             "为 true 时不等整句结束：200、Transfer-Encoding: chunked、"
-            "Content-Type: application/octet-stream，响应头 X-Sample-Rate。"
+            "Content-Type: application/octet-stream，响应头 X-Sample-Rate 和 X-Voice-Id。"
             "每一块是 0x01 + u32le 长度 + s16le 单声道 PCM；结束是 0x00；"
             "中途失败是 0x02 加 cancelled 或 failed。缺省仍返回整段 audio/wav。"
         ),
@@ -215,8 +270,51 @@ class CancelRequest(BaseModel):
     id: int | str | None = Field(default=None, description="request_id 的别名。")
 
 
+class VoiceView(BaseModel):
+    id: str = Field(description="音色 id，也是合成请求里的 voice。", examples=["pet-a"])
+    name: str = Field(description="显示名。", examples=["宠物A"])
+    description: str = Field(default="", description="说明。")
+    tags: list[str] = Field(default_factory=list, description="标签。", examples=[["宠物"]])
+    promptSeconds: float = Field(description="参考录音秒数。")
+    sampleRate: int = Field(description="参考录音重采样后的采样率。", examples=[16000])
+    createdAt: str = Field(description="注册时间，本地时区 ISO 8601。")
+    builtin: bool = Field(description="是否服务自带、不可删除的默认音色。")
+
+
+class VoiceBody(BaseModel):
+    ok: bool = Field(description="操作成功。")
+    voice: VoiceView
+    warnings: list[str] = Field(default_factory=list, description="不影响成功、但值得提示的问题。")
+
+
+class VoiceListBody(BaseModel):
+    ok: bool = Field(description="操作成功。")
+    defaultVoice: str = Field(description="默认音色 id。")
+    voices: list[VoiceView] = Field(description="全部音色，内置音色在前。")
+
+
+class DefaultVoiceBody(BaseModel):
+    ok: bool = Field(description="操作成功。")
+    defaultVoice: str = Field(description="新的默认音色 id。")
+
+
+class VoicePatchRequest(BaseModel):
+    """只改显示字段，不重新注册参考音。"""
+
+    model_config = ConfigDict(extra="ignore")
+    name: str | None = Field(default=None, description="显示名，最多 80 字。")
+    description: str | None = Field(default=None, description="说明，最多 500 字。")
+    tags: str | list[str] | None = Field(default=None, description="标签，逗号分隔或字符串数组。")
+
+
+class DeleteOk(BaseModel):
+    ok: bool = Field(description="已经删除。")
+    deleted: str = Field(description="被删除的音色 id。")
+
+
 GATE = EpochGate()
 MODEL = None
+VOICES: voice_store.VoiceStore | None = None
 SAMPLE_RATE = 24000
 DEVICE = "cpu"
 PRECISION = "fp32"
@@ -394,6 +492,7 @@ def resolve_paths(environ: Mapping[str, str], asset_wav: Path | None = None) -> 
         prompt_text_inline=inline,
         prompt_text_file=prompt_text_file,
         device=normalize_device(first_env(environ, "QILING_COSYVOICE_DEVICE", "SIJU_COSYVOICE_DEVICE") or None),
+        voices=home / "voices",
     )
 
 
@@ -483,6 +582,377 @@ def register_child_voice(model, prompt_text: str, prompt_wav: Path) -> None:
         raise RuntimeError("零样本参考音没有注册成功")
 
 
+def add_speaker(model, spk_id: str, prompt_text: str, prompt_wav: Path) -> bool:
+    """Register one preset into the single loaded model. Never raises to the caller."""
+    try:
+        return model.add_zero_shot_spk(cosyvoice3_prompt(prompt_text), str(prompt_wav), spk_id) is True
+    except Exception as exc:
+        sys.stderr.write(f"qiling voice register failed id={spk_id}: {exc}\n")
+        traceback.print_exc(file=sys.stderr)
+        return False
+
+
+def remove_speaker(model, spk_id: str) -> None:
+    """Best-effort eviction. CosyVoice keeps speakers in `frontend.spk2info`."""
+    for owner in (model, getattr(model, "frontend", None)):
+        info = getattr(owner, "spk2info", None)
+        if isinstance(info, dict):
+            info.pop(spk_id, None)
+            return
+    for name in ("del_spk", "delete_spk", "remove_spk"):
+        remover = getattr(model, name, None)
+        if callable(remover):
+            try:
+                remover(spk_id)
+            except Exception as exc:
+                sys.stderr.write(f"qiling voice remove failed id={spk_id}: {exc}\n")
+            return
+
+
+def clean_prompt_text(raw: object) -> str:
+    """The transcript the model hears, without the control prefix."""
+    text = " ".join(str(raw or "").split())
+    text = spoken_body(text)
+    return text.strip()
+
+
+def prompt_text_problem(text: str) -> str | None:
+    if not text:
+        return "prompt_text 不能为空。请填写参考录音里实际说的那句话。"
+    if len(text) > voice_store.MAX_PROMPT_CHARS:
+        return f"prompt_text 有 {len(text)} 字，上限 {voice_store.MAX_PROMPT_CHARS} 字。"
+    return None
+
+
+def voice_error(error: str, status: int, detail: str = "", **extra: Any) -> JSONResponse:
+    payload: dict[str, Any] = {"error": error}
+    if detail:
+        payload["detail"] = detail
+    payload.update(extra)
+    return JSONResponse(payload, status_code=status)
+
+
+def voice_not_found(voice_id: str) -> JSONResponse:
+    # Never fall back to the default here: a wrong character voice is worse
+    # than a clear error, because the app would otherwise think it is configured.
+    return voice_error("voice_not_found", 404, voice=voice_id)
+
+
+def requested_voice(body: SpeechRequest) -> str:
+    for value in (body.voice, body.voice_id):
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    if VOICES is not None:
+        return VOICES.default_id()
+    return voice_store.BUILTIN_ID
+
+
+def resolve_voice(voice_id: str) -> voice_store.VoicePreset | None:
+    return VOICES.get(voice_id) if VOICES is not None else None
+
+
+class MultipartError(ValueError):
+    pass
+
+
+def _disposition_param(value: str, key: str) -> str:
+    match = re.search(rf"(?:^|;)\s*{re.escape(key)}\s*=\s*(?:\"([^\"]*)\"|([^;\s]+))", value, re.I)
+    if match is None:
+        return ""
+    return match.group(1) if match.group(1) is not None else match.group(2)
+
+
+def parse_multipart(content_type: str, body: bytes) -> tuple[dict[str, str], dict[str, tuple[str, bytes]]]:
+    """Parse the small multipart form used by voice registration.
+
+    FastAPI's Form/File parsing needs `python-multipart`; the service keeps its
+    dependency list at FastAPI + uvicorn, so this handles only the one shape it
+    accepts: text fields plus named binary parts.
+    """
+    head, _, parameters = content_type.partition(";")
+    if head.strip().lower() != "multipart/form-data":
+        raise MultipartError("注册音色需要 multipart/form-data。")
+    boundary = ""
+    for parameter in parameters.split(";"):
+        key, _, value = parameter.strip().partition("=")
+        if key.lower() == "boundary":
+            boundary = value.strip().strip('"')
+    if not boundary or len(boundary) > 200:
+        raise MultipartError("multipart 缺少 boundary。")
+    delimiter = b"--" + boundary.encode("latin-1", "replace")
+    if delimiter not in body:
+        raise MultipartError("multipart body 里没有 boundary。")
+    fields: dict[str, str] = {}
+    files: dict[str, tuple[str, bytes]] = {}
+    for part in body.split(delimiter)[1:]:
+        if part.startswith(b"--"):
+            break
+        if part.startswith(b"\r\n"):
+            part = part[2:]
+        if part.endswith(b"\r\n"):
+            part = part[:-2]
+        header_block, separator, content = part.partition(b"\r\n\r\n")
+        if not separator:
+            continue
+        headers: dict[str, str] = {}
+        for line in header_block.split(b"\r\n"):
+            name, colon, value = line.partition(b":")
+            if colon:
+                headers[name.strip().lower().decode("latin-1", "replace")] = value.strip().decode(
+                    "latin-1", "replace"
+                )
+        disposition = headers.get("content-disposition", "")
+        field_name = _disposition_param(disposition, "name")
+        if not field_name:
+            continue
+        filename = _disposition_param(disposition, "filename")
+        if filename:
+            files[field_name] = (filename, content)
+        else:
+            fields[field_name] = content.decode("utf-8", "replace")
+    return fields, files
+
+
+async def read_body_limited(request: Request, limit: int) -> bytes | None:
+    """Read at most `limit` bytes. Content-Length is prechecked by middleware."""
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > limit:
+            return None
+        body.extend(chunk)
+    return bytes(body)
+
+
+def upload_audio(fields: dict[str, str], files: dict[str, tuple[str, bytes]]) -> tuple[audio_io.Clip | None, JSONResponse | None]:
+    part = files.get("prompt_audio") or files.get("audio")
+    if part is None:
+        return None, voice_error("bad_audio", 400, "缺少 prompt_audio 文件。")
+    filename, data = part
+    if not data:
+        return None, voice_error("bad_audio", 400, f"{filename or 'prompt_audio'} 是空文件。")
+    if len(data) > audio_io.MAX_BYTES:
+        return None, voice_error(
+            "audio_too_large",
+            413,
+            f"参考音频有 {len(data) / 1024 / 1024:.1f} MB，上限 10 MB。",
+        )
+    try:
+        return audio_io.decode(data), None
+    except audio_io.AudioError as exc:
+        return None, voice_error(exc.code, 413 if exc.code == "audio_too_large" else 400, exc.detail)
+
+
+def upload_warnings(clip: audio_io.Clip) -> list[str]:
+    if clip.seconds < 3.0:
+        return ["参考音频短于 3 秒，音色可能不稳定；建议 3–10 秒。"]
+    if clip.seconds > 10.0:
+        return ["参考音频长于 10 秒，通常没必要；3–10 秒就够。"]
+    return []
+
+
+def register_upload(
+    fields: dict[str, str],
+    files: dict[str, tuple[str, bytes]],
+) -> VoiceBody | JSONResponse:
+    """Shared by POST /v1/voices and PUT /v1/voices/{id}/prompt."""
+    if VOICES is None or MODEL is None:
+        return voice_error("model_not_loaded", 503, "模型还没加载。")
+    text = clean_prompt_text(fields.get("prompt_text", ""))
+    problem = prompt_text_problem(text)
+    if problem:
+        code = "prompt_text_empty" if not text else "prompt_text_too_long"
+        return voice_error(code, 400, problem)
+    clip, failure = upload_audio(fields, files)
+    if failure is not None:
+        return failure
+    assert clip is not None
+
+    voice_id = str(fields.get("voice_id") or "").strip()
+    if not voice_id:
+        taken = {voice.id for voice in VOICES.list()}
+        try:
+            taken.update(path.name for path in VOICES.root.iterdir() if path.is_dir())
+        except OSError:
+            pass
+        voice_id = voice_store.new_voice_id(taken)
+    if not voice_store.valid_voice_id(voice_id):
+        return voice_error(
+            "bad_voice_id",
+            400,
+            "voice_id 只能用字母或数字开头，后面跟字母、数字、_ 或 -，最长 64。",
+        )
+    name = " ".join(str(fields.get("name") or "").split())[: voice_store.MAX_NAME] or voice_id
+    description = " ".join(str(fields.get("description") or "").split())[: voice_store.MAX_DESCRIPTION]
+    tags = voice_store.parse_tags(fields.get("tags", ""))
+    meta = voice_store.VoiceMeta(
+        id=voice_id,
+        name=name,
+        description=description,
+        tags=tags,
+        prompt_seconds=round(clip.seconds, 3),
+        sample_rate=clip.sample_rate,
+        created_at=voice_store.now_iso(),
+        builtin=False,
+        prompt_text=text,
+    )
+    prompt_wav = audio_io.wav_bytes(clip.samples, clip.sample_rate)
+
+    with GATE.infer_lock():
+        if VOICES.exists(voice_id):
+            return voice_error("voice_exists", 409, f"音色 {voice_id} 已经存在。", voice=voice_id)
+        try:
+            preset = VOICES.stage(meta, prompt_wav)
+        except voice_store.VoiceExists:
+            return voice_error("voice_exists", 409, f"音色 {voice_id} 已经存在。", voice=voice_id)
+        except OSError as exc:
+            return voice_error("register_failed", 500, f"写入音色目录失败：{exc}")
+        if not add_speaker(MODEL, preset.spk_id, preset.prompt_text, preset.prompt_wav):
+            VOICES.discard(preset)
+            return voice_error("register_failed", 500, "提取音色嵌入失败，参考音没有注册。")
+        VOICES.activate(preset)
+    sys.stderr.write(
+        f"qiling voice registered id={voice_id} seconds={clip.seconds:.2f} "
+        f"voices={VOICES.count()}\n"
+    )
+    return VoiceBody(
+        ok=True,
+        voice=VoiceView(**preset.meta.public()),
+        warnings=upload_warnings(clip),
+    )
+
+
+def replace_voice_prompt(
+    voice_id: str,
+    fields: dict[str, str],
+    files: dict[str, tuple[str, bytes]],
+) -> VoiceBody | JSONResponse:
+    if VOICES is None or MODEL is None:
+        return voice_error("model_not_loaded", 503, "模型还没加载。")
+    if not voice_store.valid_voice_id(voice_id):
+        return voice_not_found(voice_id)
+    text = clean_prompt_text(fields.get("prompt_text", ""))
+    problem = prompt_text_problem(text)
+    if problem:
+        code = "prompt_text_empty" if not text else "prompt_text_too_long"
+        return voice_error(code, 400, problem)
+    clip, failure = upload_audio(fields, files)
+    if failure is not None:
+        return failure
+    assert clip is not None
+    prompt_wav = audio_io.wav_bytes(clip.samples, clip.sample_rate)
+
+    with GATE.infer_lock():
+        preset = VOICES.get(voice_id)
+        if preset is None:
+            return voice_not_found(voice_id)
+        if preset.meta.builtin:
+            return voice_error("builtin_voice", 400, "内置默认音色的参考音不能替换；请注册新音色。")
+        temporary = VOICES.root / voice_id / ".prompt-new.wav"
+        try:
+            temporary.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_bytes(prompt_wav)
+            if not add_speaker(MODEL, preset.spk_id, text, temporary):
+                return voice_error("register_failed", 500, "提取音色嵌入失败，原参考音保持不变。")
+            try:
+                updated = VOICES.replace_prompt(
+                    voice_id,
+                    prompt_wav=prompt_wav,
+                    prompt_text=text,
+                    prompt_seconds=clip.seconds,
+                    sample_rate=clip.sample_rate,
+                )
+            except Exception as exc:
+                # The speaker map now has the new clip but disk still has the
+                # old one. Put the old prompt back so this process matches disk.
+                add_speaker(MODEL, preset.spk_id, preset.prompt_text, preset.prompt_wav)
+                return voice_error("register_failed", 500, f"写入新参考音失败：{exc}")
+        except OSError as exc:
+            return voice_error("register_failed", 500, f"替换参考音失败：{exc}")
+        finally:
+            with contextlib.suppress(OSError):
+                temporary.unlink()
+    sys.stderr.write(f"qiling voice prompt replaced id={voice_id} seconds={clip.seconds:.2f}\n")
+    return VoiceBody(
+        ok=True,
+        voice=VoiceView(**updated.meta.public()),
+        warnings=upload_warnings(clip),
+    )
+
+
+def voice_view(voice: voice_store.VoicePreset) -> VoiceView:
+    return VoiceView(**voice.meta.public())
+
+
+def list_voices_payload() -> VoiceListBody:
+    assert VOICES is not None
+    return VoiceListBody(
+        ok=True,
+        defaultVoice=VOICES.default_id(),
+        voices=[voice_view(voice) for voice in VOICES.list()],
+    )
+
+
+def build_builtin_preset(paths: ServicePaths, prompt: str) -> voice_store.VoicePreset:
+    """The builtin keeps its existing prompt resolution; only the id is new."""
+    spoken = clean_prompt_text(prompt)
+    seconds = float(wav_duration_secs(paths.prompt_wav) or 0.0)
+    meta = voice_store.VoiceMeta(
+        id=voice_store.BUILTIN_ID,
+        name=voice_store.BUILTIN_NAME,
+        description="服务自带的儿童女孩零样本音色。",
+        tags=("内置",),
+        prompt_seconds=round(seconds, 3),
+        sample_rate=audio_io.TARGET_RATE,
+        created_at=voice_store.now_iso(),
+        builtin=True,
+        prompt_text=spoken,
+    )
+    return voice_store.VoicePreset(meta=meta, prompt_wav=paths.prompt_wav.resolve())
+
+
+def load_voice_library(paths: ServicePaths, prompt: str) -> list[str]:
+    """Scan presets and register each into the loaded model. Returns warnings."""
+    global VOICES
+    store = voice_store.VoiceStore(paths.voices)
+    builtin = build_builtin_preset(paths, prompt)
+    sidecar = store.read_meta(builtin.id)
+    if sidecar is not None:
+        # Display fields may be renamed; the reference clip still comes from
+        # QILING_COSYVOICE_PROMPT_* / app-data, so upgrades keep the same voice.
+        builtin = voice_store.VoicePreset(
+            meta=replace(
+                builtin.meta,
+                name=sidecar.name,
+                description=sidecar.description,
+                tags=sidecar.tags or builtin.meta.tags,
+                created_at=sidecar.created_at or builtin.meta.created_at,
+            ),
+            prompt_wav=builtin.prompt_wav,
+        )
+    store.install_builtin(builtin)
+    warnings: list[str] = []
+    try:
+        loaded = store.scan()
+    except Exception as exc:
+        warnings.append(f"扫描音色目录失败：{exc}")
+        loaded = []
+    warnings.extend(store.warnings)
+    VOICES = store
+    failed: set[str] = set()
+    for preset in loaded:
+        if MODEL is not None and not add_speaker(MODEL, preset.spk_id, preset.prompt_text, preset.prompt_wav):
+            failed.add(preset.id)
+            warnings.append(f"音色 {preset.id} 启动注册失败，仍保留在列表里，可 PUT 参考音修复。")
+    if failed and store.default_id() in failed:
+        fallback = store.default_id()
+        try:
+            store.set_default(voice_store.BUILTIN_ID)
+            warnings.append(f"默认音色 {fallback} 启动注册失败，已回退到内置音色。")
+        except (KeyError, OSError) as exc:
+            warnings.append(f"默认音色 {fallback} 启动注册失败，回退内置音色也失败：{exc}")
+    return warnings
+
+
 def pcm_to_wav(pcm: bytes, sample_rate: int) -> bytes:
     buffer = BytesIO()
     with wave.open(buffer, "wb") as handle:
@@ -509,7 +979,7 @@ def fail_frame(reason: str) -> bytes:
     return b"\x02" + text.encode("ascii")
 
 
-def model_pcm_chunks(request_id: int | str, piece: str):
+def model_pcm_chunks(request_id: int | str, piece: str, spk_id: str = CHILD_SPK_ID):
     """Yield s16le PCM for one short utterance as the model produces it."""
     import torch
 
@@ -517,7 +987,7 @@ def model_pcm_chunks(request_id: int | str, piece: str):
         piece,
         "",
         "",
-        zero_shot_spk_id=CHILD_SPK_ID,
+        zero_shot_spk_id=spk_id,
         stream=True,
         speed=1.0,
     )
@@ -536,7 +1006,7 @@ def model_pcm_chunks(request_id: int | str, piece: str):
                 yield pcm
 
 
-def warmup(model, fp16: bool = False) -> None:
+def warmup(model, fp16: bool = False, spk_id: str = CHILD_SPK_ID) -> None:
     """Spend the first-call cost (kernel autotune, allocator growth) at startup."""
     import torch
 
@@ -547,7 +1017,7 @@ def warmup(model, fp16: bool = False) -> None:
                 WARMUP_LINE,
                 "",
                 "",
-                zero_shot_spk_id=CHILD_SPK_ID,
+                zero_shot_spk_id=spk_id,
                 stream=True,
                 speed=1.0,
             ):
@@ -559,38 +1029,46 @@ def warmup(model, fp16: bool = False) -> None:
     sys.stderr.write(f"qiling cosyvoice3 warmup {time.monotonic() - started:.2f}s\n")
 
 
-def log_utterance(chars: int, chunks: int, audio: float, wall: float, first: float) -> None:
+def log_utterance(chars: int, chunks: int, audio: float, wall: float, first: float, voice_id: str) -> None:
     """One line per spoken sentence: first frame and RTF are what "卡壳" looks like."""
     rtf = wall / audio if audio > 0 else 0.0
     sys.stderr.write(
-        f"qiling cosyvoice3 chars={chars} chunks={chunks} audio={audio:.2f}s "
+        f"qiling cosyvoice3 voice={voice_id} chars={chars} chunks={chunks} audio={audio:.2f}s "
         f"wall={wall:.2f}s first={first * 1000:.0f}ms rtf={rtf:.2f}\n"
     )
 
 
-def synthesize(request_id: int | str, text: str) -> tuple[int, bytes, str]:
+def synthesize(request_id: int | str, text: str, voice_id: str) -> tuple[int, bytes, str]:
     line = " ".join(text.split())
     if not line:
         return 400, b'{"error":"empty"}', "application/json"
     if len(line) > 400:
         return 400, b'{"error":"too_long"}', "application/json"
+    preset = resolve_voice(voice_id)
+    if preset is None:
+        return 404, b'{"error":"voice_not_found"}', "application/json"
     with GATE.running(request_id) as live:
         if not live:
             return 409, b'{"error":"cancelled"}', "application/json"
         if SYNTHESIZE is not None:
-            return SYNTHESIZE(line)
+            return SYNTHESIZE(line, voice_id)
         started = time.monotonic()
         first = 0.0
         audio = 0.0
         chunks = 0
         pcm = bytearray()
         with GATE.infer_lock():
+            # The registry may have changed while this request waited for the
+            # inference lock; do not synthesize with a voice deleted meanwhile.
+            preset = resolve_voice(voice_id)
+            if preset is None:
+                return 404, b'{"error":"voice_not_found"}', "application/json"
             if not GATE.allowed(request_id):
                 return 409, b'{"error":"cancelled"}', "application/json"
             for piece in split_utterances(line, UTTERANCE_CHARS):
                 if not GATE.allowed(request_id):
                     break
-                for chunk in model_pcm_chunks(request_id, piece):
+                for chunk in model_pcm_chunks(request_id, piece, preset.spk_id):
                     if chunks == 0:
                         first = time.monotonic() - started
                     chunks += 1
@@ -600,20 +1078,31 @@ def synthesize(request_id: int | str, text: str) -> tuple[int, bytes, str]:
             return 409, b'{"error":"cancelled"}', "application/json"
         if not pcm:
             return 500, b'{"error":"empty_audio"}', "application/json"
-        log_utterance(len(line), chunks, audio, time.monotonic() - started, first)
+        log_utterance(len(line), chunks, audio, time.monotonic() - started, first, voice_id)
         return 200, pcm_to_wav(bytes(pcm), SAMPLE_RATE), "audio/wav"
 
 
 def health_payload() -> HealthBody:
+    if VOICES is not None:
+        default = VOICES.default_id()
+        count = VOICES.count()
+        default_voice = VOICES.get(default)
+        prompt_seconds = default_voice.meta.prompt_seconds if default_voice is not None else PROMPT_SECONDS
+    else:
+        default = VOICE
+        count = 1
+        prompt_seconds = PROMPT_SECONDS
     return HealthBody(
         ok=True,
         engine=ENGINE,
         model=MODEL_NAME,
-        voice=VOICE,
+        voice=default,
+        defaultVoice=default,
+        voiceCount=count,
         sampleRate=SAMPLE_RATE,
         device=DEVICE,
         precision=PRECISION,
-        promptSeconds=PROMPT_SECONDS,
+        promptSeconds=prompt_seconds,
     )
 
 
@@ -661,17 +1150,17 @@ def refusal(text: str) -> JSONResponse | None:
     return None
 
 
-def iter_model_pcm(request_id: str, line: str):
+def iter_model_pcm(request_id: str, line: str, spk_id: str):
     if STREAM_ITER is not None:
         yield from STREAM_ITER()
         return
     for piece in split_utterances(line, UTTERANCE_CHARS):
         if not GATE.allowed(request_id):
             return
-        yield from model_pcm_chunks(request_id, piece)
+        yield from model_pcm_chunks(request_id, piece, spk_id)
 
 
-def stream_frames(request_id: str, line: str):
+def stream_frames(request_id: str, line: str, voice_id: str):
     """One HTTP chunk per frame. The lock covers the whole utterance."""
     with GATE.running(request_id) as live:
         if not live:
@@ -687,7 +1176,12 @@ def stream_frames(request_id: str, line: str):
                 if not GATE.allowed(request_id):
                     yield fail_frame("cancelled")
                     return
-                for pcm in iter_model_pcm(request_id, line):
+                preset = resolve_voice(voice_id)
+                if preset is None:
+                    # The voice was deleted between the header check and the lock.
+                    yield fail_frame("failed")
+                    return
+                for pcm in iter_model_pcm(request_id, line, preset.spk_id):
                     if not GATE.allowed(request_id):
                         yield fail_frame("cancelled")
                         return
@@ -703,7 +1197,7 @@ def stream_frames(request_id: str, line: str):
             if not emitted:
                 yield fail_frame("failed")
                 return
-            log_utterance(len(line), chunks, audio, time.monotonic() - started, first)
+            log_utterance(len(line), chunks, audio, time.monotonic() - started, first, voice_id)
             yield b"\x00"
         except Exception as exc:
             sys.stderr.write(f"synthesize failed: {exc}\n")
@@ -711,18 +1205,19 @@ def stream_frames(request_id: str, line: str):
             yield fail_frame("failed")
 
 
-def stream_speech(body: SpeechRequest) -> Response:
+def stream_speech(body: SpeechRequest, preset: voice_store.VoicePreset) -> Response:
     request_id = request_id_of(body)
     line = spoken_line(body)
     refused = refusal(line)
     if refused is not None:
         return refused
     return StreamingResponse(
-        stream_frames(request_id, " ".join(line.split())),
+        stream_frames(request_id, " ".join(line.split()), preset.id),
         status_code=200,
         media_type="application/octet-stream",
         headers={
             "X-Sample-Rate": str(SAMPLE_RATE),
+            "X-Voice-Id": preset.id,
             "Transfer-Encoding": "chunked",
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
@@ -731,17 +1226,27 @@ def stream_speech(body: SpeechRequest) -> Response:
 
 
 def speech_result(body: SpeechRequest) -> Response:
+    voice_id = requested_voice(body)
+    preset = resolve_voice(voice_id)
+    if preset is None:
+        return voice_not_found(voice_id)
     if body.stream:
-        return stream_speech(body)
+        return stream_speech(body, preset)
     try:
-        status, payload, content_type = synthesize(request_id_of(body), spoken_line(body))
+        status, payload, content_type = synthesize(request_id_of(body), spoken_line(body), voice_id)
     except Exception as exc:  # model errors stay on this machine
         sys.stderr.write(f"synthesize failed: {exc}\n")
         traceback.print_exc(file=sys.stderr)
         return JSONResponse({"error": "synthesize_failed"}, status_code=500)
+    if status == 404:
+        return voice_not_found(voice_id)
     if status != 200:
         return error_response(status, payload)
-    return Response(content=payload, media_type=content_type)
+    return Response(
+        content=payload,
+        media_type=content_type,
+        headers={"X-Voice-Id": voice_id},
+    )
 
 
 def cancel_result(body: CancelRequest) -> JSONResponse:
@@ -761,25 +1266,69 @@ SPEECH_RESPONSES: dict[int | str, dict[str, Any]] = {
         "description": (
             "stream 缺省时是整段 WAV。"
             "stream 为 true 时按块返回：0x01 + u32le 长度 + s16le PCM，结束 0x00，"
-            "中途失败 0x02 + cancelled 或 failed。响应头 X-Sample-Rate。"
+            "中途失败 0x02 + cancelled 或 failed。响应头 X-Sample-Rate 和 X-Voice-Id。"
         ),
     },
     400: {"model": ErrorBody, "description": "没有可念的字，或超过 400 字。"},
+    404: {"model": ErrorBody, "description": "voice 不存在。"},
     409: {"model": ErrorBody, "description": "这一句已被取消。"},
     413: {"model": ErrorBody, "description": "请求体超过 16KB。"},
     500: {"model": ErrorBody, "description": "本机合成失败。"},
 }
 
+VOICE_UPLOAD_BODY: dict[str, Any] = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "required": ["prompt_text", "prompt_audio"],
+                    "properties": {
+                        "voice_id": {
+                            "type": "string",
+                            "pattern": voice_store.VOICE_ID_PATTERN,
+                            "description": "可选；缺省由服务端生成。",
+                        },
+                        "name": {"type": "string", "maxLength": voice_store.MAX_NAME},
+                        "prompt_text": {
+                            "type": "string",
+                            "description": "参考音频里实际说的话，1–500 字，必须与音频严格对应。",
+                        },
+                        "prompt_audio": {
+                            "type": "string",
+                            "format": "binary",
+                            "description": "wav/mp3/m4a，1–30 秒，推荐 3–10 秒，最大 10 MB。",
+                        },
+                        "description": {"type": "string", "maxLength": voice_store.MAX_DESCRIPTION},
+                        "tags": {"type": "string", "description": "逗号分隔，例如 宠物,旁白。"},
+                    },
+                }
+            }
+        },
+    }
+}
+
+VOICE_UPLOAD_RESPONSES: dict[int | str, dict[str, Any]] = {
+    200: {"model": VoiceBody, "description": "注册成功。"},
+    400: {"model": ErrorBody, "description": "音频、逐字稿或 voice_id 不合法。"},
+    409: {"model": ErrorBody, "description": "voice_id 已存在。"},
+    413: {"model": ErrorBody, "description": "音频超过 10 MB 或请求体过大。"},
+    500: {"model": ErrorBody, "description": "提取音色嵌入失败。"},
+}
+
 
 app = FastAPI(
-    title="识局 CosyVoice",
-    summary="本机儿童女孩零样本语音。",
+    title="器灵 CosyVoice",
+    summary="本机 CosyVoice 3 多角色零样本语音。",
     description=(
-        "诗琚的本机音色。服务只监听 127.0.0.1。"
-        "参考录音和逐字稿留在服务进程里（SIJU_COSYVOICE_PROMPT_* 或应用数据目录）。"
+        "器灵的本机语音服务。服务只监听 127.0.0.1。"
+        "内置默认音色 child-girl-zero-shot 的参考录音和逐字稿留在服务进程里"
+        "（QILING_COSYVOICE_PROMPT_* / SIJU_COSYVOICE_PROMPT_* 或应用数据目录）。"
+        "其他音色用 POST /v1/voices 上传参考音注册一次，合成时用 voice 选择。"
         "请求里只放要念的中文，不要带局面 FEN，也不要带参考音路径。"
     ),
-    version="1.0.0",
+    version="1.1.0",
     docs_url=None,
     redoc_url="/redoc",
 )
@@ -845,17 +1394,29 @@ def swagger_docs() -> HTMLResponse:
     return HTMLResponse(html)
 
 
+def body_limit_for(method: str, path: str) -> int:
+    """Registration uploads one clip; every other body keeps the 16 KB cap."""
+    route = path.rstrip("/")
+    if method == "POST" and route == "/v1/voices":
+        return MAX_UPLOAD_BODY
+    if method == "PUT" and route.startswith("/v1/voices/") and route.endswith("/prompt"):
+        return MAX_UPLOAD_BODY
+    return MAX_SPEECH_BODY
+
+
 @app.middleware("http")
 async def limit_body(request, call_next):
-    if request.method == "POST":
+    if request.method in {"POST", "PUT", "PATCH"}:
         raw = request.headers.get("content-length")
         if raw is not None:
             try:
                 length = int(raw)
             except ValueError:
                 length = -1
-            if length < 0 or length > MAX_BODY:
-                return JSONResponse({"error": "too_large"}, status_code=413)
+            limit = body_limit_for(request.method, request.url.path)
+            if length < 0 or length > limit:
+                error = "audio_too_large" if limit == MAX_UPLOAD_BODY else "too_large"
+                return JSONResponse({"error": error}, status_code=413)
     return await call_next(request)
 
 
@@ -890,6 +1451,161 @@ def speech(body: SpeechRequest) -> Response:
 @app.post("/cancel", include_in_schema=False)
 def cancel(body: CancelRequest) -> JSONResponse:
     return cancel_result(body)
+
+
+@app.get(
+    "/v1/voices",
+    response_model=VoiceListBody,
+    summary="列出全部音色",
+)
+def list_voices() -> VoiceListBody | JSONResponse:
+    if VOICES is None:
+        return voice_error("model_not_loaded", 503, "模型还没加载。")
+    return list_voices_payload()
+
+
+@app.get(
+    "/v1/voices/{voice_id}",
+    response_model=VoiceBody,
+    summary="查一个音色",
+    responses={404: {"model": ErrorBody, "description": "voice 不存在。"}},
+)
+def get_voice(voice_id: str) -> VoiceBody | JSONResponse:
+    preset = resolve_voice(voice_id)
+    if preset is None:
+        return voice_not_found(voice_id)
+    return VoiceBody(ok=True, voice=voice_view(preset))
+
+
+@app.post(
+    "/v1/voices",
+    response_model=VoiceBody,
+    summary="注册音色",
+    responses=VOICE_UPLOAD_RESPONSES,
+    openapi_extra=VOICE_UPLOAD_BODY,
+)
+async def create_voice(request: Request) -> VoiceBody | JSONResponse:
+    if VOICES is None:
+        return voice_error("model_not_loaded", 503, "模型还没加载。")
+    raw = await read_body_limited(request, MAX_UPLOAD_BODY)
+    if raw is None:
+        return voice_error("audio_too_large", 413, "上传内容超过 10 MB。")
+    try:
+        # Decoding and speaker embedding are CPU-bound; keep /health responsive.
+        fields, files = await run_in_threadpool(
+            parse_multipart, request.headers.get("content-type", ""), raw
+        )
+    except MultipartError as exc:
+        return voice_error("bad_multipart", 400, str(exc))
+    return await run_in_threadpool(register_upload, fields, files)
+
+
+@app.patch(
+    "/v1/voices/{voice_id}",
+    response_model=VoiceBody,
+    summary="改音色的显示名、说明或标签",
+    responses={404: {"model": ErrorBody, "description": "voice 不存在。"}},
+)
+def patch_voice(voice_id: str, patch: VoicePatchRequest) -> VoiceBody | JSONResponse:
+    if VOICES is None:
+        return voice_error("model_not_loaded", 503, "模型还没加载。")
+    preset = VOICES.get(voice_id)
+    if preset is None:
+        return voice_not_found(voice_id)
+    name = None
+    if patch.name is not None:
+        name = " ".join(patch.name.split())
+        if not name or len(name) > voice_store.MAX_NAME:
+            return voice_error("bad_meta", 400, f"name 需要 1–{voice_store.MAX_NAME} 字。")
+    description = None
+    if patch.description is not None:
+        description = " ".join(patch.description.split())
+        if len(description) > voice_store.MAX_DESCRIPTION:
+            return voice_error("bad_meta", 400, f"description 最多 {voice_store.MAX_DESCRIPTION} 字。")
+    tags = voice_store.parse_tags(patch.tags) if patch.tags is not None else None
+    try:
+        updated = VOICES.update_meta(voice_id, name=name, description=description, tags=tags)
+    except KeyError:
+        return voice_not_found(voice_id)
+    except OSError as exc:
+        return voice_error("register_failed", 500, f"写入音色元数据失败：{exc}")
+    return VoiceBody(ok=True, voice=voice_view(updated))
+
+
+@app.put(
+    "/v1/voices/{voice_id}/prompt",
+    response_model=VoiceBody,
+    summary="替换参考音频并重新注册",
+    responses=VOICE_UPLOAD_RESPONSES,
+    openapi_extra=VOICE_UPLOAD_BODY,
+)
+async def put_voice_prompt(voice_id: str, request: Request) -> VoiceBody | JSONResponse:
+    if VOICES is None:
+        return voice_error("model_not_loaded", 503, "模型还没加载。")
+    raw = await read_body_limited(request, MAX_UPLOAD_BODY)
+    if raw is None:
+        return voice_error("audio_too_large", 413, "上传内容超过 10 MB。")
+    try:
+        fields, files = await run_in_threadpool(
+            parse_multipart, request.headers.get("content-type", ""), raw
+        )
+    except MultipartError as exc:
+        return voice_error("bad_multipart", 400, str(exc))
+    return await run_in_threadpool(replace_voice_prompt, voice_id, fields, files)
+
+
+@app.delete(
+    "/v1/voices/{voice_id}",
+    response_model=DeleteOk,
+    summary="删除音色",
+    responses={
+        400: {"model": ErrorBody, "description": "内置默认音色不能删除。"},
+        404: {"model": ErrorBody, "description": "voice 不存在。"},
+    },
+)
+def delete_voice(voice_id: str) -> DeleteOk | JSONResponse:
+    if VOICES is None:
+        return voice_error("model_not_loaded", 503, "模型还没加载。")
+    preset = VOICES.get(voice_id)
+    if preset is None:
+        return voice_not_found(voice_id)
+    if preset.meta.builtin:
+        return voice_error("builtin_voice", 400, "内置默认音色不能删除。")
+    with GATE.infer_lock():
+        # Re-check under the inference lock: registration and deletion both take
+        # it, so a synthesis cannot be holding this preset while it disappears.
+        preset = VOICES.get(voice_id)
+        if preset is None:
+            return voice_not_found(voice_id)
+        try:
+            VOICES.delete(voice_id)
+        except OSError as exc:
+            return voice_error("register_failed", 500, f"删除音色目录失败：{exc}")
+        if MODEL is not None:
+            remove_speaker(MODEL, preset.spk_id)
+    sys.stderr.write(f"qiling voice deleted id={voice_id} voices={VOICES.count()}\n")
+    return DeleteOk(ok=True, deleted=voice_id)
+
+
+@app.post(
+    "/v1/voices/{voice_id}/default",
+    response_model=DefaultVoiceBody,
+    summary="把音色设为默认",
+    responses={404: {"model": ErrorBody, "description": "voice 不存在。"}},
+)
+def set_default_voice(voice_id: str) -> DefaultVoiceBody | JSONResponse:
+    if VOICES is None:
+        return voice_error("model_not_loaded", 503, "模型还没加载。")
+    if VOICES.get(voice_id) is None:
+        return voice_not_found(voice_id)
+    try:
+        VOICES.set_default(voice_id)
+    except KeyError:
+        return voice_not_found(voice_id)
+    except OSError as exc:
+        return voice_error("register_failed", 500, f"写入默认音色失败：{exc}")
+    sys.stderr.write(f"qiling voice default id={voice_id} voices={VOICES.count()}\n")
+    return DefaultVoiceBody(ok=True, defaultVoice=voice_id)
 
 
 def enable_tcp_nodelay() -> None:
@@ -932,7 +1648,7 @@ def enable_tcp_nodelay() -> None:
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Local CosyVoice 3 child-girl TTS for 识局")
+    parser = argparse.ArgumentParser(description="Local CosyVoice 3 multi-voice TTS for 器灵")
     parser.add_argument("--self-check", action="store_true")
     parser.add_argument("--repo", type=Path)
     parser.add_argument("--model", type=Path)
@@ -953,7 +1669,19 @@ def pcm_silence(samples: int, sample_rate: int = 16000) -> bytes:
 
 
 def self_check() -> None:
-    global SYNTHESIZE, SAMPLE_RATE, DEVICE, PRECISION, PROMPT_SECONDS
+    global SYNTHESIZE, MODEL, VOICES, SAMPLE_RATE, DEVICE, PRECISION, PROMPT_SECONDS
+
+    @contextlib.contextmanager
+    def scratch(prefix: str):
+        # tempfile.mkdtemp uses mode 0700; that can exclude a sandboxed harness
+        # token on Windows. A plainly-created folder stays writable.
+        base = Path(tempfile.gettempdir()) / f"{prefix}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        base.mkdir(parents=True)
+        try:
+            yield base
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
+
     gate = EpochGate()
     with gate.running(1) as live:
         assert live
@@ -1019,9 +1747,7 @@ def self_check() -> None:
     # A trailing full stop rides with the last words instead of being its own call.
     assert split_utterances("啊" * 48 + "。", 48) == ["啊" * 48 + "。"]
 
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as tmp_name:
+    with scratch("qiling-prompt") as tmp_name:
         tmp = Path(tmp_name)
         user_wav = tmp / "cosyvoice" / "voice-prompt-girl-child.wav"
         user_txt = tmp / "cosyvoice" / "voice-prompt-girl-child.txt"
@@ -1075,15 +1801,146 @@ def self_check() -> None:
         assert not ok and ("STUB" in detail or "秒" in detail), detail
 
     check_prompt()
+    audio_io.self_check()
+    voice_store.self_check()
+
+    assert clean_prompt_text("<|endofprompt|>你好。") == "你好。"
+    assert clean_prompt_text("  你 好  ") == "你 好"
+    assert prompt_text_problem("") is not None
+    assert prompt_text_problem("好") is None
+    boundary = b"--qiling-self-check-boundary"
+    sample_form = b"".join(
+        [
+            boundary,
+            b"\r\nContent-Disposition: form-data; name=\"prompt_text\"\r\n\r\n",
+            "你好。".encode("utf-8"),
+            b"\r\n",
+            boundary,
+            b"\r\nContent-Disposition: form-data; name=\"prompt_audio\"; filename=\"a.wav\"\r\n",
+            b"Content-Type: audio/wav\r\n\r\nRIFFdata\r\n",
+            boundary,
+            b"--\r\n",
+        ]
+    )
+    form_fields, form_files = parse_multipart(
+        "multipart/form-data; boundary=qiling-self-check-boundary", sample_form
+    )
+    assert form_fields["prompt_text"] == "你好。"
+    assert form_files["prompt_audio"][0] == "a.wav"
+    assert form_files["prompt_audio"][1] == b"RIFFdata"
+    try:
+        parse_multipart("application/json", b"{}")
+    except MultipartError:
+        pass
+    else:
+        raise AssertionError("accepted a non-multipart registration body")
+    assert body_limit_for("POST", "/v1/voices") == MAX_UPLOAD_BODY
+    assert body_limit_for("PUT", "/v1/voices/pet-a/prompt") == MAX_UPLOAD_BODY
+    assert body_limit_for("POST", "/v1/audio/speech") == MAX_SPEECH_BODY
+    assert body_limit_for("PATCH", "/v1/voices/pet-a") == MAX_SPEECH_BODY
 
     unready = health()
     assert getattr(unready, "status_code", None) == 503
     assert b"model_not_loaded" in unready.body
 
-    seen: list[str] = []
+    class FakeModel:
+        sample_rate = 24000
 
-    def fake(line: str) -> tuple[int, bytes, str]:
-        seen.append(line)
+        def __init__(self) -> None:
+            self.spk2info: dict[str, dict[str, str]] = {}
+
+        def add_zero_shot_spk(self, prompt_text, prompt_wav, zero_shot_spk_id) -> bool:
+            path = Path(str(prompt_wav))
+            if not path.is_file():
+                return False
+            self.spk2info[zero_shot_spk_id] = {
+                "prompt_text": prompt_text,
+                "prompt_wav": str(path),
+            }
+            return True
+
+    voice_home = Path(tempfile.gettempdir()) / f"qiling-server-voices-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    voice_home.mkdir(parents=True)
+    builtin_prompt_wav = voice_home / "builtin-prompt.wav"
+    builtin_prompt_wav.write_bytes(pcm_silence(16_000 * 4))
+    builtin_prompt_text = "今天想先看棋盘上的这一步。"
+    MODEL = FakeModel()
+    with scratch("qiling-library") as library_home:
+        seed = voice_store.VoiceStore(library_home / "voices")
+        seed_builtin = voice_store.VoicePreset(
+            meta=voice_store.VoiceMeta(
+                id=voice_store.BUILTIN_ID,
+                name=voice_store.BUILTIN_NAME,
+                description="",
+                tags=("内置",),
+                prompt_seconds=4.0,
+                sample_rate=16000,
+                created_at="2026-01-01T00:00:00+08:00",
+                builtin=True,
+                prompt_text=builtin_prompt_text,
+            ),
+            prompt_wav=builtin_prompt_wav,
+        )
+        seed.install_builtin(seed_builtin)
+        seed.update_meta(voice_store.BUILTIN_ID, name="诗琚·改")
+        seed_preset = seed.stage(
+            voice_store.VoiceMeta(
+                id="pet-a",
+                name="宠物A",
+                description="",
+                tags=("宠物",),
+                prompt_seconds=3.0,
+                sample_rate=16000,
+                created_at="2026-01-02T00:00:00+08:00",
+                prompt_text="这是启动时扫描到的参考音。",
+            ),
+            audio_io.tone_wav(3.0),
+        )
+        seed.activate(seed_preset)
+        seed.set_default("pet-a")
+        library_paths = ServicePaths(
+            repo=Path("."),
+            model=Path("."),
+            prompt_wav=builtin_prompt_wav,
+            prompt_text_inline=builtin_prompt_text,
+            prompt_text_file=Path("unused.txt"),
+            device="cpu",
+            voices=library_home / "voices",
+        )
+        warnings = load_voice_library(library_paths, cosyvoice3_prompt(builtin_prompt_text))
+        assert warnings == [], warnings
+        assert VOICES is not None
+        assert VOICES.default_id() == "pet-a"
+        assert VOICES.count() == 2
+        assert VOICES.get(voice_store.BUILTIN_ID).meta.name == "诗琚·改"
+        assert VOICES.get("pet-a").meta.prompt_seconds == 3.0
+        assert "pet-a" in MODEL.spk2info
+        assert VOICES.get("pet-a").prompt_text == "这是启动时扫描到的参考音。"
+    VOICES = None
+    MODEL = FakeModel()
+
+    VOICES = voice_store.VoiceStore(voice_home / "voices")
+    VOICES.install_builtin(
+        voice_store.VoicePreset(
+            meta=voice_store.VoiceMeta(
+                id=voice_store.BUILTIN_ID,
+                name=voice_store.BUILTIN_NAME,
+                description="服务自带的儿童女孩零样本音色。",
+                tags=("内置",),
+                prompt_seconds=4.0,
+                sample_rate=16000,
+                created_at="2026-01-01T00:00:00+08:00",
+                builtin=True,
+                prompt_text=builtin_prompt_text,
+            ),
+            prompt_wav=builtin_prompt_wav,
+        )
+    )
+
+    seen: list[tuple[str, str]] = []
+
+    def fake(line: str, voice_id: str) -> tuple[int, bytes, str]:
+        seen.append((line, voice_id))
         return 200, pcm_silence(240, 24000), "audio/wav"
 
     SYNTHESIZE = fake
@@ -1134,7 +1991,10 @@ def self_check() -> None:
         health_json = json.loads(body)
         assert health_json["ok"] is True
         assert health_json["engine"] == ENGINE
-        assert health_json["voice"] == VOICE
+        assert health_json["voice"] == voice_store.BUILTIN_ID
+        assert health_json["defaultVoice"] == voice_store.BUILTIN_ID
+        assert health_json["voiceCount"] == 1
+        assert health_json["promptSeconds"] == 4.0
         assert health_json["model"] == MODEL_NAME
         assert health_json["precision"] in {"fp16", "fp32"}
         status, _, other = call("GET", "/v1/health")
@@ -1150,15 +2010,27 @@ def self_check() -> None:
         status, _, spec_bytes = call("GET", "/openapi.json")
         assert status == 200
         spec = json.loads(spec_bytes)
-        assert {"/health", "/v1/health", "/v1/audio/speech", "/v1/audio/cancel"} <= set(spec["paths"])
+        assert {
+            "/health",
+            "/v1/health",
+            "/v1/audio/speech",
+            "/v1/audio/cancel",
+            "/v1/voices",
+            "/v1/voices/{voice_id}",
+            "/v1/voices/{voice_id}/prompt",
+            "/v1/voices/{voice_id}/default",
+        } <= set(spec["paths"])
         speech_spec = spec["paths"]["/v1/audio/speech"]["post"]
         assert "audio/wav" in speech_spec["responses"]["200"]["content"]
         schema_name = speech_spec["requestBody"]["content"]["application/json"]["schema"]["$ref"].rsplit("/", 1)[-1]
         props = spec["components"]["schemas"][schema_name]["properties"]
         assert "input" in props and "text" in props and "request_id" in props
+        assert "voice" in props and "voice_id" in props
         assert "fen" not in props
         assert "prompt_wav" not in props
         assert "prompt_text" not in props
+        register_spec = spec["paths"]["/v1/voices"]["post"]
+        assert "multipart/form-data" in register_spec["requestBody"]["content"]
 
         status, content_type, audio = call(
             "POST",
@@ -1173,11 +2045,11 @@ def self_check() -> None:
         assert status == 200, audio
         assert content_type.startswith("audio/wav")
         assert audio.startswith(b"RIFF") and len(audio) >= 44
-        assert seen == ["红方略优。"]
+        assert seen == [("红方略优。", voice_store.BUILTIN_ID)]
 
         status, _, _audio = call("POST", "/v1/audio/speech", {"text": "黑方均势。", "request_id": 2})
         assert status == 200
-        assert seen[-1] == "黑方均势。"
+        assert seen[-1] == ("黑方均势。", voice_store.BUILTIN_ID)
 
         status, _, error = call("POST", "/v1/audio/speech", {"input": "  "})
         assert status == 400 and b"empty" in error
@@ -1190,10 +2062,10 @@ def self_check() -> None:
         assert status == 200
         status, _, error = call("POST", "/v1/audio/speech", {"input": "还在算", "request_id": 3})
         assert status == 200, error
-        assert seen[-1] == "还在算"
+        assert seen[-1] == ("还在算", voice_store.BUILTIN_ID)
         status, _, _audio = call("POST", "/v1/audio/speech", {"input": "下一句", "request_id": 4})
         assert status == 200
-        assert seen[-1] == "下一句"
+        assert seen[-1] == ("下一句", voice_store.BUILTIN_ID)
 
         status, _, _ = call("POST", "/v1/audio/cancel", {"request_id": "drop-me"})
         assert status == 200
@@ -1207,10 +2079,225 @@ def self_check() -> None:
         status, _, error = call("POST", "/v1/audio/speech", {"input": "太大了" * 4000})
         assert status == 413 and b"too_large" in error
 
+        # ---------------------------------------------------------- voices
         import http.client
 
-        def post_raw(payload: dict) -> http.client.HTTPResponse:
-            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        def multipart_form(fields: dict[str, str], audio: bytes, filename: str = "clip.wav") -> tuple[bytes, str]:
+            marker = "----qiling-self-check"
+            chunks = []
+            for key, value in fields.items():
+                chunks.append(
+                    f"--{marker}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n".encode()
+                    + value.encode("utf-8")
+                    + b"\r\n"
+                )
+            chunks.append(
+                f"--{marker}\r\nContent-Disposition: form-data; name=\"prompt_audio\"; "
+                f"filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n".encode()
+                + audio
+                + b"\r\n"
+            )
+            chunks.append(f"--{marker}--\r\n".encode())
+            return b"".join(chunks), f"multipart/form-data; boundary={marker}"
+
+        def upload(method: str, path: str, fields: dict[str, str], audio: bytes) -> tuple[int, dict[str, str], bytes]:
+            body, content_type = multipart_form(fields, audio)
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            connection.request(
+                method,
+                path,
+                body=body,
+                headers={"Content-Type": content_type, "Content-Length": str(len(body))},
+            )
+            response = connection.getresponse()
+            data = response.read()
+            headers = {name.lower(): value for name, value in response.getheaders()}
+            connection.close()
+            return response.status, headers, data
+
+        def call_with_headers(method: str, path: str, payload: dict | None = None) -> tuple[int, dict[str, str], bytes]:
+            import urllib.error
+            import urllib.request
+
+            data = None if payload is None else json.dumps(payload).encode("utf-8")
+            headers = {"Content-Type": "application/json"} if data is not None else {}
+            request = urllib.request.Request(base + path, data=data, headers=headers, method=method)
+            try:
+                with urllib.request.urlopen(request, timeout=3) as response:
+                    return response.status, {name.lower(): value for name, value in response.headers.items()}, response.read()
+            except urllib.error.HTTPError as exc:
+                return exc.code, {name.lower(): value for name, value in exc.headers.items()}, exc.read()
+
+        status, _, data = call("GET", "/v1/voices")
+        assert status == 200, data
+        listed = json.loads(data)
+        assert listed["ok"] is True
+        assert listed["defaultVoice"] == voice_store.BUILTIN_ID
+        assert len(listed["voices"]) == 1
+        assert listed["voices"][0]["builtin"] is True
+
+        clip = audio_io.tone_wav(3.0)
+        status, _, data = upload(
+            "POST",
+            "/v1/voices",
+            {
+                "voice_id": "pet-a",
+                "name": "宠物A",
+                "prompt_text": "这是宠物A的参考音。",
+                "description": "红方旁白",
+                "tags": "宠物,红方",
+            },
+            clip,
+        )
+        assert status == 200, data
+        created = json.loads(data)
+        assert created["ok"] is True
+        assert created["voice"]["id"] == "pet-a"
+        assert created["voice"]["name"] == "宠物A"
+        assert created["voice"]["tags"] == ["宠物", "红方"]
+        assert created["voice"]["builtin"] is False
+        assert abs(created["voice"]["promptSeconds"] - 3.0) < 0.02
+        assert "pet-a" in MODEL.spk2info
+        assert "这是宠物A的参考音" in MODEL.spk2info["pet-a"]["prompt_text"]
+
+        status, _, data = upload(
+            "POST",
+            "/v1/voices",
+            {"voice_id": "pet-a", "prompt_text": "重复。"},
+            clip,
+        )
+        assert status == 409 and b"voice_exists" in data
+
+        status, _, data = upload(
+            "POST",
+            "/v1/voices",
+            {"voice_id": "../pet", "prompt_text": "穿越。"},
+            clip,
+        )
+        assert status == 400 and b"bad_voice_id" in data
+
+        status, _, data = upload("POST", "/v1/voices", {"voice_id": "empty", "prompt_text": "  "}, clip)
+        assert status == 400 and b"prompt_text_empty" in data
+
+        status, _, data = upload(
+            "POST",
+            "/v1/voices",
+            {"voice_id": "long-text", "prompt_text": "啊" * 501},
+            clip,
+        )
+        assert status == 400 and b"prompt_text_too_long" in data
+
+        status, _, data = upload(
+            "POST",
+            "/v1/voices",
+            {"voice_id": "noisy", "prompt_text": "不是音频。"},
+            b"this is not audio",
+        )
+        assert status == 400 and b"bad_audio" in data
+
+        status, _, data = upload(
+            "POST",
+            "/v1/voices",
+            {"voice_id": "short", "prompt_text": "太短。"},
+            audio_io.tone_wav(0.5),
+        )
+        assert status == 400 and b"bad_audio" in data
+
+        status, _, data = call("POST", "/v1/voices", {"voice_id": "json", "prompt_text": "不是表单。"})
+        assert status == 400 and b"bad_multipart" in data
+
+        status, _, data = call("GET", "/v1/voices/pet-a")
+        assert status == 200 and json.loads(data)["voice"]["id"] == "pet-a"
+        status, _, data = call("GET", "/v1/voices/nope")
+        assert status == 404 and b"voice_not_found" in data
+
+        status, _, data = call(
+            "PATCH",
+            "/v1/voices/pet-a",
+            {"name": "宠物A·改", "description": "新的说明", "tags": "宠物,测试"},
+        )
+        assert status == 200, data
+        patched = json.loads(data)["voice"]
+        assert patched["name"] == "宠物A·改"
+        assert patched["tags"] == ["宠物", "测试"]
+        status, _, data = call("PATCH", "/v1/voices/pet-a", {"name": "   "})
+        assert status == 400 and b"bad_meta" in data
+
+        status, _, data = call("PATCH", f"/v1/voices/{voice_store.BUILTIN_ID}", {"name": "诗琚"})
+        assert status == 200 and json.loads(data)["voice"]["name"] == "诗琚"
+        assert (VOICES.root / voice_store.BUILTIN_ID / voice_store.META_FILE).is_file()
+
+        seen_before = len(seen)
+        status, headers, audio = call_with_headers(
+            "POST",
+            "/v1/audio/speech",
+            {"input": "红方略优。", "voice": "pet-a", "request_id": 20},
+        )
+        assert status == 200, audio
+        assert headers.get("x-voice-id") == "pet-a"
+        assert seen[-1] == ("红方略优。", "pet-a")
+        assert len(seen) == seen_before + 1
+
+        status, _, data = call(
+            "POST",
+            "/v1/audio/speech",
+            {"input": "没有这个角色。", "voice": "missing-voice"},
+        )
+        assert status == 404 and b"voice_not_found" in data
+        assert len(seen) == seen_before + 1  # unknown voice never reached synthesis
+        status, headers, data = call_with_headers(
+            "POST",
+            "/v1/audio/speech",
+            {"input": "流式也不能静默回落。", "voice": "missing-voice", "stream": True},
+        )
+        assert status == 404 and b"voice_not_found" in data
+        assert headers.get("content-length")
+        assert len(seen) == seen_before + 1
+
+        status, headers, audio = call_with_headers(
+            "POST",
+            "/v1/audio/speech",
+            {"input": "别名也行。", "voice_id": "pet-a", "request_id": 21},
+        )
+        assert status == 200 and headers.get("x-voice-id") == "pet-a"
+        assert seen[-1] == ("别名也行。", "pet-a")
+
+        status, _, data = call("POST", "/v1/voices/pet-a/default")
+        assert status == 200 and json.loads(data)["defaultVoice"] == "pet-a"
+        status, _, data = call("GET", "/health")
+        health_json = json.loads(data)
+        assert health_json["voice"] == "pet-a"
+        assert health_json["defaultVoice"] == "pet-a"
+        assert health_json["voiceCount"] == 2
+        assert abs(health_json["promptSeconds"] - 3.0) < 0.02
+
+        status, _, audio = call("POST", "/v1/audio/speech", {"input": "走默认音色。"})
+        assert status == 200
+        assert seen[-1] == ("走默认音色。", "pet-a")
+
+        status, _, data = upload(
+            "PUT",
+            "/v1/voices/pet-a/prompt",
+            {"prompt_text": "这是替换后的参考音。"},
+            audio_io.tone_wav(4.0),
+        )
+        assert status == 200, data
+        replaced = json.loads(data)["voice"]
+        assert replaced["id"] == "pet-a"
+        assert abs(replaced["promptSeconds"] - 4.0) < 0.02
+        assert "这是替换后的参考音" in MODEL.spk2info["pet-a"]["prompt_text"]
+        status, _, data = upload(
+            "PUT",
+            f"/v1/voices/{voice_store.BUILTIN_ID}/prompt",
+            {"prompt_text": "内置不能换。"},
+            clip,
+        )
+        assert status == 400 and b"builtin_voice" in data
+
+        import http.client as _http_client
+
+        def post_raw(payload: dict) -> _http_client.HTTPResponse:
+            conn = _http_client.HTTPConnection("127.0.0.1", port, timeout=3)
             raw = json.dumps(payload).encode("utf-8")
             conn.request(
                 "POST",
@@ -1258,6 +2345,7 @@ def self_check() -> None:
                 assert streamed.status == 200, streamed.read()
                 assert (streamed.getheader("Content-Type") or "").startswith("application/octet-stream")
                 assert streamed.getheader("X-Sample-Rate") == str(SAMPLE_RATE)
+                assert streamed.getheader("X-Voice-Id") == "pet-a"
                 assert streamed.chunked or (streamed.getheader("Transfer-Encoding") or "").lower().find("chunked") >= 0
                 header = read_exact(streamed, 5)
                 assert header[:1] == b"\x01", header
@@ -1331,10 +2419,32 @@ def self_check() -> None:
         logged = captured.getvalue()
         assert "Exception occurred" not in logged
         assert "Traceback" not in logged
+
+        # Deleting the active default falls back to the builtin; the builtin
+        # itself is the one voice that cannot be deleted.
+        status, _, data = call("DELETE", f"/v1/voices/{voice_store.BUILTIN_ID}")
+        assert status == 400 and b"builtin_voice" in data
+        status, _, data = call("DELETE", "/v1/voices/pet-a")
+        assert status == 200, data
+        assert json.loads(data)["deleted"] == "pet-a"
+        assert "pet-a" not in MODEL.spk2info
+        assert not (VOICES.root / "pet-a").exists()
+        status, _, data = call("GET", "/health")
+        health_json = json.loads(data)
+        assert health_json["defaultVoice"] == voice_store.BUILTIN_ID
+        assert health_json["voice"] == voice_store.BUILTIN_ID
+        assert health_json["voiceCount"] == 1
+        status, _, audio = call("POST", "/v1/audio/speech", {"input": "回到默认。"})
+        assert status == 200 and seen[-1] == ("回到默认。", voice_store.BUILTIN_ID)
+        status, _, data = call("DELETE", "/v1/voices/pet-a")
+        assert status == 404 and b"voice_not_found" in data
     finally:
         SYNTHESIZE = None
+        MODEL = None
+        VOICES = None
         server.should_exit = True
         thread.join(timeout=5)
+        shutil.rmtree(voice_home, ignore_errors=True)
     print("server self-check ok")
 
 
@@ -1375,7 +2485,7 @@ def main(argv: list[str] | None = None) -> int:
         print(problem, file=sys.stderr)
         return 2
 
-    global MODEL, SAMPLE_RATE, DEVICE, PRECISION, PROMPT_SECONDS, UTTERANCE_CHARS
+    global MODEL, VOICES, SAMPLE_RATE, DEVICE, PRECISION, PROMPT_SECONDS, UTTERANCE_CHARS
     duration = wav_duration_secs(paths.prompt_wav)
     PROMPT_SECONDS = float(duration or 0)
     UTTERANCE_CHARS = utterance_limit(os.environ)
@@ -1391,7 +2501,7 @@ def main(argv: list[str] | None = None) -> int:
     PRECISION = "fp16" if fp16 else "fp32"
     print(
         "正在加载 Fun-CosyVoice3-0.5B"
-        f"（儿童女孩零样本，device={DEVICE} precision={PRECISION}）",
+        f"（多角色零样本，device={DEVICE} precision={PRECISION}）",
         file=sys.stderr,
         flush=True,
     )
@@ -1403,12 +2513,25 @@ def main(argv: list[str] | None = None) -> int:
         traceback.print_exc(file=sys.stderr)
         return 1
     SAMPLE_RATE = int(getattr(MODEL, "sample_rate", 24000) or 24000)
+    try:
+        for warning in load_voice_library(paths, prompt):
+            print(f"qiling voice: {warning}", file=sys.stderr)
+    except Exception as exc:
+        # A broken voices/ folder must not take the builtin voice down.
+        print(f"读取音色库失败，只用内置音色: {exc}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        VOICES = voice_store.VoiceStore(paths.voices)
+        VOICES.install_builtin(build_builtin_preset(paths, prompt))
+    assert VOICES is not None
+    default_voice = VOICES.default_voice()
+    PROMPT_SECONDS = default_voice.meta.prompt_seconds if default_voice is not None else PROMPT_SECONDS
     # The first call pays cuDNN/cuBLAS autotune and allocator growth. Do that
     # before the pet's first line, not on it.
     if cuda and warmup_enabled(os.environ):
         warmup(MODEL, fp16)
     print(
-        f"siju cosyvoice3 ready voice={VOICE} device={DEVICE} precision={PRECISION} "
+        f"siju cosyvoice3 ready voice={VOICES.default_id()} default_voice={VOICES.default_id()} "
+        f"voices={VOICES.count()} device={DEVICE} precision={PRECISION} "
         f"sample_rate={SAMPLE_RATE} utterance_chars={UTTERANCE_CHARS}",
         file=sys.stderr,
         flush=True,

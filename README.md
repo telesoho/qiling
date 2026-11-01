@@ -39,9 +39,38 @@ python scripts/setup_cosyvoice.py
 python scripts/start_cosyvoice.py
 ```
 
+### 多角色音色
+
+服务只加载一份 CosyVoice 3 权重，角色是服务内的音色预设。默认音色仍是 `child-girl-zero-shot`，参考音继续按上面的环境变量 / 应用数据目录解析；额外音色放在 `%APPDATA%\com.qiling.pet\cosyvoice\voices\<voice_id>\`（`meta.json` + `prompt.wav`），启动时扫描并逐个调用 `add_zero_shot_spk` 从 `prompt.wav` 重新提取嵌入，注册进模型。这里不写 `embedding.pt`，避免换模型版本后读到旧缓存。合成请求只带音色 id，不重复上传参考音。
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `POST` | `/v1/voices` | 注册音色，`multipart/form-data`：`prompt_text` + `prompt_audio`，可选 `voice_id`、`name`、`description`、`tags` |
+| `GET` | `/v1/voices` | 列出全部音色和 `defaultVoice` |
+| `GET` | `/v1/voices/{voice_id}` | 查单个音色 |
+| `PATCH` | `/v1/voices/{voice_id}` | 改显示名、说明、标签 |
+| `PUT` | `/v1/voices/{voice_id}/prompt` | 替换参考音并重新注册 |
+| `DELETE` | `/v1/voices/{voice_id}` | 删除音色；内置音色返回 400 `builtin_voice` |
+| `POST` | `/v1/voices/{voice_id}/default` | 设为默认音色 |
+| `POST` | `/v1/audio/speech` | 合成；新增可选 `voice`（或 `voice_id`），缺省用默认音色 |
+
+```bash
+# 注册：3–10 秒单人干声；wav/mp3/m4a，1–30 秒，最大 10 MB
+curl -F voice_id=pet-a -F name=宠物A -F prompt_text='今天想先看棋盘上的这一步。' \
+  -F tags='宠物,旁白' -F prompt_audio=@pet-a.wav http://127.0.0.1:8765/v1/voices
+
+curl http://127.0.0.1:8765/v1/voices
+
+curl -H 'Content-Type: application/json' \
+  -d '{"input":"红方略优。","voice":"pet-a","request_id":1,"stream":true}' \
+  http://127.0.0.1:8765/v1/audio/speech
+```
+
+`prompt_text` 必须和参考音严格对应，限 1–500 字；音频按魔数校验，不看扩展名。mp3/m4a 用 CosyVoice 环境里已有的 soundfile/torchaudio/librosa 解码，缺解码器时会提示改用 wav。`voice_id` 只允许 `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`，防止路径穿越。找不到请求里的 `voice` 时返回 404 `voice_not_found`，不会静默回落到默认音色。流式和整段响应都带 `X-Voice-Id`，走默认时也能确认实际用了哪个音色。`GET /v1/health` 的 `voice` 保留为默认音色，新增 `defaultVoice` 和 `voiceCount`；health 可能被轮询，不返回完整音色列表。合成、注册、删除共用一把推理锁，注册是同步的（提取嵌入几百 ms 到几秒），桌面宠物不需要任务队列。注册请求体上限约 10 MB，合成仍保持 16 KB。
+
 ### 说话卡壳时
 
-宠物说话“卡壳”多半不是算力不够，而是首包等太久，或者一句太长把延迟拖长。服务现在默认做了这些事，并且在 stderr 为每一句打印一行 `chars=… chunks=… first=…ms rtf=…`：
+宠物说话“卡壳”多半不是算力不够，而是首包等太久，或者一句太长把延迟拖长。服务现在默认做了这些事，并且在 stderr 为每一句打印一行 `voice=… chars=… chunks=… first=…ms rtf=…`：
 
 - **流式是默认路径**：器灵请求里带 `stream: true`，服务每合成一块就回一块 PCM（`0x01` 帧，结束 `0x00`），播放端边收边播，不等整句合成完。
 - **CUDA 上默认 fp16 autocast**：`QILING_COSYVOICE_FP16=0` 关掉，`=1` 强制开；也可以用 `--fp16` / `--fp32`。这里用上游的 autocast，而不是把权重 `.half()`：CosyVoice3 的 frontend 特征和 HiFT/F0 路径给的是 float32，裸 `.half()` 会撞 dtype；autocast 只让矩阵乘和卷积走半精度，省的是激活和算力，权重仍留 fp32。
