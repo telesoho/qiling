@@ -93,7 +93,8 @@ describe('voice reply keeps the microphone closed until it is heard', () => {
     expect(shouldResumeListening({ ...answer, voice: false })).toBe(true)
   })
 
-  it('shows a distinct label while the pet is answering', () => {
-    expect(voiceAssistantStateLabel('responding')).toContain('暂不收音')
+  it('shows that the pet can be interrupted while it answers', () => {
+    expect(voiceAssistantStateLabel('responding')).toContain('可以打断')
+    expect(voiceAssistantStateLabel('settle')).toContain('恢复')
   })
 })

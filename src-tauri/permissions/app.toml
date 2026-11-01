@@ -20,6 +20,8 @@ commands.allow = [
   "qiling_voice_assistant_status",
   "qiling_voice_assistant_cancel",
   "qiling_voice_assistant_listen",
+  "qiling_voice_assistant_speaking",
+  "qiling_voice_assistant_spoken",
   "qiling_voice_assistant_stop",
   "qiling_voice_assistant_respond",
   "spirit_start_pairing",

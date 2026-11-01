@@ -8,6 +8,9 @@ from voice_assistant import (
     build_keyword_line,
     configure_logging,
     is_acknowledgment_echo,
+    is_echo_of,
+    is_interrupt_phrase,
+    parse_command,
 )
 
 
@@ -15,6 +18,7 @@ class FakeKeywordStream:
     def __init__(self) -> None:
         self.samples = []
         self.ready = False
+        self.endpoint = False
 
     def accept_waveform(self, sample_rate, samples) -> None:
         self.samples.append((sample_rate, samples))
@@ -46,13 +50,16 @@ class FakeKeywordSpotter:
 
 
 class FakeRecognizer:
+    """One voice recognizer, many streams: each stream carries its own endpoint."""
+
     def __init__(self, result="帮我解释一下什么是闭包") -> None:
-        self.stream = FakeKeywordStream()
-        self.endpoint = False
+        self.streams = []
         self.result = result
 
     def create_stream(self):
-        return self.stream
+        stream = FakeKeywordStream()
+        self.streams.append(stream)
+        return stream
 
     def is_ready(self, stream) -> bool:
         return stream.ready
@@ -60,14 +67,23 @@ class FakeRecognizer:
     def decode_stream(self, stream) -> None:
         stream.ready = False
 
-    def is_endpoint(self, _stream) -> bool:
-        return self.endpoint
+    def is_endpoint(self, stream) -> bool:
+        return stream.endpoint
 
     def get_result(self, _stream) -> str:
         return self.result
 
-    def reset(self, _stream) -> None:
-        self.endpoint = False
+    def reset(self, stream) -> None:
+        stream.endpoint = False
+
+    @property
+    def endpoint(self) -> bool:
+        return any(stream.endpoint for stream in self.streams)
+
+    @endpoint.setter
+    def endpoint(self, value: bool) -> None:
+        for stream in self.streams:
+            stream.endpoint = value
 
 
 class VoiceFlowTests(unittest.TestCase):
@@ -157,6 +173,7 @@ class VoiceFlowTests(unittest.TestCase):
         )
 
         flow.begin_recognition(now=3.0)
+        asr.endpoint = True
         flow.feed([0.3] * 1600, now=4.0)
 
         self.assertEqual(
@@ -219,7 +236,7 @@ class VoiceFlowTests(unittest.TestCase):
         self.assertFalse(is_acknowledgment_echo("今天天气怎么样"))
         self.assertFalse(is_acknowledgment_echo("，"))
 
-    def test_listening_resumes_after_the_reply_was_played(self):
+    def test_listening_resumes_only_after_the_speaker_tail_settles(self):
         events = []
         flow = VoiceFlow(FakeKeywordSpotter(), FakeRecognizer(), events.append, "器灵")
 
@@ -230,10 +247,198 @@ class VoiceFlowTests(unittest.TestCase):
         flow.feed([0.1] * 1600, now=2.0)
         self.assertEqual(flow.state, "responding")
 
-        flow.listen()
+        flow.listen(now=3.0)
+        self.assertEqual(flow.state, "settle")
+        flow.feed([0.1] * 1600, now=3.2)
+        self.assertEqual(flow.state, "settle")
 
+        flow.feed([0.1] * 1600, now=3.5)
         self.assertEqual(flow.state, "listening")
         self.assertEqual(events[-1], {"type": "state", "state": "listening"})
+
+    def test_listen_starts_the_question_after_the_wake_acknowledgment(self):
+        events = []
+        flow = VoiceFlow(FakeKeywordSpotter(), FakeRecognizer(), events.append, "器灵")
+
+        flow.start()
+        flow._begin_wake_acknowledgment()
+        flow.speak("我在，请说。")
+        flow.spoken(now=2.0)
+        self.assertEqual(flow.state, "wake_acknowledgment")
+
+        flow.listen(now=2.5)
+        self.assertEqual(flow.state, "recognizing")
+        self.assertGreater(flow.recognition_guard_until, 2.5)
+
+    def test_listening_pauses_while_another_client_line_is_spoken(self):
+        events = []
+        kws = FakeKeywordSpotter()
+        asr = FakeRecognizer("七零七零")
+        flow = VoiceFlow(kws, asr, events.append, "七零七零")
+
+        flow.start()
+        flow.speak("识局送来的一句解说。")
+        asr.endpoint = True
+        kws.detect = True
+        emitted = len(events)
+        flow.feed([0.1] * 1600, now=1.0)
+
+        self.assertEqual(flow.state, "listening")
+        self.assertEqual(len(events), emitted)
+
+        flow.spoken(now=1.5)
+        self.assertEqual(flow.state, "settle")
+        flow.feed([0.1] * 1600, now=2.0)
+        self.assertEqual(flow.state, "listening")
+
+    def test_the_pet_own_answer_is_ignored_while_it_speaks(self):
+        events = []
+        asr = FakeRecognizer()
+        flow = VoiceFlow(FakeKeywordSpotter(), asr, events.append, "器灵")
+
+        flow.start()
+        flow._begin_wake_acknowledgment()
+        flow.begin_recognition(now=1.0)
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=2.0)
+        self.assertEqual(flow.state, "responding")
+
+        flow.speak("今天天气不错，适合出门散步。")
+        asr.result = "今天天气不错适合出门散步"
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=3.0)
+
+        self.assertEqual(flow.state, "responding")
+        self.assertEqual(
+            [event for event in events if event.get("barge_in")],
+            [],
+        )
+
+    def test_the_user_can_barge_in_while_the_pet_speaks(self):
+        events = []
+        asr = FakeRecognizer()
+        flow = VoiceFlow(FakeKeywordSpotter(), asr, events.append, "器灵")
+
+        flow.start()
+        flow._begin_wake_acknowledgment()
+        flow.begin_recognition(now=1.0)
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=2.0)
+        flow.speak("今天天气不错，适合出门散步。")
+
+        asr.result = "等一下我想问别的"
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=3.0)
+
+        barge = [event for event in events if event.get("barge_in")]
+        self.assertEqual(len(barge), 1)
+        self.assertEqual(barge[0]["text"], "等一下我想问别的")
+        self.assertEqual(flow.state, "responding")
+        self.assertTrue(flow.awaiting_new_answer)
+
+        # Interrupting playback must not re-arm the wake word: a new answer follows.
+        flow.spoken(now=3.2)
+        self.assertEqual(flow.state, "responding")
+
+        flow.speak("好的，你想问什么？")
+        asr.result = "好的你想问什么"
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=3.5)
+        self.assertEqual(flow.state, "responding")
+
+        flow.spoken(now=4.0)
+        self.assertEqual(flow.state, "settle")
+
+    def test_the_wake_word_interrupts_speaking_and_restarts_the_acknowledgment(self):
+        events = []
+        asr = FakeRecognizer()
+        flow = VoiceFlow(FakeKeywordSpotter(), asr, events.append, "器灵")
+
+        flow.start()
+        flow._begin_wake_acknowledgment()
+        flow.begin_recognition(now=1.0)
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=2.0)
+        flow.speak("今天天气不错。")
+
+        asr.result = "器灵"
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=3.0)
+
+        self.assertEqual(flow.state, "wake_acknowledgment")
+        self.assertEqual(events[-1], {"type": "state", "state": "wake_acknowledgment"})
+
+    def test_an_interrupt_phrase_stops_playback_without_asking_the_model(self):
+        events = []
+        asr = FakeRecognizer()
+        flow = VoiceFlow(FakeKeywordSpotter(), asr, events.append, "器灵")
+
+        flow.start()
+        flow._begin_wake_acknowledgment()
+        flow.begin_recognition(now=1.0)
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=2.0)
+        flow.speak("今天天气不错。")
+
+        asr.result = "停下"
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=3.0)
+
+        self.assertIn({"type": "stop_playback"}, events)
+        self.assertEqual(flow.state, "settle")
+        self.assertEqual([event for event in events if event.get("barge_in")], [])
+
+    def test_a_new_line_during_settle_keeps_the_microphone_closed(self):
+        events = []
+        flow = VoiceFlow(FakeKeywordSpotter(), FakeRecognizer(), events.append, "器灵")
+
+        flow.start()
+        flow.speak("第一句。")
+        flow.spoken(now=1.0)
+        self.assertEqual(flow.state, "settle")
+
+        flow.speak("第二句。")
+        flow.feed([0.1] * 1600, now=2.0)
+        self.assertEqual(flow.state, "settle")
+
+        flow.spoken(now=2.5)
+        flow.feed([0.1] * 1600, now=3.0)
+        self.assertEqual(flow.state, "listening")
+
+    def test_a_missing_playback_end_does_not_leave_the_microphone_off(self):
+        events = []
+        kws = FakeKeywordSpotter()
+        flow = VoiceFlow(kws, FakeRecognizer(), events.append, "器灵")
+
+        flow.start()
+        flow.speak("一句解说。", now=1.0)
+        flow.feed([0.1] * 1600, now=2.0)
+        self.assertEqual(flow.state, "listening")
+
+        kws.detect = True
+        flow.feed([0.1] * 1600, now=62.0)
+
+        self.assertEqual(flow.state, "wake_acknowledgment")
+
+    def test_echo_and_interrupt_helpers(self):
+        self.assertTrue(
+            is_echo_of(
+                "我是麒麟现在听到的是播报声音视听",
+                "你好，我是器灵。现在听到的是播报声音试听。",
+            )
+        )
+        self.assertFalse(is_echo_of("等一下我想问别的", "今天天气不错，适合出门散步。"))
+        self.assertTrue(is_interrupt_phrase("停一下"))
+        self.assertFalse(is_interrupt_phrase("今天天气不错"))
+
+    def test_parses_json_and_plain_commands(self):
+        self.assertEqual(
+            parse_command('{"cmd":"speak","text":"你好"}'),
+            ("speak", {"cmd": "speak", "text": "你好"}),
+        )
+        self.assertEqual(parse_command("spoken"), ("spoken", {}))
+        self.assertIsNone(parse_command("bogus"))
+        self.assertIsNone(parse_command(""))
 
     def test_listen_still_starts_recognition_after_the_wake_word(self):
         flow = VoiceFlow(FakeKeywordSpotter(), FakeRecognizer(), lambda _event: None, "器灵")

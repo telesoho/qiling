@@ -243,7 +243,7 @@ function classifyLocalError(error: unknown): 'cancelled' | 'unavailable' | 'fail
 
 export type VoiceTestEngine = 'cosyvoice' | 'system' | 'unavailable'
 
-export const VOICE_TEST_LINE = '你好，我是器灵。现在听到的是播报声音试听。'
+export const VOICE_TEST_LINE = '你好，现在听到的是播报声音试听。'
 
 export interface VoiceTestPlayback {
   /** `cosyvoice` / `system` say which engine was actually heard. */
@@ -325,6 +325,7 @@ export function startVoiceTest(text: string = VOICE_TEST_LINE): VoiceTestPlaybac
         let cursor = audio.currentTime
         let lastEnd = cursor
         let played = false
+        let abandoned = false
         const sources: AudioBufferSourceNode[] = []
         stopAudio = () => {
           for (const source of sources) {
@@ -338,7 +339,7 @@ export function startVoiceTest(text: string = VOICE_TEST_LINE): VoiceTestPlaybac
         }
         const onChunk = new Channel<PcmChunk>()
         onChunk.onmessage = (chunk) => {
-          if (cancelled) return
+          if (cancelled || abandoned) return
           let floats: Float32Array
           try {
             floats = pcm16ToFloat(decodeBase64(chunk.pcmBase64))
@@ -362,10 +363,19 @@ export function startVoiceTest(text: string = VOICE_TEST_LINE): VoiceTestPlaybac
             // a rejected chunk must not swallow the preview
           }
         }
+        let frames = 0
         try {
-          await invoke('qiling_voice_synthesize', { text: line, onChunk })
+          frames = await invoke<number>('qiling_voice_synthesize', { text: line, onChunk })
         } catch {
           // No local voice: fall back to the system voice below.
+        }
+        if (cancelled) return
+        if (frames > 0 && !played) {
+          // Channel messages can trail the command reply; wait for the first one.
+          const deadline = Date.now() + 1_000
+          while (!played && !cancelled && Date.now() < deadline) {
+            await new Promise((resolve) => window.setTimeout(resolve, 10))
+          }
         }
         if (cancelled) return
         if (played) {
@@ -375,6 +385,7 @@ export function startVoiceTest(text: string = VOICE_TEST_LINE): VoiceTestPlaybac
           settle('cosyvoice')
           return
         }
+        abandoned = true
         context = null
         void audio.close().catch(() => {})
       }
@@ -523,12 +534,15 @@ function startPcmStream(line: string, mine: number): {
   started: boolean
   push: (chunk: PcmChunk) => void
   finish: () => Promise<'played' | 'cancelled' | 'failed'>
+  /** Wait for the first channel chunk. Channel messages can trail the command reply. */
+  whenStarted: (timeoutMs: number) => Promise<boolean>
   stop: () => void
 } {
   const playback = {
     started: false,
     push(_chunk: PcmChunk) {},
     finish: (): Promise<'played' | 'cancelled' | 'failed'> => Promise.resolve('failed'),
+    whenStarted: (_timeoutMs: number) => Promise.resolve(false),
     stop() {},
   }
   if (typeof AudioContext === 'undefined') return playback
@@ -631,6 +645,13 @@ function startPcmStream(line: string, mine: number): {
     if (current) void current.close().catch(() => {})
     settle('cancelled')
   }
+  playback.whenStarted = async (timeoutMs) => {
+    const deadline = Date.now() + timeoutMs
+    while (!playback.started && !settled && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    return playback.started
+  }
   return playback
 }
 
@@ -646,18 +667,28 @@ async function tryCosyVoice(line: string, mine: number): Promise<LocalSpeakResul
     const { Channel, invoke } = await import('@tauri-apps/api/core')
     const onChunk = new Channel<PcmChunk>()
     onChunk.onmessage = (chunk) => playback.push(chunk)
-    await invoke('qiling_voice_synthesize', { text: line, onChunk })
+    const frames = await invoke<number>('qiling_voice_synthesize', { text: line, onChunk })
     if (mine !== token) return 'cancelled'
-    const outcome = streamSpeakResult({ chunks: playback.started ? 1 : 0, error: null })
+    if (frames > 0 && !playback.started) {
+      // The command reply can overtake the channel messages. Without this wait the
+      // system voice would start while the local audio is still on its way, and
+      // both would speak the same line.
+      await playback.whenStarted(1_000)
+    }
+    if (mine !== token) return 'cancelled'
     if (!playback.started) {
+      // Nothing will sound from the local engine: close it so a straggling chunk
+      // can never play under the system voice.
+      playback.stop()
       streamStop = null
-      return outcome
+      return 'failed'
     }
     return await playback.finish()
   } catch (error) {
     if (mine !== token) return 'cancelled'
     const kind = classifyLocalError(error)
     if (playback.started) return playback.finish()
+    playback.stop()
     streamStop = null
     if (kind === 'cancelled') return 'cancelled'
     noteVoiceFallback()

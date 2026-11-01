@@ -223,9 +223,6 @@ export default function SettingsApp(): JSX.Element {
             stateEventRevision += 1
             setVoiceAssistantState(payload.state)
             setVoiceAssistantError('')
-            if (payload.state === 'stopped' && loadQiLingSettings().voiceAssistant) {
-              patch({ voiceAssistant: false })
-            }
           } else if (payload.type === 'error') {
             stateEventRevision += 1
             setVoiceAssistantState('error')
@@ -250,9 +247,24 @@ export default function SettingsApp(): JSX.Element {
           if (active && stateEventRevision === revision) {
             setVoiceAssistantState(currentState)
           }
+          if (active && currentState === 'stopped' && loadQiLingSettings().voiceAssistant) {
+            // The switch says on but nothing is listening. Start it again while the
+            // pet is visible so the page cannot sit on a stale "已关闭".
+            const petOpen = await invoke<boolean>('pet_is_open').catch(() => false)
+            if (active && petOpen) {
+              setVoiceAssistantState('starting')
+              await invoke('qiling_voice_assistant_start', {
+                wakeWord: loadQiLingSettings().wakeWord,
+              })
+              if (active) {
+                setVoiceAssistantState(await invoke<string>('qiling_voice_assistant_status'))
+              }
+            }
+          }
         } catch (reason) {
           if (active) {
-            setVoiceAssistantError(`无法读取本机语音状态：${String(reason)}`)
+            setVoiceAssistantState('error')
+            setVoiceAssistantError(voiceAssistantErrorMessage(String(reason)))
           }
         }
       })
@@ -262,6 +274,23 @@ export default function SettingsApp(): JSX.Element {
     return () => {
       active = false
       unlisten?.()
+    }
+  }, [])
+
+  useEffect(() => {
+    let active = true
+    const refresh = async () => {
+      try {
+        const state = await invoke<string>('qiling_voice_assistant_status')
+        if (active) setVoiceAssistantState(state)
+      } catch {
+        // The next tick can try again; the event stream carries the real errors.
+      }
+    }
+    const timer = window.setInterval(() => void refresh(), 2_500)
+    return () => {
+      active = false
+      window.clearInterval(timer)
     }
   }, [])
 
@@ -677,6 +706,7 @@ export default function SettingsApp(): JSX.Element {
           唤醒词监听（麦克风）
         </label>
         <p>监听状态：{voiceAssistantStateLabel(voiceAssistantState)}</p>
+        <p>隐藏器灵会暂停监听并关闭麦克风；再次显示器灵时，只要这个开关仍打开，就会自动恢复监听。</p>
         <label htmlFor="voice-wake-word">自定义唤醒词</label>
         <div className="wake-word-controls">
           <input
@@ -706,7 +736,7 @@ export default function SettingsApp(): JSX.Element {
           最近识别到的语音：{voiceTranscript || '（等待识别）'}
         </p>
         <p>状态变为“器灵正在回应，请接着说”表示唤醒成功；唤醒词漏检时，完整识别文本与唤醒词完全一致也会在本机触发。</p>
-        <p>器灵回答期间麦克风暂时关闭，回答播完后再继续监听唤醒词，避免把它自己的声音当成新问题。</p>
+        <p>器灵回答时可以直接插话打断；它会继续识别，但把与自己播报文稿高度重合的结果当作回声丢弃，说完后再静音约半秒才恢复监听。</p>
         {settings.voiceAssistant && (
           <button type="button" onClick={() => void cancelVoiceAssistantTurn()}>
             取消本轮对话

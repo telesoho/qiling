@@ -186,6 +186,16 @@ impl VoiceAssistantHost {
     }
 
     pub fn current_state(&self) -> Result<String, String> {
+        if !self.is_running()? {
+            // A dead runtime must never be reported as listening. Keep an error so
+            // the page can still explain why it stopped.
+            let stored = self
+                .current_state
+                .lock()
+                .map_err(|_| "voice_assistant_unavailable")?
+                .clone();
+            return Ok(if stored == "error" { stored } else { "stopped".into() });
+        }
         self.current_state
             .lock()
             .map(|state| state.clone())
@@ -214,6 +224,27 @@ impl VoiceAssistantHost {
     }
 
     pub fn listen(&self) -> Result<(), String> {
+        self.send_command(b"listen")
+            .map_err(|_| "voice_assistant_listen_failed".into())
+    }
+
+    /// The page started playing this line. The runtime keeps recognizing so the
+    /// user can interrupt, but drops anything that sounds like the line itself.
+    pub fn speaking(&self, text: &str) -> Result<(), String> {
+        let line = text.trim();
+        if line.is_empty() {
+            return Ok(());
+        }
+        let command = serde_json::json!({"cmd": "speak", "text": line}).to_string();
+        self.send_command(command.as_bytes())
+    }
+
+    /// Playback ended or was interrupted: close the microphone for the tail.
+    pub fn spoken(&self) -> Result<(), String> {
+        self.send_command(b"spoken")
+    }
+
+    fn send_command(&self, command: &[u8]) -> Result<(), String> {
         let mut child_guard = self
             .child
             .lock()
@@ -229,9 +260,10 @@ impl VoiceAssistantHost {
         }
         let stdin = child.stdin.as_mut().ok_or("voice_assistant_unavailable")?;
         stdin
-            .write_all(b"listen\n")
+            .write_all(command)
+            .and_then(|_| stdin.write_all(b"\n"))
             .and_then(|_| stdin.flush())
-            .map_err(|_| "voice_assistant_listen_failed".into())
+            .map_err(|_| "voice_assistant_command_failed".into())
     }
 
     pub fn is_running(&self) -> Result<bool, String> {
@@ -347,7 +379,10 @@ fn python_path(data_dir: &Path) -> Result<PathBuf, String> {
 mod tests {
     use serde_json::json;
 
-    use super::{is_valid_wake_word, runtime_stopped_event, set_current_state, state_from_event};
+    use super::{
+        is_valid_wake_word, runtime_stopped_event, set_current_state, state_from_event,
+        VoiceAssistantHost,
+    };
 
     #[test]
     fn accepts_only_short_chinese_wake_phrases() {
@@ -375,5 +410,18 @@ mod tests {
 
         assert_eq!(*state.lock().unwrap(), "wake_acknowledgment");
         assert_eq!(state_from_event(&json!({"type": "transcript"})), None);
+    }
+
+    #[test]
+    fn a_dead_runtime_is_never_reported_as_listening() {
+        let host = VoiceAssistantHost::new(
+            std::path::PathBuf::from("voice_assistant.py"),
+            std::path::PathBuf::from("data"),
+        );
+        set_current_state(&host.current_state, "listening").unwrap();
+        assert_eq!(host.current_state().unwrap(), "stopped");
+
+        set_current_state(&host.current_state, "error").unwrap();
+        assert_eq!(host.current_state().unwrap(), "error");
     }
 }

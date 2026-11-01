@@ -20,10 +20,19 @@ UTTERANCE_TIMEOUT_SECONDS = 12
 # The microphone stays off until the app says the reply finished playing. This is
 # only the safety net for a reply that never reports back.
 RESPONSE_TIMEOUT_SECONDS = 60
+# Speaker tails need time to die down. Feed nothing for this long after playback
+# ends, then re-arm the wake word / question recognizer.
+SETTLE_SECONDS = 0.4
+# Share of the recognized characters that must also be in the line being spoken
+# before a transcript is treated as the pet hearing itself.
+ECHO_OVERLAP_RATIO = 0.6
+MIN_BARGE_IN_CHARS = 2
 # Mirrors WAKE_ACKNOWLEDGMENT in src/lib/voice-assistant.ts. The speaker tail of
 # this line is sometimes picked up right after playback and must not become a question.
 ACKNOWLEDGMENT = "我在请说"
 ACK_ECHO_WINDOW_SECONDS = 3.0
+# Said while the pet is talking: accept even when ASR returns only one character.
+INTERRUPT_PHRASES = ("停", "停下", "停一下", "等一下", "等等", "别说了", "打断")
 LOGGER = logging.getLogger("qiling.voice_assistant")
 
 
@@ -32,6 +41,41 @@ def spoken_text(text: str) -> str:
     return "".join(
         char for char in text if char.isalnum() or "\u4e00" <= char <= "\u9fff"
     )
+
+
+def common_subsequence_length(left: str, right: str) -> int:
+    """Longest common subsequence length, small inputs only (two short sentences)."""
+    if not left or not right:
+        return 0
+    previous = [0] * (len(right) + 1)
+    for left_char in left:
+        current = [0]
+        for index, right_char in enumerate(right, start=1):
+            if left_char == right_char:
+                current.append(previous[index - 1] + 1)
+            else:
+                current.append(max(previous[index], current[index - 1]))
+        previous = current
+    return previous[-1]
+
+
+def is_echo_of(transcript: str, played: str) -> bool:
+    """True when the microphone mostly picked up the line the pet is speaking."""
+    heard = spoken_text(transcript)
+    spoken = spoken_text(played)
+    if not heard:
+        return True
+    if not spoken:
+        return False
+    if heard in spoken or spoken in heard:
+        return True
+    overlap = common_subsequence_length(heard, spoken) / len(heard)
+    return overlap >= ECHO_OVERLAP_RATIO
+
+
+def is_interrupt_phrase(text: str) -> bool:
+    heard = spoken_text(text)
+    return any(phrase in heard for phrase in INTERRUPT_PHRASES)
 
 
 def is_acknowledgment_echo(text: str) -> bool:
@@ -84,10 +128,17 @@ class VoiceFlow:
         self.keyword_stream = keyword_spotter.create_stream()
         self.debug_stream = recognizer.create_stream()
         self.recognition_stream = None
+        self.barge_stream = None
         self.state = "stopped"
         self.recognition_deadline = 0.0
         self.recognition_started_at = 0.0
+        self.recognition_guard_until = 0.0
         self.responding_deadline = 0.0
+        self.settle_deadline = 0.0
+        self.playing_text = ""
+        self.paused_for_playback = False
+        self.pause_deadline = 0.0
+        self.awaiting_new_answer = False
         self.utterance_id = 0
 
     def start(self) -> None:
@@ -97,7 +148,20 @@ class VoiceFlow:
         self.emit({"type": "state", "state": self.state})
 
     def feed(self, samples, now: float | None = None) -> None:
+        current_time = now if now is not None else time.monotonic()
+        if (
+            self.paused_for_playback
+            and self.pause_deadline
+            and current_time >= self.pause_deadline
+        ):
+            # Playback never reported its end; never leave the microphone stuck.
+            LOGGER.info("Playback did not report its end; reopening the microphone.")
+            self.paused_for_playback = False
+            self.pause_deadline = 0.0
+
         if self.state == "listening":
+            if self.paused_for_playback:
+                return
             self.debug_stream.accept_waveform(SAMPLE_RATE, samples)
             while self.recognizer.is_ready(self.debug_stream):
                 self.recognizer.decode_stream(self.debug_stream)
@@ -129,12 +193,16 @@ class VoiceFlow:
             return
 
         if self.state == "wake_acknowledgment":
+            # Mic stays closed while the app plays "我在，请说。"; the app calls
+            # listen() once it was heard, and recognition starts after a short guard.
+            return
+
+        if self.state == "settle":
+            self._feed_settle(now)
             return
 
         if self.state == "responding":
-            current_time = now if now is not None else time.monotonic()
-            if current_time >= self.responding_deadline:
-                self._listen()
+            self._feed_responding(samples, now)
             return
 
         if self.state != "recognizing":
@@ -143,6 +211,8 @@ class VoiceFlow:
         current_time = now if now is not None else time.monotonic()
         if current_time >= self.recognition_deadline:
             self._listen()
+            return
+        if current_time < self.recognition_guard_until or self.paused_for_playback:
             return
 
         self.recognition_stream.accept_waveform(SAMPLE_RATE, samples)
@@ -178,21 +248,65 @@ class VoiceFlow:
             return
         self.recognition_stream = self.recognizer.create_stream()
         self.recognition_started_at = now if now is not None else time.monotonic()
+        self.recognition_guard_until = self.recognition_started_at + SETTLE_SECONDS
         self.recognition_deadline = (
             self.recognition_started_at + UTTERANCE_TIMEOUT_SECONDS
         )
         self.state = "recognizing"
         self.emit({"type": "state", "state": self.state})
 
+    def speak(self, text: str, now: float | None = None) -> None:
+        """The app started playing `text`. Keep the echo out of the question stream."""
+        line = text.strip()
+        if not line:
+            return
+        self.playing_text = line
+        if self.state == "responding":
+            self.awaiting_new_answer = False
+            self.paused_for_playback = False
+            self.pause_deadline = 0.0
+            if self.barge_stream is None:
+                self.barge_stream = self.recognizer.create_stream()
+            else:
+                self.recognizer.reset(self.barge_stream)
+            return
+        if self.state in {"listening", "recognizing", "settle"}:
+            # Half duplex for lines that come from other clients too: no ASR input
+            # while the speaker is busy.
+            self.paused_for_playback = True
+            self.pause_deadline = (
+                now if now is not None else time.monotonic()
+            ) + RESPONSE_TIMEOUT_SECONDS
+            if self.state == "listening":
+                self.keyword_spotter.reset_stream(self.keyword_stream)
+
+    def spoken(self, now: float | None = None) -> None:
+        """The app finished (or interrupted) the line it was playing."""
+        self.playing_text = ""
+        self.barge_stream = None
+        self.paused_for_playback = False
+        self.pause_deadline = 0.0
+        if self.state == "recognizing":
+            self.recognition_guard_until = (
+                now if now is not None else time.monotonic()
+            ) + SETTLE_SECONDS
+        elif self.state == "responding":
+            if not self.awaiting_new_answer:
+                self._settle(now)
+        elif self.state in {"listening", "settle"}:
+            # A line from another client ended; keep the tail out of the wake word.
+            self._settle(now)
+        # wake_acknowledgment: the app calls listen() once the reply was heard.
+
     def listen(self, now: float | None = None) -> None:
         """The app asks for audio again: start the question, or re-arm the wake word."""
         if self.state == "wake_acknowledgment":
             self.begin_recognition(now)
-        elif self.state == "responding":
-            self._listen()
+        elif self.state == "responding" and not self.awaiting_new_answer:
+            self._settle(now)
 
     def cancel(self) -> None:
-        if self.state in {"recognizing", "wake_acknowledgment", "responding"}:
+        if self.state in {"recognizing", "wake_acknowledgment", "responding", "settle"}:
             self._listen()
 
     def stop(self) -> None:
@@ -205,6 +319,11 @@ class VoiceFlow:
         if self.recognition_stream is not None:
             self.recognizer.reset(self.recognition_stream)
             self.recognition_stream = None
+        self.barge_stream = None
+        self.playing_text = ""
+        self.paused_for_playback = False
+        self.pause_deadline = 0.0
+        self.awaiting_new_answer = False
         self.debug_stream = self.recognizer.create_stream()
         self.state = "listening"
         self.emit({"type": "state", "state": self.state})
@@ -213,15 +332,97 @@ class VoiceFlow:
         if self.recognition_stream is not None:
             self.recognizer.reset(self.recognition_stream)
             self.recognition_stream = None
+        self.barge_stream = None
+        self.playing_text = ""
+        self.paused_for_playback = False
+        self.pause_deadline = 0.0
+        self.awaiting_new_answer = False
         self.responding_deadline = (
             now if now is not None else time.monotonic()
         ) + RESPONSE_TIMEOUT_SECONDS
         self.state = "responding"
         self.emit({"type": "state", "state": self.state})
 
+    def _settle(self, now: float | None = None) -> None:
+        """Keep the microphone closed briefly so the speaker tail cannot be heard."""
+        if self.recognition_stream is not None:
+            self.recognizer.reset(self.recognition_stream)
+            self.recognition_stream = None
+        self.barge_stream = None
+        self.playing_text = ""
+        self.paused_for_playback = False
+        self.pause_deadline = 0.0
+        self.awaiting_new_answer = False
+        self.settle_deadline = (
+            now if now is not None else time.monotonic()
+        ) + SETTLE_SECONDS
+        if self.state != "settle":
+            self.state = "settle"
+            self.emit({"type": "state", "state": self.state})
+
+    def _feed_settle(self, now: float | None = None) -> None:
+        if self.paused_for_playback:
+            # A new line started while the tail was still settling.
+            return
+        if (now if now is not None else time.monotonic()) >= self.settle_deadline:
+            self._listen()
+
+    def _feed_responding(self, samples, now: float | None = None) -> None:
+        current_time = now if now is not None else time.monotonic()
+        if self.barge_stream is None:
+            if current_time >= self.responding_deadline:
+                self._listen()
+            return
+        if current_time >= self.responding_deadline:
+            self._listen()
+            return
+        self.barge_stream.accept_waveform(SAMPLE_RATE, samples)
+        while self.recognizer.is_ready(self.barge_stream):
+            self.recognizer.decode_stream(self.barge_stream)
+        if not self.recognizer.is_endpoint(self.barge_stream):
+            return
+        text = self.recognizer.get_result(self.barge_stream).strip()
+        self.recognizer.reset(self.barge_stream)
+        if not text:
+            return
+        if is_echo_of(text, self.playing_text):
+            LOGGER.info("Ignoring the pet's own voice while it speaks: %s", text)
+            return
+        if is_wake_word_transcript(text, self.wake_word):
+            LOGGER.info("Wake word heard while the pet speaks: %s", text)
+            self._begin_wake_acknowledgment()
+            return
+        if is_interrupt_phrase(text) and len(spoken_text(text)) <= 6:
+            LOGGER.info("Interrupt phrase heard while the pet speaks: %s", text)
+            self.emit({"type": "stop_playback"})
+            self._settle(now)
+            return
+        if len(spoken_text(text)) < MIN_BARGE_IN_CHARS:
+            LOGGER.info("Ignoring a too-short barge-in candidate: %s", text)
+            return
+        LOGGER.info("Barge-in accepted while the pet speaks: %s", text)
+        self.utterance_id += 1
+        self.barge_stream = None
+        self.playing_text = ""
+        self.awaiting_new_answer = True
+        self.responding_deadline = current_time + RESPONSE_TIMEOUT_SECONDS
+        self.emit(
+            {
+                "type": "transcript",
+                "id": self.utterance_id,
+                "text": text,
+                "barge_in": True,
+            }
+        )
+
     def _begin_wake_acknowledgment(self) -> None:
         self.keyword_spotter.reset_stream(self.keyword_stream)
         self.recognizer.reset(self.debug_stream)
+        self.barge_stream = None
+        self.playing_text = ""
+        self.paused_for_playback = False
+        self.pause_deadline = 0.0
+        self.awaiting_new_answer = False
         self.state = "wake_acknowledgment"
         self.emit({"type": "state", "state": self.state})
 
@@ -277,6 +478,24 @@ def create_engines(kws_dir: Path, asr_dir: Path, keywords: Path):
     return spotter, recognizer
 
 
+def parse_command(line: str) -> tuple[str, dict] | None:
+    """Commands are plain words or a JSON object, e.g. `{"cmd":"speak","text":"…"}`."""
+    line = line.strip()
+    if not line:
+        return None
+    if line.startswith("{"):
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(payload, dict) and isinstance(payload.get("cmd"), str):
+            return payload["cmd"], payload
+        return None
+    if line in {"cancel", "listen", "spoken"}:
+        return line, {}
+    return None
+
+
 def run_microphone(flow: VoiceFlow) -> None:
     import numpy
     import sounddevice as sd
@@ -301,8 +520,8 @@ def run_microphone(flow: VoiceFlow) -> None:
 
     def read_commands() -> None:
         for line in sys.stdin:
-            command = line.strip()
-            if command in {"cancel", "listen"}:
+            command = parse_command(line)
+            if command is not None:
                 frames.put(("command", command))
 
     threading.Thread(target=read_commands, daemon=True).start()
@@ -318,8 +537,13 @@ def run_microphone(flow: VoiceFlow) -> None:
         while flow.state != "stopped":
             item = frames.get()
             if isinstance(item, tuple) and item[0] == "command":
-                if item[1] == "cancel":
+                name, payload = item[1]
+                if name == "cancel":
                     flow.cancel()
+                elif name == "speak":
+                    flow.speak(str(payload.get("text", "")))
+                elif name == "spoken":
+                    flow.spoken()
                 else:
                     flow.listen()
                 continue

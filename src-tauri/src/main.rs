@@ -221,7 +221,7 @@ async fn qiling_voice_synthesize(
     state: State<'_, AppState>,
     text: String,
     on_chunk: tauri::ipc::Channel<cosyvoice::VoiceChunk>,
-) -> Result<(), String> {
+) -> Result<u32, String> {
     let voice = Arc::clone(&state.voice);
     tauri::async_runtime::spawn_blocking(move || voice.synthesize(&text, on_chunk))
         .await
@@ -312,6 +312,19 @@ fn qiling_voice_assistant_cancel(app: AppHandle, state: State<AppState>) -> Resu
 #[tauri::command]
 fn qiling_voice_assistant_listen(state: State<AppState>) -> Result<(), String> {
     state.voice_assistant.listen()
+}
+
+#[tauri::command]
+fn qiling_voice_assistant_speaking(state: State<AppState>, text: String) -> Result<(), String> {
+    if text.trim().is_empty() || text.chars().count() > 2_000 {
+        return Err("invalid_voice_prompt".into());
+    }
+    state.voice_assistant.speaking(&text)
+}
+
+#[tauri::command]
+fn qiling_voice_assistant_spoken(state: State<AppState>) -> Result<(), String> {
+    state.voice_assistant.spoken()
 }
 
 #[tauri::command]
@@ -718,6 +731,8 @@ fn main() {
             qiling_voice_assistant_status,
             qiling_voice_assistant_cancel,
             qiling_voice_assistant_listen,
+            qiling_voice_assistant_speaking,
+            qiling_voice_assistant_spoken,
             qiling_voice_assistant_stop,
             qiling_voice_assistant_respond,
             spirit_start_pairing,

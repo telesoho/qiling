@@ -49,6 +49,8 @@ export default function PetApp(): JSX.Element {
   const listeningResumeRequested = useRef(false)
   const pausedEntryLine = useRef<{ phase: string; text: string } | null>(null)
   const pausedLineChanged = useRef(false)
+  const startingAssistant = useRef(false)
+  const speakingLine = useRef('')
   const stateRef = useRef(stateId)
   stateRef.current = stateId
   const state = petState(stateId)
@@ -210,6 +212,10 @@ export default function PetApp(): JSX.Element {
             } else if (payload.type === 'error') {
               stateEventRevision += 1
               setVoiceAssistantState('error')
+            } else if (payload.type === 'stop_playback') {
+              // The runtime recognized an interrupt phrase: stop the current line and
+              // let the settle buffer hand the microphone back.
+              interruptRef.current()
             } else if (
               payload.type === 'transcript' &&
               typeof payload.id === 'number' &&
@@ -221,6 +227,9 @@ export default function PetApp(): JSX.Element {
                 const oldest = handledTranscripts.values().next().value
                 if (typeof oldest === 'number') handledTranscripts.delete(oldest)
               }
+              // A transcript while the pet is still talking is a barge-in: stop the
+              // current line first so the reply cannot start over the old audio.
+              interruptRef.current()
               void invoke('qiling_voice_assistant_respond', { text: payload.text }).catch((error: unknown) => {
                 console.warn('本机语音对话失败', String(error))
               })
@@ -245,8 +254,19 @@ export default function PetApp(): JSX.Element {
           console.warn('本机语音服务不可用', String(error))
         }
       })
+    // A missed event must not leave the pet showing a state the runtime left long
+    // ago. The status command reports the process, not the last event.
+    const poll = window.setInterval(() => {
+      const revision = stateEventRevision
+      void invoke<string>('qiling_voice_assistant_status')
+        .then((current) => {
+          if (active && stateEventRevision === revision) setVoiceAssistantState(current)
+        })
+        .catch(() => {})
+    }, 3_000)
     return () => {
       active = false
+      window.clearInterval(poll)
       unlisten?.()
     }
   }, [])
@@ -260,6 +280,22 @@ export default function PetApp(): JSX.Element {
       open: bubbleOpen && shown && ready,
     })
   }, [bubbleText, voice, speech.speaking, bubbleOpen, shown, ready])
+
+  // Tell the runtime which line the speakers are playing. It keeps recognizing so
+  // the user can interrupt, but drops anything that sounds like this line.
+  useEffect(() => {
+    if (!inTauri()) return
+    const text = speech.audibleLine.trim()
+    if (speech.audible && text) {
+      if (speakingLine.current === text) return
+      speakingLine.current = text
+      void invoke('qiling_voice_assistant_speaking', { text }).catch(() => {})
+      return
+    }
+    if (!speakingLine.current) return
+    speakingLine.current = ''
+    void invoke('qiling_voice_assistant_spoken').catch(() => {})
+  }, [speech.audible, speech.audibleLine])
 
   useEffect(() => {
     if (!inTauri()) return
@@ -318,6 +354,30 @@ export default function PetApp(): JSX.Element {
       alive = false
     }
   }, [])
+
+  // Hiding the pet stops the microphone. Showing it again restores listening when
+  // the setting is still on, so the checkbox and the real state cannot drift apart.
+  // Only a hide -> show transition starts it; a state change alone cannot loop.
+  const lastShown = useRef<boolean | null>(null)
+  useEffect(() => {
+    if (!inTauri() || !ready) return
+    const previous = lastShown.current
+    lastShown.current = shown
+    if (previous !== false || !shown) return
+    if (!loadQiLingSettings().voiceAssistant || startingAssistant.current) return
+    startingAssistant.current = true
+    setVoiceAssistantState('starting')
+    void invoke('qiling_voice_assistant_start', {
+      wakeWord: loadQiLingSettings().wakeWord,
+    })
+      .catch((error: unknown) => {
+        setVoiceAssistantState('error')
+        console.warn('显示器灵后无法恢复唤醒监听', String(error))
+      })
+      .finally(() => {
+        startingAssistant.current = false
+      })
+  }, [shown, ready])
 
   useEffect(() => {
     const narratingNow = line.phase !== 'idle'
@@ -388,10 +448,8 @@ export default function PetApp(): JSX.Element {
   function hide() {
     drag.cancel()
     speech.interrupt()
-    if (loadQiLingSettings().voiceAssistant) {
-      saveQiLingSettings({ ...loadQiLingSettings(), voiceAssistant: false })
-      setVoiceAssistantState('stopped')
-    }
+    // Hiding is not "turn the wake word off": keep the preference so showing the
+    // pet again restores listening.
     setShown(false)
     void setPetWindowOpen(false)
   }

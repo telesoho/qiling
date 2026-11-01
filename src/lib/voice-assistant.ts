@@ -1,9 +1,18 @@
 export interface VoiceAssistantEvent {
-  type: 'state' | 'transcript' | 'debug_transcript' | 'debug_keyword' | 'warning' | 'error'
+  type:
+    | 'state'
+    | 'transcript'
+    | 'debug_transcript'
+    | 'debug_keyword'
+    | 'warning'
+    | 'error'
+    | 'stop_playback'
   state?: string
   code?: string
   text?: string
   id?: number
+  /** The runtime heard a real interruption while the pet was speaking. */
+  barge_in?: boolean
 }
 
 export const WAKE_ACKNOWLEDGMENT = '我在，请说。'
@@ -47,7 +56,8 @@ export function voiceAssistantStateLabel(state: string): string {
     listening: '本机监听唤醒词',
     wake_acknowledgment: '器灵正在回应，请接着说',
     recognizing: '本机正在识别语音',
-    responding: '器灵正在回答，暂不收音',
+    responding: '器灵正在回答，可以打断',
+    settle: '正在恢复监听',
     error: '不可用',
   }
   return labels[state] ?? state

@@ -78,7 +78,7 @@ describe('器灵设定', () => {
     expect(page).toContain('刷新已安装模型')
     expect(page).toContain('读取本机 Ollama 的已安装模型')
     expect(page).toContain('>试听</button>')
-    expect(page).toContain('避免把它自己的声音当成新问题')
+    expect(page).toContain('把与自己播报文稿高度重合的结果当作回声丢弃')
   })
 
   it('keeps the saved model selectable even before Ollama reports it', () => {

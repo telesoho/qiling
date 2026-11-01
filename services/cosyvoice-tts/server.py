@@ -15,7 +15,9 @@ Then open http://127.0.0.1:8765/docs for Swagger, or /redoc.
 GET /health and GET /v1/health return 200 once the model is loaded.
 POST /v1/audio/speech accepts JSON `input` or `text` and returns audio/wav.
 POST /v1/audio/cancel drops an in-flight line. The app can also discard
-the response.
+the response. Request ids belong to one client process and start over when
+that process restarts, so a cancel only ever reaches a line that is still
+running; it is never remembered against later ids.
 
 The model is loaded before the process listens. A rejected prompt or a
 failed load exits without serving, so /health is 200 only when synthesis
@@ -25,12 +27,14 @@ can run.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
 import threading
 import traceback
 import wave
+from collections.abc import Iterator
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Mapping
@@ -58,33 +62,52 @@ MODEL_FILES = (
 
 
 class EpochGate:
-    """Drop a synthesize call cancelled by id, or older than the latest epoch."""
+    """Drop synthesis that is still running when a cancel for it arrives.
+
+    Cancel state is scoped to requests in flight, never to a watermark that
+    outlives them. Ids come from one client process and start over at 1 when
+    that process restarts, so a remembered watermark would answer 409 to every
+    line the restarted app asked for, for good.
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._infer = threading.Lock()
-        self.dropped_before = 0
-        self.dropped_ids: set[str] = set()
+        self._running: dict[str, int] = {}
+        self._cancelled: set[str] = set()
+
+    @contextlib.contextmanager
+    def running(self, request_id: int | str) -> Iterator[bool]:
+        """Mark one request in flight, then forget it. Yields False if cancelled."""
+        key = str(request_id)
+        with self._lock:
+            self._running[key] = self._running.get(key, 0) + 1
+            live = key not in self._cancelled
+        try:
+            yield live
+        finally:
+            with self._lock:
+                left = self._running.get(key, 0) - 1
+                if left > 0:
+                    self._running[key] = left
+                else:
+                    self._running.pop(key, None)
+                    self._cancelled.discard(key)
 
     def cancel_before(self, epoch: int) -> None:
         with self._lock:
-            if epoch > self.dropped_before:
-                self.dropped_before = epoch
+            self._cancelled.update(
+                key for key in self._running if key.isdigit() and int(key) < epoch
+            )
 
     def cancel_id(self, request_id: str) -> None:
-        if not request_id:
-            return
         with self._lock:
-            self.dropped_ids.add(request_id)
+            if request_id in self._running:
+                self._cancelled.add(request_id)
 
     def allowed(self, request_id: int | str) -> bool:
-        key = str(request_id)
         with self._lock:
-            if key in self.dropped_ids:
-                return False
-            if key.isdigit():
-                return int(key) >= self.dropped_before
-            return True
+            return str(request_id) not in self._cancelled
 
     def infer_lock(self) -> threading.Lock:
         return self._infer
@@ -394,34 +417,35 @@ def synthesize(request_id: int | str, text: str) -> tuple[int, bytes, str]:
         return 400, b'{"error":"empty"}', "application/json"
     if len(line) > 400:
         return 400, b'{"error":"too_long"}', "application/json"
-    if not GATE.allowed(request_id):
-        return 409, b'{"error":"cancelled"}', "application/json"
-    if SYNTHESIZE is not None:
-        return SYNTHESIZE(line)
-    pieces = []
-    with GATE.infer_lock():
-        if not GATE.allowed(request_id):
+    with GATE.running(request_id) as live:
+        if not live:
             return 409, b'{"error":"cancelled"}', "application/json"
-        generator = MODEL.inference_zero_shot(
-            line,
-            "",
-            "",
-            zero_shot_spk_id="shiju-girl",
-            stream=True,
-            speed=1.0,
-        )
-        for item in generator:
+        if SYNTHESIZE is not None:
+            return SYNTHESIZE(line)
+        pieces = []
+        with GATE.infer_lock():
             if not GATE.allowed(request_id):
                 return 409, b'{"error":"cancelled"}', "application/json"
-            speech = item.get("tts_speech")
-            if speech is None:
-                continue
-            pieces.append(speech)
-    if not GATE.allowed(request_id):
-        return 409, b'{"error":"cancelled"}', "application/json"
-    if not pieces:
-        return 500, b'{"error":"empty_audio"}', "application/json"
-    return 200, chunks_to_wav(pieces, SAMPLE_RATE), "audio/wav"
+            generator = MODEL.inference_zero_shot(
+                line,
+                "",
+                "",
+                zero_shot_spk_id="shiju-girl",
+                stream=True,
+                speed=1.0,
+            )
+            for item in generator:
+                if not GATE.allowed(request_id):
+                    return 409, b'{"error":"cancelled"}', "application/json"
+                speech = item.get("tts_speech")
+                if speech is None:
+                    continue
+                pieces.append(speech)
+        if not GATE.allowed(request_id):
+            return 409, b'{"error":"cancelled"}', "application/json"
+        if not pieces:
+            return 500, b'{"error":"empty_audio"}', "application/json"
+        return 200, chunks_to_wav(pieces, SAMPLE_RATE), "audio/wav"
 
 
 def health_payload() -> HealthBody:
@@ -470,15 +494,13 @@ def error_response(status: int, body: bytes) -> JSONResponse:
     return JSONResponse(payload, status_code=status)
 
 
-def refusal(request_id: str, text: str) -> JSONResponse | None:
+def refusal(text: str) -> JSONResponse | None:
     """JSON errors keep Content-Length. Streaming starts only after these checks."""
     line = " ".join(text.split())
     if not line:
         return JSONResponse({"error": "empty"}, status_code=400)
     if len(line) > 400:
         return JSONResponse({"error": "too_long"}, status_code=400)
-    if not GATE.allowed(request_id):
-        return JSONResponse({"error": "cancelled"}, status_code=409)
     return None
 
 
@@ -507,35 +529,39 @@ def iter_model_pcm(request_id: str, line: str):
 
 def stream_frames(request_id: str, line: str):
     """One HTTP chunk per frame. The lock covers the whole utterance."""
-    emitted = False
-    try:
-        with GATE.infer_lock():
-            if not GATE.allowed(request_id):
-                yield fail_frame("cancelled")
-                return
-            for pcm in iter_model_pcm(request_id, line):
+    with GATE.running(request_id) as live:
+        if not live:
+            yield fail_frame("cancelled")
+            return
+        emitted = False
+        try:
+            with GATE.infer_lock():
                 if not GATE.allowed(request_id):
                     yield fail_frame("cancelled")
                     return
-                emitted = True
-                yield pcm_frame(pcm)
-            if not GATE.allowed(request_id):
-                yield fail_frame("cancelled")
+                for pcm in iter_model_pcm(request_id, line):
+                    if not GATE.allowed(request_id):
+                        yield fail_frame("cancelled")
+                        return
+                    emitted = True
+                    yield pcm_frame(pcm)
+                if not GATE.allowed(request_id):
+                    yield fail_frame("cancelled")
+                    return
+            if not emitted:
+                yield fail_frame("failed")
                 return
-        if not emitted:
+            yield b"\x00"
+        except Exception as exc:
+            sys.stderr.write(f"synthesize failed: {exc}\n")
+            traceback.print_exc(file=sys.stderr)
             yield fail_frame("failed")
-            return
-        yield b"\x00"
-    except Exception as exc:
-        sys.stderr.write(f"synthesize failed: {exc}\n")
-        traceback.print_exc(file=sys.stderr)
-        yield fail_frame("failed")
 
 
 def stream_speech(body: SpeechRequest) -> Response:
     request_id = request_id_of(body)
     line = spoken_line(body)
-    refused = refusal(request_id, line)
+    refused = refusal(line)
     if refused is not None:
         return refused
     return StreamingResponse(
@@ -772,15 +798,19 @@ def pcm_silence(samples: int, sample_rate: int = 16000) -> bytes:
 def self_check() -> None:
     global SYNTHESIZE, SAMPLE_RATE, DEVICE, PROMPT_SECONDS
     gate = EpochGate()
-    assert gate.allowed(1)
-    gate.cancel_before(2)
-    assert not gate.allowed(1)
-    assert gate.allowed(2)
-    gate.cancel_before(1)
-    assert gate.allowed(2)
-    gate.cancel_id("later")
-    assert not gate.allowed("later")
-    assert gate.allowed(2)
+    with gate.running(1) as live:
+        assert live
+        gate.cancel_before(2)
+        assert not gate.allowed(1)
+    assert gate.allowed(1)  # state dies with the request
+    gate.cancel_before(1)  # an idle cancel reaches nothing
+    with gate.running(1) as live:
+        assert live  # a restarted client counts from 1 again and still runs
+    with gate.running("later") as live:
+        assert live
+        gate.cancel_id("later")
+        assert not gate.allowed("later")
+    assert gate.allowed("later")
 
     assert require_loopback("127.0.0.1") == "127.0.0.1"
     assert require_loopback("localhost") == "127.0.0.1"
@@ -872,8 +902,6 @@ def self_check() -> None:
     SAMPLE_RATE = 24000
     DEVICE = "cpu"
     PROMPT_SECONDS = 4.0
-    GATE.dropped_before = 0
-    GATE.dropped_ids.clear()
 
     import socket
     import time
@@ -966,17 +994,21 @@ def self_check() -> None:
         status, _, error = call("POST", "/v1/audio/speech", {"input": "啊" * 401})
         assert status == 400 and b"too_long" in error
 
+        # A restarted app counts its request ids from 1 again. A cancel for a line
+        # that is no longer running must not reject the new session.
         status, _, _ = call("POST", "/v1/audio/cancel", {"before": 4})
+        assert status == 200
         status, _, error = call("POST", "/v1/audio/speech", {"input": "还在算", "request_id": 3})
-        assert status == 409 and b"cancelled" in error
+        assert status == 200, error
+        assert seen[-1] == "还在算"
         status, _, _audio = call("POST", "/v1/audio/speech", {"input": "下一句", "request_id": 4})
         assert status == 200
         assert seen[-1] == "下一句"
 
-        status, _, error = call("POST", "/v1/audio/cancel", {"request_id": "drop-me"})
+        status, _, _ = call("POST", "/v1/audio/cancel", {"request_id": "drop-me"})
         assert status == 200
-        status, _, error = call("POST", "/synthesize", {"input": "丢掉", "request_id": "drop-me"})
-        assert status == 409 and b"cancelled" in error
+        status, _, error = call("POST", "/synthesize", {"input": "新的一句", "request_id": "drop-me"})
+        assert status == 200, error  # cancelling an idle id is a no-op, not a ban
 
         status, _, error = call("GET", "/nope")
         assert status == 404
@@ -1018,17 +1050,6 @@ def self_check() -> None:
         finally:
             refused._siju_conn.close()
 
-        GATE.cancel_before(9)
-        cancelled = post_raw({"input": "还没开始", "stream": True, "request_id": 1})
-        try:
-            assert cancelled.status == 409
-            assert cancelled.getheader("Content-Length")
-            assert b"cancelled" in cancelled.read()
-        finally:
-            cancelled._siju_conn.close()
-        GATE.dropped_before = 0
-        GATE.dropped_ids.clear()
-
         release = threading.Event()
         first = b"\x01\x00" * 16
         second = b"\x02\x00" * 16
@@ -1063,6 +1084,35 @@ def self_check() -> None:
         finally:
             STREAM_ITER = None
             release.set()
+
+        # A cancel while the line is still being synthesized stops it mid-frame.
+        cancel_release = threading.Event()
+        cancel_first = b"\x01\x00" * 8
+        cancel_second = b"\x02\x00" * 8
+
+        def stalling_cancelled_pcm():
+            yield cancel_first
+            if not cancel_release.wait(3):
+                raise RuntimeError("客户端还没读到第一帧，服务却要发第二帧")
+            yield cancel_second
+
+        STREAM_ITER = stalling_cancelled_pcm
+        try:
+            held = post_raw({"input": "说到一半", "stream": True, "request_id": 11})
+            try:
+                assert held.status == 200
+                header = read_exact(held, 5)
+                assert header[:1] == b"\x01", header
+                assert read_exact(held, int.from_bytes(header[1:5], "little")) == cancel_first
+                status, _, _ = call("POST", "/v1/audio/cancel", {"before": 12})
+                assert status == 200
+                cancel_release.set()
+                assert held.read() == b"\x02cancelled", "正在算的那一句没有停下"
+            finally:
+                held._siju_conn.close()
+        finally:
+            STREAM_ITER = None
+            cancel_release.set()
 
         # A client that resets after a successful cancel must not dump a traceback.
         import io

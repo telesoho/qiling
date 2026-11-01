@@ -102,6 +102,7 @@ html.pet-window #root {
   --pet-glass: rgba(255, 251, 247, 0.88);
   --pet-glass-rim: rgba(255, 255, 255, 0.82);
   position: absolute;
+  box-sizing: border-box;
   z-index: 2;
   left: 50%;
   bottom: calc(100% + 16px);
