@@ -40,7 +40,14 @@ describe('器灵桌宠', () => {
   })
 
   it('hides the bubble without hiding the sprite', () => {
-    saveQiLingSettings({ voice: true, bubble: false, voiceAssistant: false, wakeWord: '器灵', voiceEngine: 'auto' })
+    saveQiLingSettings({
+      voice: true,
+      bubble: false,
+      voiceAssistant: false,
+      wakeWord: '器灵',
+      voiceEngine: 'auto',
+      edgeVoice: 'zh-CN-XiaoxiaoNeural',
+    })
     publishLine({ phase: 'say', text: '这步不错。', mood: 'up' })
     const pet = renderToStaticMarkup(<PetApp />)
     expect(pet).toContain('/pet/think.webp')

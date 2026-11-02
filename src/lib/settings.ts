@@ -1,6 +1,6 @@
 const STORAGE_KEY = 'qiling.settings'
 
-export type VoiceEnginePreference = 'auto' | 'cosyvoice' | 'system'
+export type VoiceEnginePreference = 'auto' | 'edge' | 'cosyvoice' | 'system'
 
 export interface PetSettings {
   voice: boolean
@@ -8,6 +8,7 @@ export interface PetSettings {
   voiceAssistant: boolean
   wakeWord: string
   voiceEngine: VoiceEnginePreference
+  edgeVoice: string
 }
 
 export const defaultPetSettings: PetSettings = {
@@ -16,6 +17,7 @@ export const defaultPetSettings: PetSettings = {
   voiceAssistant: false,
   wakeWord: '器灵',
   voiceEngine: 'auto',
+  edgeVoice: 'zh-CN-XiaoxiaoNeural',
 }
 
 export function isValidWakeWord(wakeWord: string): boolean {
@@ -23,7 +25,11 @@ export function isValidWakeWord(wakeWord: string): boolean {
 }
 
 export function isVoiceEnginePreference(value: unknown): value is VoiceEnginePreference {
-  return value === 'auto' || value === 'cosyvoice' || value === 'system'
+  return value === 'auto' || value === 'edge' || value === 'cosyvoice' || value === 'system'
+}
+
+export function isValidEdgeVoice(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value)
 }
 
 type StorageLike = Pick<Storage, 'getItem' | 'setItem'>
@@ -54,6 +60,9 @@ export function loadQiLingSettings(): PetSettings {
       voiceEngine: isVoiceEnginePreference(parsed.voiceEngine)
         ? parsed.voiceEngine
         : defaultPetSettings.voiceEngine,
+      edgeVoice: isValidEdgeVoice(parsed.edgeVoice)
+        ? parsed.edgeVoice
+        : defaultPetSettings.edgeVoice,
     }
   } catch {
     return { ...defaultPetSettings }
@@ -73,6 +82,9 @@ export function saveQiLingSettings(settings: PetSettings): void {
     voiceEngine: isVoiceEnginePreference(settings.voiceEngine)
       ? settings.voiceEngine
       : defaultPetSettings.voiceEngine,
+    edgeVoice: isValidEdgeVoice(settings.edgeVoice)
+      ? settings.edgeVoice
+      : defaultPetSettings.edgeVoice,
   }
   store.setItem(STORAGE_KEY, JSON.stringify(safe))
   if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('qiling-settings'))

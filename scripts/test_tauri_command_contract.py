@@ -25,6 +25,28 @@ class TauriCommandContractTests(unittest.TestCase):
         )
         self.assertRegex(permissions, rf'"{re.escape(command)}"')
 
+    def test_edge_voice_commands_are_registered_and_allowed(self):
+        settings = (ROOT / "src/pet/SettingsApp.tsx").read_text(encoding="utf-8")
+        speech = (ROOT / "src/lib/speech.ts").read_text(encoding="utf-8")
+        rust = (ROOT / "src-tauri/src/main.rs").read_text(encoding="utf-8")
+        permissions = (ROOT / "src-tauri/permissions/app.toml").read_text(
+            encoding="utf-8"
+        )
+
+        for command, frontend in (
+            ("qiling_edge_voice_list", settings),
+            ("qiling_edge_voice_synthesize", speech),
+            ("qiling_edge_voice_cancel", speech),
+        ):
+            with self.subTest(command=command):
+                self.assertIn(command, frontend)
+                self.assertRegex(rust, rf"fn {re.escape(command)}\s*\(")
+                self.assertRegex(
+                    rust,
+                    rf"generate_handler!\s*\[[\s\S]*?\b{re.escape(command)}\b",
+                )
+                self.assertRegex(permissions, rf'"{re.escape(command)}"')
+
     def test_vscode_explain_command_is_registered_and_allowed(self):
         settings = (ROOT / "src/pet/SettingsApp.tsx").read_text(encoding="utf-8")
         rust = (ROOT / "src-tauri/src/main.rs").read_text(encoding="utf-8")

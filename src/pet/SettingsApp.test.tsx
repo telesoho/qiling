@@ -30,7 +30,14 @@ describe('器灵设定', () => {
   })
 
   it('leaves voice unchecked when voice is off', () => {
-    saveQiLingSettings({ voice: false, bubble: true, voiceAssistant: false, wakeWord: '器灵', voiceEngine: 'auto' })
+    saveQiLingSettings({
+      voice: false,
+      bubble: true,
+      voiceAssistant: false,
+      wakeWord: '器灵',
+      voiceEngine: 'auto',
+      edgeVoice: 'zh-CN-XiaoxiaoNeural',
+    })
     const page = renderToStaticMarkup(<SettingsApp />)
     expect(beforeLabel(page, '语音')).not.toContain('checked')
     expect(beforeLabel(page, '气泡')).toContain('checked')
@@ -41,7 +48,10 @@ describe('器灵设定', () => {
     expect(page).toMatch(/<label><input type="checkbox"(?: disabled="")?\/>唤醒词监听/)
     expect(page).toContain('id="voice-wake-word"')
     expect(page).toContain('id="voice-engine"')
-    expect(page).toContain('自动：优先 CosyVoice，不可用时用系统语音')
+    expect(page).toContain('自动：优先 Edge 在线语音；不可用时用系统语音')
+    expect(page).toContain('播报文本会发送到微软语音服务')
+    expect(page).toContain('id="edge-voice"')
+    expect(page).toContain('读取 Edge 音色')
     expect(page).toContain('value="器灵"')
     expect(page).toContain('2–8 个连续汉字')
     expect(page).toContain('最近识别到的语音：（等待识别）')

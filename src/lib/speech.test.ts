@@ -20,11 +20,13 @@ describe('器灵语音', () => {
     ])?.name).toBe('Microsoft Huihui')
   })
 
-  it('uses CosyVoice only when the local service is ready', () => {
-    expect(voiceEngineFor(null)).toBe('system')
-    expect(voiceEngineFor({ ready: true })).toBe('cosyvoice')
+  it('uses Edge by default and preserves explicit local and system choices', () => {
+    expect(voiceEngineFor(null)).toBe('edge')
+    expect(voiceEngineFor({ ready: true })).toBe('edge')
+    expect(voiceEngineFor(null, 'edge')).toBe('edge')
     expect(voiceEngineFor(null, 'cosyvoice')).toBe('cosyvoice')
     expect(voiceEngineFor({ ready: true }, 'system')).toBe('system')
+    expect(voiceEngineLabel('edge')).toBe('Edge在线语音')
     expect(voiceEngineLabel('cosyvoice')).toBe('本地神经音')
     expect(fallbackToSystem('failed')).toBe(true)
     expect(fallbackToSystem('cancelled')).toBe(false)

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import {
   defaultPetSettings,
   isValidWakeWord,
+  isValidEdgeVoice,
   loadQiLingSettings,
   saveQiLingSettings,
 } from './settings'
@@ -36,6 +37,20 @@ describe('wake word settings', () => {
     saveQiLingSettings({ ...defaultPetSettings, voiceEngine: 'system' })
 
     expect(loadQiLingSettings().voiceEngine).toBe('system')
+  })
+
+  it('persists the selected Edge voice and defaults older settings', () => {
+    saveQiLingSettings({ ...defaultPetSettings, edgeVoice: 'zh-CN-YunxiNeural' })
+    expect(loadQiLingSettings().edgeVoice).toBe('zh-CN-YunxiNeural')
+
+    localStorage.setItem('qiling.settings', JSON.stringify({ voice: true }))
+    expect(loadQiLingSettings().edgeVoice).toBe(defaultPetSettings.edgeVoice)
+  })
+
+  it('rejects invalid Edge voice identifiers', () => {
+    expect(isValidEdgeVoice('zh-CN-XiaoxiaoNeural')).toBe(true)
+    expect(isValidEdgeVoice('../voice')).toBe(false)
+    expect(isValidEdgeVoice('')).toBe(false)
   })
 
   it.each(['', '器', '小 助手', '小助手123', '小助手小助手小助手'])(

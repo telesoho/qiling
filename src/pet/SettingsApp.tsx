@@ -60,6 +60,12 @@ interface LlmSettings {
   apiKeyConfigured: boolean
 }
 
+interface EdgeVoiceOption {
+  id: string
+  label: string
+  locale: string
+}
+
 const defaultLlmSettings: LlmSettings = {
   provider: 'ollama',
   baseUrl: 'http://127.0.0.1:11434',
@@ -170,9 +176,38 @@ export default function SettingsApp(): JSX.Element {
   const [testingVoice, setTestingVoice] = useState(false)
   const [voiceTestStatus, setVoiceTestStatus] = useState('')
   const voiceTest = useRef<VoiceTestPlayback | null>(null)
+  const [edgeVoices, setEdgeVoices] = useState<EdgeVoiceOption[]>([])
+  const [loadingEdgeVoices, setLoadingEdgeVoices] = useState(false)
+  const [edgeVoiceError, setEdgeVoiceError] = useState('')
 
   useEffect(() => watchQiLingSettings(setSettings), [])
   useEffect(() => setWakeWordDraft(settings.wakeWord), [settings.wakeWord])
+
+  useEffect(() => {
+    if (!('__TAURI_INTERNALS__' in window || '__TAURI__' in window)) return
+    let active = true
+    let unlisten: (() => void) | undefined
+    void import('@tauri-apps/api/event')
+      .then(({ listen }) => listen<{ engine?: string; detail?: string }>(
+        'qiling-voice-route',
+        ({ payload }) => {
+          if (active && payload.engine === 'system' && payload.detail) {
+            setVoiceTestStatus(payload.detail)
+          }
+        },
+      ))
+      .then((stop) => {
+        if (active) unlisten = stop
+        else stop()
+      })
+      .catch((reason: unknown) => {
+        console.warn('无法接收语音回退状态', String(reason))
+      })
+    return () => {
+      active = false
+      unlisten?.()
+    }
+  }, [])
 
   useEffect(() => () => {
     voiceTest.current?.stop()
@@ -373,6 +408,20 @@ export default function SettingsApp(): JSX.Element {
     }
   }
 
+  async function refreshEdgeVoices() {
+    setLoadingEdgeVoices(true)
+    setEdgeVoiceError('')
+    try {
+      const voices = await invoke<EdgeVoiceOption[]>('qiling_edge_voice_list')
+      setEdgeVoices(voices)
+      if (voices.length === 0) setEdgeVoiceError('在线服务没有返回可用的中文音色。')
+    } catch (reason) {
+      setEdgeVoiceError(`无法读取 Edge 中文音色：${String(reason)}`)
+    } finally {
+      setLoadingEdgeVoices(false)
+    }
+  }
+
   function playVoiceTest() {
     if (voiceTest.current) {
       voiceTest.current.stop()
@@ -390,11 +439,13 @@ export default function SettingsApp(): JSX.Element {
       voiceTest.current = null
       setTestingVoice(false)
       setVoiceTestStatus(
-        engine === 'cosyvoice'
-          ? '试听已用本机 CosyVoice 播放。'
-          : engine === 'system'
-            ? '试听已改用 Windows 系统语音播放。'
-            : '暂时没法播放试听，请检查播报声音设置。',
+        engine === 'edge'
+          ? '试听已用 Edge 在线语音播放。'
+          : engine === 'cosyvoice'
+            ? '试听已用本机 CosyVoice 播放。'
+            : engine === 'system'
+              ? '试听已改用 Windows 系统语音播放。'
+              : '暂时没法播放试听，请检查播报声音设置。',
       )
     })
   }
@@ -680,7 +731,8 @@ export default function SettingsApp(): JSX.Element {
               if (isVoiceEnginePreference(voiceEngine)) patch({ voiceEngine })
             }}
           >
-            <option value="auto">自动：优先 CosyVoice，不可用时用系统语音</option>
+            <option value="auto">自动：优先 Edge 在线语音；不可用时用系统语音</option>
+            <option value="edge">Edge 在线语音</option>
             <option value="cosyvoice">本机 CosyVoice</option>
             <option value="system">Windows 系统语音</option>
           </select>
@@ -689,8 +741,37 @@ export default function SettingsApp(): JSX.Element {
           </button>
         </div>
         <p id="voice-engine-help">
-          播报引擎与对话模型是独立设置。CosyVoice 不可用时会回退到系统语音；“试听”会用当前选择的声音读一句示例。
+          自动模式会优先使用 Edge 在线语音；播报文本会发送到微软语音服务。麦克风音频及其他应用数据不会发送。“试听”会用当前选择的声音读一句示例；Edge 不可用时改用 Windows 系统语音。
         </p>
+        {(settings.voiceEngine === 'auto' || settings.voiceEngine === 'edge') && (
+          <>
+            <label htmlFor="edge-voice">Edge 中文音色</label>
+            <div className="voice-engine-controls">
+              <select
+                id="edge-voice"
+                value={settings.edgeVoice}
+                onChange={(event) => patch({ edgeVoice: event.target.value })}
+              >
+                {!edgeVoices.some((voice) => voice.id === settings.edgeVoice) && (
+                  <option value={settings.edgeVoice}>{settings.edgeVoice}（当前）</option>
+                )}
+                {edgeVoices.map((voice) => (
+                  <option key={voice.id} value={voice.id}>
+                    {voice.label}（{voice.locale}）
+                  </option>
+                ))}
+              </select>
+              <button type="button" onClick={() => void refreshEdgeVoices()} disabled={loadingEdgeVoices}>
+                {loadingEdgeVoices ? '正在读取…' : '读取 Edge 音色'}
+              </button>
+            </div>
+            {edgeVoiceError && (
+              <p className="settings-error" role="status" aria-live="polite">
+                {edgeVoiceError}
+              </p>
+            )}
+          </>
+        )}
         {voiceTestStatus && (
           <p className="settings-status" role="status" aria-live="polite">
             {voiceTestStatus}

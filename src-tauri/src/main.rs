@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod cosyvoice;
+mod edge_tts;
 mod http;
 mod local_llm;
 mod spirit;
@@ -26,6 +27,7 @@ const TRAY_ID: &str = "qiling-tray";
 pub struct AppState {
     pet_placed: AtomicBool,
     voice: Arc<cosyvoice::VoiceHost>,
+    edge_voice: Arc<edge_tts::EdgeVoiceHost>,
     voice_assistant: Arc<voice_assistant::VoiceAssistantHost>,
     local_llm: Arc<local_llm::LocalLlm>,
     protocol: Arc<spirit::PairingManager>,
@@ -124,6 +126,7 @@ fn set_pet_open(app: &AppHandle, open: bool) -> Result<bool, String> {
     } else {
         state.local_llm.cancel();
         state.voice.cancel();
+        state.edge_voice.cancel_all()?;
         let stopped = state.voice_assistant.stop();
         let _ = app.emit("qiling-interrupt", ());
         let _ = app.emit(
@@ -214,6 +217,31 @@ fn create_bubble<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
 #[tauri::command]
 fn qiling_voice_status(state: State<AppState>) -> voice::VoiceReport {
     state.voice.status()
+}
+
+#[tauri::command]
+async fn qiling_edge_voice_list(
+    state: State<'_, AppState>,
+) -> Result<Vec<edge_tts::VoiceOption>, String> {
+    state.edge_voice.list_voices().await
+}
+
+#[tauri::command]
+async fn qiling_edge_voice_synthesize(
+    state: State<'_, AppState>,
+    request_id: String,
+    text: String,
+    voice: String,
+) -> Result<String, String> {
+    state
+        .edge_voice
+        .synthesize(&request_id, &text, &voice)
+        .await
+}
+
+#[tauri::command]
+fn qiling_edge_voice_cancel(state: State<AppState>, request_id: String) -> Result<(), String> {
+    state.edge_voice.cancel(&request_id)
 }
 
 #[tauri::command]
@@ -660,6 +688,7 @@ fn main() {
             app.manage(AppState {
                 pet_placed: AtomicBool::new(true),
                 voice: Arc::new(cosyvoice::VoiceHost::new()),
+                edge_voice: Arc::new(edge_tts::EdgeVoiceHost::new()),
                 voice_assistant: Arc::new(voice_assistant::VoiceAssistantHost::new(
                     voice_script,
                     voice_data_dir,
@@ -723,6 +752,9 @@ fn main() {
             qiling_voice_status,
             qiling_voice_synthesize,
             qiling_voice_cancel,
+            qiling_edge_voice_list,
+            qiling_edge_voice_synthesize,
+            qiling_edge_voice_cancel,
             qiling_voice_assistant_start,
             qiling_llm_get_settings,
             qiling_llm_save_settings,
