@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   shouldResumeListening,
+  voiceAssistantAction,
   WAKE_ACKNOWLEDGMENT,
   voiceAssistantStateLabel,
 } from './voice-assistant'
@@ -116,5 +117,26 @@ describe('awake conversation', () => {
         lineChanged: false,
       }),
     ).toBe(false)
+  })
+})
+
+describe('barge-in events', () => {
+  it('ducks before it cancels anything', () => {
+    expect(voiceAssistantAction({ type: 'duck' })).toBe('duck')
+  })
+
+  it('cancels the whole turn once the interruption is committed', () => {
+    expect(voiceAssistantAction({ type: 'stop_playback' })).toBe('barge_in')
+  })
+
+  it('turns the final transcript into the next question', () => {
+    expect(voiceAssistantAction({ type: 'transcript', id: 7, text: '那明天呢' })).toBe('transcript')
+  })
+
+  it('ignores transcripts without an id or without words', () => {
+    expect(voiceAssistantAction({ type: 'transcript', text: '那明天呢' })).toBe('none')
+    expect(voiceAssistantAction({ type: 'transcript', id: 7, text: '   ' })).toBe('none')
+    expect(voiceAssistantAction({ type: 'state', state: 'responding' })).toBe('none')
+    expect(voiceAssistantAction({ type: 'debug_transcript', text: '嗯' })).toBe('none')
   })
 })

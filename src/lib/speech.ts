@@ -575,6 +575,7 @@ export async function loadVoiceRoute(): Promise<VoiceRoute> {
 }
 
 function stopAudio(): void {
+  restoreQiLing()
   const stopStream = streamStop
   streamStop = null
   stopStream?.()
@@ -611,13 +612,62 @@ function decodeBase64(value: string): ArrayBuffer {
  * which sounds like the pet stalling on its first word.
  */
 let sharedAudio: AudioContext | null = null
+/**
+ * Everything the pet says runs through this gain, so a detected interruption can
+ * pull the voice down before the playback is confirmed and stopped. The system
+ * voice has no such control; it can only be stopped.
+ */
+let voiceGain: GainNode | null = null
+
+/** How far the voice drops while the user is (maybe) interrupting. */
+export const BARGE_DUCK_GAIN = 0.35
+const DUCK_RAMP_SECONDS = 0.04
+/** A hint that is never confirmed fades back instead of leaving the pet quiet. */
+const DUCK_HOLD_MS = 1_200
+let duckTimer = 0
 
 function audioContextFor(sampleRate: number): AudioContext {
   if (!sharedAudio || sharedAudio.state === 'closed') {
     sharedAudio = new AudioContext({ sampleRate })
+    voiceGain = null
   }
   if (sharedAudio.state === 'suspended') void sharedAudio.resume().catch(() => {})
   return sharedAudio
+}
+
+function voiceDestination(context: AudioContext): AudioNode {
+  if (context !== sharedAudio) return context.destination
+  if (!voiceGain || voiceGain.context !== context) {
+    voiceGain = context.createGain()
+    voiceGain.connect(context.destination)
+  }
+  return voiceGain
+}
+
+function rampVoiceGain(level: number): void {
+  const context = sharedAudio
+  if (!context || context.state === 'closed' || !voiceGain) return
+  const now = context.currentTime
+  voiceGain.gain.cancelScheduledValues(now)
+  voiceGain.gain.setTargetAtTime(level, now, DUCK_RAMP_SECONDS)
+}
+
+/** Pull the voice down while the runtime decides whether this is a real barge-in. */
+export function duckQiLing(): void {
+  if (!voiceGain) return
+  rampVoiceGain(BARGE_DUCK_GAIN)
+  if (typeof window === 'undefined') return
+  window.clearTimeout(duckTimer)
+  duckTimer = window.setTimeout(() => restoreQiLing(), DUCK_HOLD_MS)
+}
+
+/** Full volume again: the hint was a false positive, or the line ended. */
+export function restoreQiLing(): void {
+  if (typeof window !== 'undefined') {
+    window.clearTimeout(duckTimer)
+    duckTimer = 0
+  }
+  rampVoiceGain(1)
 }
 
 function pcm16ToFloat(pcm: ArrayBuffer): Float32Array {
@@ -708,7 +758,7 @@ function startPcmStream(line: string, mine: number): {
       scheduled = cursor - origin
       const source = ctx.createBufferSource()
       source.buffer = buffer
-      source.connect(ctx.destination)
+      source.connect(voiceDestination(ctx))
       source.start(slot.start)
       sources.push(source)
       if (!playback.started) {
@@ -759,7 +809,7 @@ function playDecodedAudio(
 ): Promise<LocalSpeakResult> {
   const source = context.createBufferSource()
   source.buffer = buffer
-  source.connect(context.destination)
+  source.connect(voiceDestination(context))
 
   return new Promise((resolve) => {
     let settled = false
@@ -1009,6 +1059,7 @@ export function speakQiLing(text: string): void {
   const mine = ++token
   pending = true
   activeLine = line
+  restoreQiLing()
   clearCaptionClock()
   setCaption('')
   setHeard('')

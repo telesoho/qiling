@@ -31,6 +31,8 @@ pub struct AppState {
     voice_assistant: Arc<voice_assistant::VoiceAssistantHost>,
     local_llm: Arc<local_llm::LocalLlm>,
     protocol: Arc<spirit::PairingManager>,
+    /// Which voice turn owns the speakers; see `voice_assistant::TurnGate`.
+    turns: Arc<voice_assistant::TurnGate>,
 }
 
 fn place_pet(pet: &WebviewWindow) {
@@ -124,6 +126,7 @@ fn set_pet_open(app: &AppHandle, open: bool) -> Result<bool, String> {
         pet.set_always_on_top(true).map_err(|err| err.to_string())?;
         pet.show().map_err(|err| err.to_string())?;
     } else {
+        state.turns.retire();
         state.local_llm.cancel();
         state.voice.cancel();
         state.edge_voice.cancel_all()?;
@@ -330,11 +333,26 @@ fn qiling_voice_assistant_status(state: State<AppState>) -> Result<String, Strin
 
 #[tauri::command]
 fn qiling_voice_assistant_cancel(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    state.turns.retire();
     state.local_llm.cancel();
     state.voice.cancel();
     app.emit("qiling-interrupt", ())
         .map_err(|error| format!("voice_interrupt_failed:{error}"))?;
     state.voice_assistant.cancel()
+}
+
+/// The runtime decided the user took the floor back. Cancel the model answer,
+/// both synthesis paths and the audio still queued, in one step, and tell the
+/// page to stop playing. The runtime's own recognition is left alone: it is
+/// still listening to the rest of the interruption.
+#[tauri::command]
+fn qiling_voice_barge_in(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    state.turns.retire();
+    state.local_llm.cancel();
+    state.voice.cancel();
+    state.edge_voice.cancel_all()?;
+    app.emit("qiling-interrupt", ())
+        .map_err(|error| format!("voice_interrupt_failed:{error}"))
 }
 
 #[tauri::command]
@@ -357,6 +375,7 @@ fn qiling_voice_assistant_spoken(state: State<AppState>) -> Result<(), String> {
 
 #[tauri::command]
 fn qiling_voice_assistant_stop(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    state.turns.retire();
     state.local_llm.cancel();
     state.voice.cancel();
     app.emit("qiling-interrupt", ())
@@ -382,15 +401,31 @@ async fn qiling_voice_assistant_respond(
     if transcript.is_empty() || transcript.chars().count() > 2_000 {
         return Err("invalid_voice_prompt".into());
     }
+    // A new question owns the speakers from here on. Anything the previous turn
+    // is still generating is retired before this question reaches the model.
+    let turn = state.turns.begin();
+    let turns = Arc::clone(&state.turns);
     app.emit(
         "qiling-line",
         serde_json::json!({ "phase": "thinking", "text": "", "mood": "neutral" }),
     )
     .map_err(|error| format!("voice_feedback_failed:{error}"))?;
+    // Synthesis that was already streaming belongs to the cancelled turn.
+    state.voice.cancel();
+    state.edge_voice.cancel_all()?;
     let llm = Arc::clone(&state.local_llm);
-    let response = tauri::async_runtime::spawn_blocking(move || llm.respond(&transcript))
-        .await
-        .map_err(|_| "local_llm_failed".to_string())?;
+    let response = tauri::async_runtime::spawn_blocking(move || {
+        // Replaces the answer that was still running instead of failing `busy`.
+        llm.begin_turn()?;
+        llm.respond(&transcript)
+    })
+    .await
+    .map_err(|_| "local_llm_failed".to_string())?;
+    if !turns.is_current(turn) {
+        // A barge-in or a newer question retired this turn while the model was
+        // thinking; publishing the answer now would revive the interrupted line.
+        return Ok(());
+    }
     match response {
         Ok(text) => app
             .emit(
@@ -698,6 +733,7 @@ fn main() {
                         .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?,
                 ),
                 protocol: protocol.clone(),
+                turns: Arc::new(voice_assistant::TurnGate::default()),
             });
             if let Some(pet) = app.get_webview_window("pet") {
                 place_pet(&pet);
@@ -762,6 +798,7 @@ fn main() {
             qiling_llm_list_models,
             qiling_voice_assistant_status,
             qiling_voice_assistant_cancel,
+            qiling_voice_barge_in,
             qiling_voice_assistant_listen,
             qiling_voice_assistant_speaking,
             qiling_voice_assistant_spoken,

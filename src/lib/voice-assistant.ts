@@ -6,6 +6,7 @@ export interface VoiceAssistantEvent {
     | 'debug_keyword'
     | 'warning'
     | 'error'
+    | 'duck'
     | 'stop_playback'
   state?: string
   code?: string
@@ -13,6 +14,29 @@ export interface VoiceAssistantEvent {
   id?: number
   /** The runtime heard a real interruption while the pet was speaking. */
   barge_in?: boolean
+}
+
+export type VoiceAssistantAction = 'duck' | 'barge_in' | 'transcript' | 'none'
+
+/**
+ * What the page must do for one runtime event.
+ *
+ * `duck` only pulls the voice down while the runtime waits for a couple more
+ * characters. `stop_playback` means the arbitration already committed, so the
+ * page cancels the whole turn instead of letting the rest of it surface later.
+ */
+export function voiceAssistantAction(event: VoiceAssistantEvent): VoiceAssistantAction {
+  if (event.type === 'duck') return 'duck'
+  if (event.type === 'stop_playback') return 'barge_in'
+  if (
+    event.type === 'transcript' &&
+    typeof event.id === 'number' &&
+    typeof event.text === 'string' &&
+    event.text.trim() !== ''
+  ) {
+    return 'transcript'
+  }
+  return 'none'
 }
 
 export const WAKE_ACKNOWLEDGMENT = '我在，请说。'

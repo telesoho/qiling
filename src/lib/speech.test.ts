@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { captionAt, fallbackToSystem, pickChineseVoice, planUtterance, schedulePcmChunk, startVoiceTest, streamSpeakResult, VOICE_TEST_LINE, voiceEngineFor, voiceEngineLabel } from './speech'
+import { BARGE_DUCK_GAIN, captionAt, duckQiLing, fallbackToSystem, pickChineseVoice, planUtterance, restoreQiLing, schedulePcmChunk, startVoiceTest, streamSpeakResult, VOICE_TEST_LINE, voiceEngineFor, voiceEngineLabel } from './speech'
 
 describe('器灵语音', () => {
   it('speaks only a settled line, and stops when hidden or muted', () => {
@@ -55,5 +55,13 @@ describe('器灵语音', () => {
     const playback = startVoiceTest(VOICE_TEST_LINE)
     playback.stop()
     await expect(playback.done).resolves.toBe('unavailable')
+  })
+
+  it('ducks the voice before interruption and is harmless without a player', () => {
+    expect(BARGE_DUCK_GAIN).toBeGreaterThan(0)
+    expect(BARGE_DUCK_GAIN).toBeLessThan(1)
+    // Nothing has been played yet, so there is no gain to move.
+    expect(() => duckQiLing()).not.toThrow()
+    expect(() => restoreQiLing()).not.toThrow()
   })
 })

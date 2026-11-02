@@ -3,11 +3,12 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { QiLingPhase } from '../lib/phase'
 import { idleLine, initialPetLine, publishLine, subscribeLine, type PetLine } from '../lib/line'
 import { closeSpeechBubble, loadQiLingSettings, saveQiLingSettings, watchQiLingSettings } from '../lib/settings'
-import { usePetSpeech } from '../lib/speech'
+import { duckQiLing, usePetSpeech } from '../lib/speech'
 import {
   WAKE_ACKNOWLEDGMENT,
   isListeningPaused,
   shouldResumeListening,
+  voiceAssistantAction,
   voiceAssistantStateLabel,
   type VoiceAssistantEvent,
 } from '../lib/voice-assistant'
@@ -43,6 +44,8 @@ export default function PetApp(): JSX.Element {
   const [voiceAssistantState, setVoiceAssistantState] = useState(
     () => loadQiLingSettings().voiceAssistant ? 'starting' : 'stopped',
   )
+  const lineRef = useRef<PetLine>(line)
+  lineRef.current = line
   const [ready, setReady] = useState(() => !inTauri())
   const published = useRef<PetStateId | null>(null)
   const sawLine = useRef(false)
@@ -209,31 +212,47 @@ export default function PetApp(): JSX.Element {
             if (payload.type === 'state' && payload.state) {
               stateEventRevision += 1
               applyState(payload.state)
-            } else if (payload.type === 'error') {
+              return
+            }
+            if (payload.type === 'error') {
               stateEventRevision += 1
               setVoiceAssistantState('error')
-            } else if (payload.type === 'stop_playback') {
-              // The runtime recognized an interrupt phrase: stop the current line and
-              // let the settle buffer hand the microphone back.
-              interruptRef.current()
-            } else if (
-              payload.type === 'transcript' &&
-              typeof payload.id === 'number' &&
-              typeof payload.text === 'string' &&
-              !handledTranscripts.has(payload.id)
-            ) {
-              handledTranscripts.add(payload.id)
-              if (handledTranscripts.size > 64) {
-                const oldest = handledTranscripts.values().next().value
-                if (typeof oldest === 'number') handledTranscripts.delete(oldest)
-              }
-              // A transcript while the pet is still talking is a barge-in: stop the
-              // current line first so the reply cannot start over the old audio.
-              interruptRef.current()
-              void invoke('qiling_voice_assistant_respond', { text: payload.text }).catch((error: unknown) => {
-                console.warn('本机语音对话失败', String(error))
-              })
+              return
             }
+            const action = voiceAssistantAction(payload)
+            if (action === 'duck') {
+              // The user only started to talk: lower the voice and keep listening.
+              duckQiLing()
+              return
+            }
+            if (action === 'barge_in') {
+              // The runtime committed the interruption from a partial transcript.
+              // Cancel model, synthesis and queued audio as one step so nothing
+              // can revive the line the user just cut off.
+              interruptRef.current()
+              if (lineRef.current.phase === 'thinking') {
+                // Nothing had been said yet. Do not leave the thinking pose up
+                // after the answer was cancelled; the next question thinks again.
+                publishLine(idleLine)
+              }
+              void invoke('qiling_voice_barge_in').catch((error: unknown) => {
+                console.warn('无法取消被打断的回答', String(error))
+              })
+              return
+            }
+            if (action !== 'transcript' || payload.id === undefined || payload.text === undefined) return
+            if (handledTranscripts.has(payload.id)) return
+            handledTranscripts.add(payload.id)
+            if (handledTranscripts.size > 64) {
+              const oldest = handledTranscripts.values().next().value
+              if (typeof oldest === 'number') handledTranscripts.delete(oldest)
+            }
+            // A transcript while the pet is still talking is a barge-in: stop the
+            // current line first so the reply cannot start over the old audio.
+            interruptRef.current()
+            void invoke('qiling_voice_assistant_respond', { text: payload.text }).catch((error: unknown) => {
+              console.warn('本机语音对话失败', String(error))
+            })
           },
         )
         if (active) unlisten = stop

@@ -29,6 +29,8 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// A short read timeout turns that cold start into a bogus "cannot connect" error.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// How long a new turn waits for the cancelled one to release the model slot.
+const TURN_HANDOVER_TIMEOUT: Duration = Duration::from_millis(500);
 const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -246,6 +248,23 @@ impl LocalLlm {
 
     pub fn cancel(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// A new question replaces the turn that is still running.
+    ///
+    /// `cancel` only bumps the generation; the worker needs up to one poll
+    /// interval to notice and release its slot. Waiting here is what keeps an
+    /// interruption from failing with `busy` while the abandoned answer unwinds.
+    pub fn begin_turn(&self) -> Result<(), String> {
+        self.cancel();
+        let deadline = Instant::now() + TURN_HANDOVER_TIMEOUT;
+        while self.busy.load(Ordering::SeqCst) {
+            if Instant::now() >= deadline {
+                return Err("busy".into());
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        Ok(())
     }
 
     pub fn test_connection(&self) -> Result<(), String> {
@@ -1054,6 +1073,36 @@ mod tests {
             "cancel waited {:?}",
             started.elapsed()
         );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_new_turn_replaces_the_answer_that_is_still_running() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            let first = "{\"message\":{\"content\":\"稍后回答\"},\"done\":false}\n";
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: keep-alive\r\n\r\n{first}"
+            );
+            started_tx.send(()).unwrap();
+            thread::sleep(Duration::from_millis(300));
+        });
+        let model = std::sync::Arc::new(LocalLlm::for_test(format!("http://{address}/api/chat")));
+        let worker_model = std::sync::Arc::clone(&model);
+        let worker = thread::spawn(move || worker_model.respond("你好"));
+
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        model.begin_turn().unwrap();
+        // The slot is free again, so the next question is answered instead of
+        // failing with `busy` while the abandoned answer unwinds.
+        assert!(!model.busy.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(worker.join().unwrap().unwrap_err(), "cancelled");
         server.join().unwrap();
     }
 

@@ -22,6 +22,7 @@ commands.allow = [
   "qiling_voice_assistant_start",
   "qiling_voice_assistant_status",
   "qiling_voice_assistant_cancel",
+  "qiling_voice_barge_in",
   "qiling_voice_assistant_listen",
   "qiling_voice_assistant_speaking",
   "qiling_voice_assistant_spoken",

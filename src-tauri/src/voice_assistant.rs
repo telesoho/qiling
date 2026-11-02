@@ -323,6 +323,33 @@ fn emit_event(app: &AppHandle, event: Value) {
     let _ = app.emit("voice-assistant-event", event);
 }
 
+/// One voice turn owns the speakers.
+///
+/// A slow model answer or a late `say` event must never surface after the user
+/// took the floor back. Every turn claims the gate and checks it again before
+/// publishing anything; a barge-in retires the turn immediately, so the answer
+/// that was already being generated is dropped instead of resuming playback.
+#[derive(Debug, Default)]
+pub struct TurnGate {
+    current: AtomicU64,
+}
+
+impl TurnGate {
+    /// Start a new turn. Everything begun before it is stale.
+    pub fn begin(&self) -> u64 {
+        self.current.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Retire the current turn without starting another one.
+    pub fn retire(&self) -> u64 {
+        self.begin()
+    }
+
+    pub fn is_current(&self, turn: u64) -> bool {
+        self.current.load(Ordering::SeqCst) == turn
+    }
+}
+
 fn state_from_event(event: &Value) -> Option<&str> {
     (event.get("type")?.as_str()? == "state")
         .then(|| event.get("state")?.as_str())
@@ -380,7 +407,7 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        is_valid_wake_word, runtime_stopped_event, set_current_state, state_from_event,
+        is_valid_wake_word, runtime_stopped_event, set_current_state, state_from_event, TurnGate,
         VoiceAssistantHost,
     };
 
@@ -423,5 +450,22 @@ mod tests {
 
         set_current_state(&host.current_state, "error").unwrap();
         assert_eq!(host.current_state().unwrap(), "error");
+    }
+
+    #[test]
+    fn a_later_turn_retires_the_previous_answer() {
+        let turns = TurnGate::default();
+
+        let first = turns.begin();
+        assert!(turns.is_current(first));
+
+        let second = turns.begin();
+        assert!(!turns.is_current(first));
+        assert!(turns.is_current(second));
+
+        // A barge-in retires the answer being generated without starting one.
+        turns.retire();
+        assert!(!turns.is_current(second));
+        assert_eq!(turns.begin(), 4);
     }
 }

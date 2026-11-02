@@ -6,10 +6,12 @@ from pathlib import Path
 from voice_assistant import (
     MAX_KEYWORD_VARIANTS,
     VoiceFlow,
+    barge_cue,
     build_keyword_line,
     build_keyword_lines,
     configure_logging,
     is_acknowledgment_echo,
+    is_backchannel,
     is_echo_of,
     is_interrupt_phrase,
     is_wake_word_transcript,
@@ -17,6 +19,8 @@ from voice_assistant import (
     load_pypinyin,
     parse_command,
     split_final_token,
+    starts_with_command,
+    strip_interrupt_phrases,
     syllable_similarity,
     tone3_parts,
     wake_word_similarity,
@@ -80,11 +84,16 @@ class FakeKeywordSpotter:
 
 
 class FakeRecognizer:
-    """One voice recognizer, many streams: each stream carries its own endpoint."""
+    """One voice recognizer, many streams: each stream carries its own endpoint.
 
-    def __init__(self, result="帮我解释一下什么是闭包") -> None:
+    `partials` are returned one per `get_result` call before `result`, which is
+    how the streaming hypothesis looks before the utterance endpoints.
+    """
+
+    def __init__(self, result="帮我解释一下什么是闭包", partials=None) -> None:
         self.streams = []
         self.result = result
+        self.partials = list(partials or [])
 
     def create_stream(self):
         stream = FakeKeywordStream()
@@ -101,6 +110,8 @@ class FakeRecognizer:
         return stream.endpoint
 
     def get_result(self, _stream) -> str:
+        if self.partials:
+            return self.partials.pop(0)
         return self.result
 
     def reset(self, stream) -> None:
@@ -220,7 +231,7 @@ class VoiceFlowTests(unittest.TestCase):
             all("audio" not in event and "samples" not in event for event in events)
         )
 
-    def test_the_microphone_stays_closed_while_the_pet_answers(self):
+    def test_a_new_question_can_take_the_turn_before_the_answer_is_audible(self):
         events = []
         kws = FakeKeywordSpotter()
         asr = FakeRecognizer()
@@ -234,15 +245,22 @@ class VoiceFlowTests(unittest.TestCase):
         flow.feed([0.2] * 1600, now=3.0)
         self.assertEqual(flow.state, "responding")
 
-        # The pet's own answer is on the speakers; it must not be heard as a new
-        # wake word or as the next question.
-        emitted = len(events)
-        kws.detect = True
-        asr.endpoint = True
+        # The answer is still being generated or synthesized, so nothing is
+        # playing yet. Talking into that window must take the turn back instead
+        # of hitting a closed microphone.
+        events.clear()
+        asr.result = "那明天天气呢"
+        asr.endpoint = False
         flow.feed([0.3] * 1600, now=4.0)
+        asr.endpoint = True
+        flow.feed([0.3] * 1600, now=4.3)
 
+        self.assertIn({"type": "stop_playback"}, events)
+        barge = [event for event in events if event.get("barge_in")]
+        self.assertEqual(len(barge), 1)
+        self.assertEqual(barge[0]["text"], "那明天天气呢")
         self.assertEqual(flow.state, "responding")
-        self.assertEqual(len(events), emitted)
+        self.assertTrue(flow.awaiting_new_answer)
 
     def test_the_wake_acknowledgment_heard_back_is_not_a_question(self):
         events = []
@@ -457,6 +475,163 @@ class VoiceFlowTests(unittest.TestCase):
         self.assertEqual(len(barge), 1)
         self.assertEqual(barge[0]["text"], "你能不能给我讲个故事")
 
+    def _speaking_flow(self, result="你能给我讲个故事吗", partials=None):
+        events = []
+        asr = FakeRecognizer(result)
+        flow = VoiceFlow(FakeKeywordSpotter(), asr, events.append, "器灵")
+        flow.start()
+        flow._begin_wake_acknowledgment()
+        flow.begin_recognition(now=1.0)
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=2.0)
+        flow.speak("今天天气不错，适合出门散步。")
+        asr.endpoint = False
+        asr.partials = list(partials or [])
+        return flow, asr, events
+
+    def test_a_partial_transcript_stops_playback_before_the_endpoint(self):
+        flow, asr, events = self._speaking_flow(partials=["你能", "你能给我讲"])
+
+        # Two characters are only a hint: duck the voice, keep listening.
+        flow.feed([0.1] * 1600, now=2.1)
+        self.assertEqual(events[-1], {"type": "duck"})
+        self.assertNotIn({"type": "stop_playback"}, events)
+
+        # Four or more characters take the floor without waiting for silence.
+        flow.feed([0.1] * 1600, now=2.5)
+        self.assertIn({"type": "stop_playback"}, events)
+        self.assertTrue(flow.barge_committed)
+        self.assertFalse(asr.endpoint)
+        self.assertEqual([event for event in events if event.get("barge_in")], [])
+
+    def test_backchannel_does_not_take_the_floor(self):
+        flow, asr, events = self._speaking_flow(partials=["嗯", "对", "对对"])
+
+        flow.feed([0.1] * 1600, now=2.1)
+        flow.feed([0.1] * 1600, now=2.5)
+        flow.feed([0.1] * 1600, now=2.9)
+
+        self.assertFalse(flow.barge_committed)
+        self.assertFalse(flow.barge_hinted)
+        self.assertEqual(
+            [event for event in events if event["type"] in {"duck", "stop_playback"}],
+            [],
+        )
+        self.assertEqual(flow.state, "responding")
+
+    def test_playback_echo_is_not_an_interruption_from_a_partial(self):
+        flow, asr, events = self._speaking_flow(partials=["今天天气不错"])
+        emitted = len(events)
+
+        flow.feed([0.1] * 1600, now=2.1)
+
+        self.assertEqual(len(events), emitted)
+        self.assertFalse(flow.barge_committed)
+
+    def test_the_duck_is_refreshed_while_the_user_keeps_talking(self):
+        flow, asr, events = self._speaking_flow(partials=["你能", "你能", "你能", "你能"])
+
+        flow.feed([0.1] * 1600, now=2.1)
+        flow.feed([0.1] * 1600, now=2.5)
+        flow.feed([0.1] * 1600, now=3.0)
+
+        ducks = [event for event in events if event["type"] == "duck"]
+        self.assertEqual(len(ducks), 2)
+        self.assertNotIn({"type": "stop_playback"}, events)
+
+    def test_the_committed_interruption_waits_for_the_rest_of_the_question(self):
+        flow, asr, events = self._speaking_flow(partials=["你能给我讲"])
+
+        flow.feed([0.1] * 1600, now=2.5)
+        self.assertIn({"type": "stop_playback"}, events)
+
+        # The app stopped the audio: the stream must survive so the words the
+        # user is still saying are not thrown away.
+        flow.spoken(now=2.6)
+        self.assertEqual(flow.state, "responding")
+        self.assertIsNotNone(flow.barge_stream)
+        self.assertEqual([event for event in events if event.get("barge_in")], [])
+
+        asr.result = "你能给我讲个故事吗"
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=3.5)
+
+        barge = [event for event in events if event.get("barge_in")]
+        self.assertEqual(len(barge), 1)
+        self.assertEqual(barge[0]["text"], "你能给我讲个故事吗")
+        self.assertEqual(flow.state, "responding")
+        self.assertTrue(flow.awaiting_new_answer)
+
+    def test_the_listen_request_does_not_drop_a_pending_interruption(self):
+        flow, asr, events = self._speaking_flow(partials=["你能给我讲"])
+
+        flow.feed([0.1] * 1600, now=2.5)
+        self.assertIn({"type": "stop_playback"}, events)
+
+        # The page notices the audio stopped and asks for the microphone back.
+        flow.listen(now=2.7)
+        self.assertEqual(flow.state, "responding")
+        self.assertIsNotNone(flow.barge_stream)
+
+        asr.result = "你能给我讲个故事吗"
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=3.5)
+
+        barge = [event for event in events if event.get("barge_in")]
+        self.assertEqual(len(barge), 1)
+        self.assertEqual(barge[0]["text"], "你能给我讲个故事吗")
+
+    def test_an_intent_prefix_stops_on_the_first_words_and_keeps_the_question(self):
+        flow, asr, events = self._speaking_flow(partials=["等一下我"])
+
+        flow.feed([0.1] * 1600, now=2.5)
+        self.assertIn({"type": "stop_playback"}, events)
+        self.assertTrue(flow.barge_committed)
+
+        asr.result = "等一下那明天天气怎么样"
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=3.5)
+
+        barge = [event for event in events if event.get("barge_in")]
+        self.assertEqual(len(barge), 1)
+        self.assertEqual(barge[0]["text"], "等一下那明天天气怎么样")
+
+    def test_a_bare_stop_command_settles_instead_of_asking_the_model(self):
+        flow, asr, events = self._speaking_flow(result="停", partials=["停"])
+
+        flow.feed([0.1] * 1600, now=2.5)
+        self.assertIn({"type": "stop_playback"}, events)
+
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=3.5)
+
+        self.assertEqual(
+            [event for event in events if event["type"] == "stop_playback"],
+            [{"type": "stop_playback"}],
+        )
+        self.assertEqual(flow.state, "settle")
+        self.assertEqual([event for event in events if event.get("barge_in")], [])
+
+    def test_barge_cue_arbitration(self):
+        played = "今天天气不错，适合出门散步。"
+
+        self.assertIsNone(barge_cue("今天天气不错", played))
+        self.assertIsNone(barge_cue("", played))
+        self.assertEqual(barge_cue("嗯", played), "wait")
+        self.assertEqual(barge_cue("对对", played), "wait")
+        self.assertEqual(barge_cue("你能", played), "duck")
+        self.assertEqual(barge_cue("你能给我讲", played), "stop")
+        self.assertEqual(barge_cue("等一下", played), "stop")
+        self.assertEqual(barge_cue("不对", played), "stop")
+        self.assertEqual(barge_cue("可以停了", played), "stop")
+        self.assertTrue(is_backchannel("嗯嗯"))
+        self.assertTrue(is_backchannel("是啊"))
+        self.assertFalse(is_backchannel("嗯我想问"))
+        self.assertFalse(is_backchannel("我想"))
+        self.assertTrue(starts_with_command("别说了"))
+        self.assertFalse(starts_with_command("我觉得"))
+        self.assertEqual(strip_interrupt_phrases("等一下，那明天呢"), "那明天呢")
+
     def test_a_new_line_during_settle_keeps_the_microphone_closed(self):
         events = []
         flow = VoiceFlow(FakeKeywordSpotter(), FakeRecognizer(), events.append, "器灵")
@@ -498,6 +673,7 @@ class VoiceFlowTests(unittest.TestCase):
         )
         self.assertFalse(is_echo_of("等一下我想问别的", "今天天气不错，适合出门散步。"))
         self.assertTrue(is_interrupt_phrase("停一下"))
+        self.assertTrue(is_interrupt_phrase("别讲了"))
         self.assertFalse(is_interrupt_phrase("今天天气不错"))
 
     def test_parses_json_and_plain_commands(self):
