@@ -4,6 +4,7 @@ mod cosyvoice;
 mod edge_tts;
 mod http;
 mod local_llm;
+mod narration;
 mod spirit;
 mod voice;
 mod voice_assistant;
@@ -33,6 +34,8 @@ pub struct AppState {
     protocol: Arc<spirit::PairingManager>,
     /// Which voice turn owns the speakers; see `voice_assistant::TurnGate`.
     turns: Arc<voice_assistant::TurnGate>,
+    /// The last lines other apps asked the pet to read, for "刚才讲了什么".
+    narrations: Arc<narration::NarrationLog>,
 }
 
 fn place_pet(pet: &WebviewWindow) {
@@ -413,11 +416,14 @@ async fn qiling_voice_assistant_respond(
     // Synthesis that was already streaming belongs to the cancelled turn.
     state.voice.cancel();
     state.edge_voice.cancel_all()?;
+    // "刚才讲了什么" style questions get the recent narrated lines, and only
+    // those questions: an ordinary question never carries them.
+    let context = state.narrations.context_for(&transcript);
     let llm = Arc::clone(&state.local_llm);
     let response = tauri::async_runtime::spawn_blocking(move || {
         // Replaces the answer that was still running instead of failing `busy`.
         llm.begin_turn()?;
-        llm.respond(&transcript)
+        llm.respond_in_context(&transcript, context.as_deref())
     })
     .await
     .map_err(|_| "local_llm_failed".to_string())?;
@@ -462,20 +468,33 @@ async fn spirit_invoke_vscode_explain_selection(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    // The narration owns the speakers until it is interrupted. A barge-in, a new
+    // question or another narration retires this turn, so a client answer that
+    // arrives after the user cut the line off is dropped instead of resuming.
+    let turn = state.turns.begin();
+    let turns = Arc::clone(&state.turns);
     app.emit(
         "qiling-line",
         serde_json::json!({ "phase": "thinking", "text": "", "mood": "neutral" }),
     )
     .map_err(|error| format!("narration_feedback_unavailable:{error}"))?;
-    match state
+    let outcome = state
         .protocol
         .invoke_action(
             "com.qiling.vscode",
             "vscode.explain_selection",
             spirit::DEFAULT_ACTION_TIMEOUT,
         )
-        .await
-    {
+        .await;
+    // Remembered even when the user cut the line off: the part that was heard is
+    // exactly what a follow-up question may refer to.
+    if let Ok(result) = &outcome {
+        state.narrations.record("com.qiling.vscode", &result.text);
+    }
+    if !turns.is_current(turn) {
+        return Ok(());
+    }
+    match outcome {
         Ok(result) => app
             .emit(
                 "qiling-line",
@@ -546,16 +565,26 @@ async fn spirit_invoke_narrate_current(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    // Same ownership rule as the VS Code narration: an interrupted request must
+    // not speak its answer later.
+    let turn = state.turns.begin();
+    let turns = Arc::clone(&state.turns);
     app.emit(
         "qiling-line",
         serde_json::json!({ "phase": "thinking", "text": "", "mood": "neutral" }),
     )
     .map_err(|error| format!("narration_feedback_unavailable:{error}"))?;
-    match state
+    let outcome = state
         .protocol
         .invoke_narrate_current("com.siju.app", spirit::DEFAULT_ACTION_TIMEOUT)
-        .await
-    {
+        .await;
+    if let Ok(result) = &outcome {
+        state.narrations.record("com.siju.app", &result.text);
+    }
+    if !turns.is_current(turn) {
+        return Ok(());
+    }
+    match outcome {
         Ok(result) => app
             .emit(
                 "qiling-line",
@@ -720,6 +749,7 @@ fn main() {
                 spirit::PairingManager::load(protocol_dir)
                     .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?,
             );
+            let narrations = Arc::new(narration::NarrationLog::default());
             app.manage(AppState {
                 pet_placed: AtomicBool::new(true),
                 voice: Arc::new(cosyvoice::VoiceHost::new()),
@@ -734,6 +764,7 @@ fn main() {
                 ),
                 protocol: protocol.clone(),
                 turns: Arc::new(voice_assistant::TurnGate::default()),
+                narrations: Arc::clone(&narrations),
             });
             if let Some(pet) = app.get_webview_window("pet") {
                 place_pet(&pet);
@@ -743,7 +774,7 @@ fn main() {
             create_bubble(app)?;
             build_tray(app.handle())?;
             let handle = app.handle().clone();
-            std::thread::spawn(move || http::serve(handle, protocol));
+            std::thread::spawn(move || http::serve(handle, protocol, narrations));
             Ok(())
         })
         .on_window_event(|window, event| match event {

@@ -105,9 +105,14 @@ pub fn listen_addr() -> String {
 struct HttpState {
     app: AppHandle,
     pairing: Arc<PairingManager>,
+    narrations: Arc<crate::narration::NarrationLog>,
 }
 
-pub fn serve(app: AppHandle, pairing: Arc<PairingManager>) {
+pub fn serve(
+    app: AppHandle,
+    pairing: Arc<PairingManager>,
+    narrations: Arc<crate::narration::NarrationLog>,
+) {
     let addr = listen_addr();
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -128,7 +133,11 @@ pub fn serve(app: AppHandle, pairing: Arc<PairingManager>) {
                 return;
             }
         };
-        let state = HttpState { app, pairing };
+        let state = HttpState {
+            app,
+            pairing,
+            narrations,
+        };
         if let Err(err) = axum::serve(listener, router(state)).await {
             eprintln!("器灵本机服务退出: {err}");
         }
@@ -193,6 +202,10 @@ async fn say(State(state): State<HttpState>, headers: HeaderMap, body: Bytes) ->
     };
     match parse_say(body) {
         Ok(line) => {
+            if line.phase == "say" && !line.text.is_empty() {
+                // Kept for a follow-up question like "刚才讲了什么".
+                state.narrations.record(&line.source, &line.text);
+            }
             if let Err(err) = state.app.emit("qiling-line", &line) {
                 eprintln!("器灵台词转发失败: {err}");
                 return (

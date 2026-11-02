@@ -42,20 +42,20 @@ BARGE_CHECK_SECONDS = 0.1
 # characters only duck the voice; this many commit the interruption right away.
 BARGE_HINT_CHARS = 2
 BARGE_COMMIT_CHARS = 4
-# A hint is not an interruption yet. The user only overrides the speakers when
-# the real words keep growing over a few consecutive checks; a one-off two-char
-# reading is far more often the speaker bleeding into the microphone, a cough, or
-# the recognizer mishearing the pet's own voice.
+# A hint is not an interruption yet. Two characters of a reading that keeps
+# repeating for this many checks is a person talking over the speakers; a single
+# blip is far more often the speaker bleeding into the microphone or the
+# recognizer mishearing the pet's own voice.
 BARGE_HINT_EVIDENCE_FRAMES = 3
 # While the hint keeps being heard, keep refreshing the duck so a slow speaker
 # does not get the voice back before they finish the first words.
 BARGE_HINT_REFRESH_SECONDS = 0.8
 # The first words of an explicit correction are enough to stop immediately, even
-# before the sentence is complete ("不对…", "等一下…").
+# before the sentence is complete ("不对…", "等一下…"). Bare "别" is not here: a
+# line starting with "别忘了…" echoed back would otherwise stop itself.
 BARGE_COMMAND_PREFIXES = (
     "停",
     "打住",
-    "别",
     "先别",
     "别说了",
     "打断",
@@ -73,6 +73,11 @@ BACKCHANNEL_MAX_CHARS = 3
 # A lone backchannel syllable is usually the speaker or a cough misheard, not the
 # user. Two of them ("对对", "是啊") is intentional.
 BACKCHANNEL_CONFIRMED_CHARS = 2
+# The Chinese recognizer turns Latin identifiers and digits into characters that
+# are not in the line, so a code-heavy line read aloud looks like someone else
+# talking. Past this many ASCII letters/digits the line counts as one the echo
+# check cannot be trusted on; see is_echo_risky.
+ECHO_RISKY_ASCII_MIN = 4
 # Once the voice has already been stopped, this much real content is needed
 # before the utterance becomes the next question instead of a bare "stop".
 BARGE_CONTINUE_CHARS = 4
@@ -209,19 +214,17 @@ def is_backchannel(text: str) -> bool:
 def barge_evidence(transcript: str, played: str) -> str:
     """The words the microphone heard that the pet is not saying right now.
 
-    The reading only counts as evidence when nothing in it overlaps the line
-    being spoken. Subtracting by longest common subsequence below that point
-    invents characters — a misheard syllable can match several of the pet's
-    characters and leave the rest looking like the user talking, which is how a
-    false duck used to happen.
+    A reading that is mostly the line being spoken is echo: only then is the
+    overlapping part subtracted. Subtracting from every reading was the bug
+    behind the volume dipping at random — one misheard syllable could swallow
+    characters of the pet's own line and leave the rest looking like the user.
     """
     heard = spoken_text(transcript)
-    spoken = spoken_text(played)
-    if not heard or not spoken:
-        return heard if not spoken else ""
-    if common_subsequence_length(heard, spoken) > 0:
-        return ""
-    return heard
+    if not heard or not played:
+        return heard
+    if not is_echo_of(heard, played):
+        return heard
+    return non_echo_text(heard, played)
 
 
 def starts_with_command(text: str) -> bool:
@@ -257,19 +260,20 @@ def narration_continuation(transcript: str, played: str) -> str | None:
         return None
     if not is_narration_question(heard):
         return None
-    return heard
+    return transcript.strip()
 
 
-def barge_cue(transcript: str, played: str) -> str | None:
-    """Arbitrate one partial transcript heard while the pet is speaking.
+def is_echo_risky(line: str) -> bool:
+    """True when the recognizer cannot be trusted to echo `line` back.
 
-    `user` means the reading is words the pet is not saying; `echo` means it is
-    the pet's own voice coming back through the microphone.
+    Code-heavy lines (identifiers, numbers) come back as characters that are not
+    in the line at all. Their echo therefore looks like a person talking, and a
+    pet that acted on it would interrupt its own reading.
     """
-    heard = spoken_text(transcript)
-    if not heard:
-        return None
-    return "user" if barge_evidence(heard, played) else "echo"
+    ascii_alnum = sum(
+        1 for char in line if char.isascii() and char.isalnum()
+    )
+    return ascii_alnum >= ECHO_RISKY_ASCII_MIN
 
 
 def is_acknowledgment_echo(text: str) -> bool:
@@ -607,6 +611,7 @@ class VoiceFlow:
         self.responding_deadline = 0.0
         self.settle_deadline = 0.0
         self.playing_text = ""
+        self.playback_deadline = 0.0
         self.paused_for_playback = False
         self.pause_deadline = 0.0
         self.awaiting_new_answer = False
@@ -616,7 +621,7 @@ class VoiceFlow:
         self.barge_checked_at = 0.0
         self.barge_evidence = 0
         self.barge_evidence_frames = 0
-        self.user_speech = False
+        self.barge_content = 0
         self.awake_until = 0.0
         self.utterance_id = 0
 
@@ -638,11 +643,21 @@ class VoiceFlow:
             LOGGER.info("Playback did not report its end; reopening the microphone.")
             self.paused_for_playback = False
             self.pause_deadline = 0.0
+        if (
+            self.playing_text
+            and self.playback_deadline
+            and current_time >= self.playback_deadline
+            and self.state != "responding"
+        ):
+            # A line from another client never reported its end either. Stop
+            # treating the microphone as the narrator's, or the wake word would
+            # stay switched off for the rest of the session.
+            LOGGER.info("Narration did not report its end; re-arming the wake word.")
+            self._clear_barge()
 
         if self.state == "listening":
             self._feed_listening(samples, current_time)
             return
-
         if self.state == "wake_acknowledgment":
             # Mic stays closed while the app plays "我在，请说。"; the app calls
             # listen() once it was heard, and recognition starts after a short guard.
@@ -718,6 +733,16 @@ class VoiceFlow:
                 }
             )
 
+    def _narration_mentions_wake_word(self) -> bool:
+        """True when the line being read literally contains the wake word.
+
+        The keyword spotter matches anywhere in the stream, so feeding it such a
+        line would let the pet wake itself. Every other line is safe to spot on,
+        which keeps the wake word usable while a narration plays.
+        """
+        heard = spoken_text(self.wake_word)
+        return bool(heard) and heard in spoken_text(self.playing_text)
+
     def _feed_listening(self, samples, current_time: float) -> None:
         """Wake-word listening. It stays a full-duplex listener while a line from
         another client is playing, so the user can always talk over it."""
@@ -738,23 +763,22 @@ class VoiceFlow:
                 if wake_match:
                     self._begin_wake_acknowledgment(current_time)
                     return
-                if self.playing_text and self._wants_narration_barge_in(text):
+                if self.playing_text:
+                    if is_echo_risky(self.playing_text):
+                        # A code-heavy line comes back as other words, so only a
+                        # command stated up front is trustworthy here.
+                        if starts_with_command(text):
+                            self._interrupt_narration(None, current_time)
+                        return
                     continuation = narration_continuation(text, self.playing_text)
-                    LOGGER.info("Spoke over a narration: %s", text)
-                    self.emit({"type": "stop_playback", "reason": "narration"})
-                    self._settle(current_time)
-                    if continuation:
-                        self.utterance_id += 1
-                        self._extend_awake(current_time)
-                        self.emit(
-                            {
-                                "type": "transcript",
-                                "id": self.utterance_id,
-                                "text": continuation,
-                                "barge_in": True,
-                            }
-                        )
-                    return
+                    if continuation or is_interrupt_phrase(text):
+                        LOGGER.info("Spoke over a narration: %s", text)
+                        self._interrupt_narration(continuation, current_time)
+                        return
+
+        # A line that mentions the wake word itself must not wake the pet.
+        if self._narration_mentions_wake_word():
+            return
 
         self.keyword_stream.accept_waveform(SAMPLE_RATE, samples)
         while self.keyword_spotter.is_ready(self.keyword_stream):
@@ -768,23 +792,28 @@ class VoiceFlow:
                 self._begin_wake_acknowledgment(current_time)
                 return
 
-    def _wants_narration_barge_in(self, text: str) -> bool:
-        """Decide whether speech heard over a narration should stop it."""
-        if barge_evidence(text, self.playing_text) != strip_interrupt_phrases(text):
-            return False
-        if is_interrupt_phrase(text):
-            return True
-        if is_narration_question(text):
-            return True
-        # Speech that grows while the narrator is still talking is the user, not
-        # a misreading of the line; a few characters are not worth stopping for.
-        enough = len(spoken_text(strip_interrupt_phrases(text))) >= BARGE_COMMIT_CHARS
-        if not enough:
-            return False
-        if len(spoken_text(text)) > len(self.user_speech):
-            self.user_speech = spoken_text(text)
-            return False
-        return True
+    def _interrupt_narration(
+        self, question: str | None, current_time: float
+    ) -> None:
+        """The user talked over a line another client asked the pet to read."""
+        self.emit({"type": "stop_playback", "reason": "narration"})
+        if not question:
+            self._settle(current_time)
+            return
+        # The pet now owes the user an answer, and the microphone must stay open
+        # so that answer can be interrupted too.
+        self._extend_awake(current_time)
+        self._responding(current_time)
+        self.awaiting_new_answer = True
+        self.utterance_id += 1
+        self.emit(
+            {
+                "type": "transcript",
+                "id": self.utterance_id,
+                "text": question,
+                "barge_in": True,
+            }
+        )
 
     def begin_recognition(self, now: float | None = None) -> None:
         if self.state != "wake_acknowledgment":
@@ -805,7 +834,9 @@ class VoiceFlow:
         line = text.strip()
         if not line:
             return
+        current_time = now if now is not None else time.monotonic()
         self.playing_text = line
+        self.playback_deadline = current_time + RESPONSE_TIMEOUT_SECONDS
         if self.state == "responding":
             self.awaiting_new_answer = False
             self.paused_for_playback = False
@@ -821,22 +852,22 @@ class VoiceFlow:
             if self.barge_stream is None:
                 self.barge_stream = self.recognizer.create_stream()
             elif not partial:
+                # A live partial means the user started talking into the window
+                # before the answer became audible; keep it so the beginning of
+                # the question is not thrown away.
                 self.recognizer.reset(self.barge_stream)
-            # A live partial means the user started talking into the window
-            # before the answer became audible. Keep it: resetting here would
-            # throw away the beginning of the question they are still saying.
             return
         if self.state in {"listening", "recognizing", "settle", "conversing"}:
             # A line from another client (a narration, a spirit event). The user
             # did not ask for this one, so keep listening and let them talk over
             # it; whatever ends is settled as usual.
-            self.user_speech = False
             if self.state == "listening":
                 self.keyword_spotter.reset_stream(self.keyword_stream)
 
     def spoken(self, now: float | None = None) -> None:
         """The app finished (or interrupted) the line it was playing."""
         self.playing_text = ""
+        self.playback_deadline = 0.0
         self.paused_for_playback = False
         self.pause_deadline = 0.0
         if self.state == "recognizing":
@@ -890,6 +921,7 @@ class VoiceFlow:
         """Forget everything about the interruption of the line that just ended."""
         self.barge_stream = None
         self.playing_text = ""
+        self.playback_deadline = 0.0
         self.barge_hinted = False
         self.barge_hint_at = 0.0
         self.barge_committed = False
@@ -1035,7 +1067,6 @@ class VoiceFlow:
             # synthesized. Keep listening so the user can take the turn back
             # instead of talking into a closed microphone for the whole wait.
             self.barge_stream = self.recognizer.create_stream()
-            self.barge_checked_at = 0.0
         self.barge_stream.accept_waveform(SAMPLE_RATE, samples)
         while self.recognizer.is_ready(self.barge_stream):
             self.recognizer.decode_stream(self.barge_stream)
@@ -1069,6 +1100,12 @@ class VoiceFlow:
         if starts_with_command(evidence):
             self._commit_barge(current_time, evidence, "command")
             return
+        if self._echo_unreliable():
+            # A code-heavy line makes the recognizer mishear its own playback as
+            # someone talking. Only an explicit command may stop it; guessing
+            # from the reading would interrupt the pet's own sentence.
+            self._forget_hint()
+            return
         if is_interrupt_phrase(evidence) and len(evidence) <= 6:
             self._commit_barge(current_time, evidence, "interrupt phrase")
             return
@@ -1076,14 +1113,19 @@ class VoiceFlow:
             self._forget_hint()
             return
         if len(evidence) >= BARGE_COMMIT_CHARS:
-            self._commit_barge(current_time, evidence, "partial transcript")
+            if self.barge_content >= BARGE_COMMIT_CHARS:
+                self._commit_barge(current_time, evidence, "partial transcript")
+                return
+            # One long reading can still be a misheard syllable of the pet's own
+            # voice. A real question keeps that length on the next check too.
+            self.barge_content = len(evidence)
             return
+        self.barge_content = 0
         if len(evidence) < BARGE_HINT_CHARS:
             self._forget_hint()
             return
         if len(evidence) > self.barge_evidence:
-            # The reading is still growing, so it is live speech rather than a
-            # one-off misreading of the pet's own voice.
+            # Still growing: live speech, not a one-off misreading.
             self.barge_evidence = len(evidence)
             self.barge_evidence_frames = 1
             return
@@ -1095,6 +1137,11 @@ class VoiceFlow:
     def _forget_hint(self) -> None:
         self.barge_evidence = 0
         self.barge_evidence_frames = 0
+        self.barge_content = 0
+
+    def _echo_unreliable(self) -> bool:
+        """Whether the line being spoken can be echo-matched at all."""
+        return bool(self.playing_text) and is_echo_risky(self.playing_text)
 
     def _duck(self, current_time: float, evidence: str) -> None:
         if not self.playing_text:
@@ -1122,9 +1169,8 @@ class VoiceFlow:
         text = text.strip()
         if not text:
             if self.barge_committed:
-                # A bare "嗯" that was mistaken for a hint. The user is not
-                # asking anything, so never stop the answer for it.
-                self.emit({"type": "resume_playback"})
+                # The voice was already stopped for a reading that turned out to
+                # be nothing. There is no question, so go back to listening.
                 self._settle(current_time)
             return
         separated_from_echo = False
@@ -1133,7 +1179,6 @@ class VoiceFlow:
             if not text:
                 LOGGER.info("Ignoring the pet's own voice while it speaks.")
                 if self.barge_committed:
-                    self.emit({"type": "resume_playback"})
                     self._settle(current_time)
                 return
             separated_from_echo = True
@@ -1141,6 +1186,18 @@ class VoiceFlow:
         if is_wake_word_transcript(text, self.wake_word):
             LOGGER.info("Wake word heard while the pet speaks: %s", text)
             self._begin_wake_acknowledgment(current_time)
+            return
+        if self._echo_unreliable():
+            # Neither the reading nor what is left after removing the line can be
+            # read as a question for a code-heavy line. A command still takes the
+            # floor; anything else is the pet hearing itself.
+            if is_interrupt_phrase(text):
+                self._stop_playback(current_time, text)
+                self._settle(current_time)
+                return
+            LOGGER.info("Ignoring speech over an echo-unreliable line: %s", text)
+            if self.barge_committed:
+                self._settle(current_time)
             return
         if is_backchannel(text) and not self.barge_committed:
             # "嗯" / "对对": the user is following along, not taking the floor.
@@ -1162,7 +1219,10 @@ class VoiceFlow:
             # The voice already stopped; a few stray characters are not a question.
             self._settle(current_time)
             return
-        if len(spoken_text(text)) < MIN_BARGE_IN_CHARS:
+        # Over a line being spoken, a real interruption needs four characters:
+        # anything shorter is far more likely a leftover of the pet's own voice.
+        minimum = BARGE_COMMIT_CHARS if self.playing_text else MIN_BARGE_IN_CHARS
+        if len(spoken_text(text)) < minimum:
             LOGGER.info("Ignoring a too-short barge-in candidate: %s", text)
             return
         self._accept_barge(text, current_time)
@@ -1194,6 +1254,11 @@ class VoiceFlow:
         )
 
     def _begin_wake_acknowledgment(self, now: float | None = None) -> None:
+        # Waking the pet means taking the floor: whatever line is being read
+        # (its own answer, or a narration from another client) has to stop so the
+        # acknowledgment is not played over it.
+        if self.playing_text and not self.barge_committed:
+            self.emit({"type": "stop_playback"})
         self.keyword_spotter.reset_stream(self.keyword_stream)
         self.recognizer.reset(self.debug_stream)
         if self.recognition_stream is not None:

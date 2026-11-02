@@ -12,6 +12,8 @@ export interface VoiceAssistantEvent {
   code?: string
   text?: string
   id?: number
+  /** `narration` when the stopped line came from another client. */
+  reason?: string
   /** The runtime heard a real interruption while the pet was speaking. */
   barge_in?: boolean
 }

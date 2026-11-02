@@ -194,6 +194,10 @@ export default function PetApp(): JSX.Element {
     let unlisten: (() => void) | undefined
     let stateEventRevision = 0
     const handledTranscripts = new Set<number>()
+    // The runtime sends `stop_playback` just before the transcript it belongs to.
+    // The new question must not reach the model before the old turn is retired,
+    // or the cancellation would land on the answer that replaced it.
+    let pendingBargeIn: Promise<unknown> = Promise.resolve()
     void import('@tauri-apps/api/event')
       .then(async ({ listen }) => {
         const applyState = (nextState: string) => {
@@ -230,12 +234,14 @@ export default function PetApp(): JSX.Element {
               // Cancel model, synthesis and queued audio as one step so nothing
               // can revive the line the user just cut off.
               interruptRef.current()
-              if (lineRef.current.phase === 'thinking') {
-                // Nothing had been said yet. Do not leave the thinking pose up
-                // after the answer was cancelled; the next question thinks again.
+              if (payload.reason === 'narration' || lineRef.current.phase === 'thinking') {
+                // The line that was cut off is void: a narration from another
+                // client, or the thinking pose of an answer that was cancelled.
+                // Never leave the pet holding it; the next question publishes
+                // its own line.
                 publishLine(idleLine)
               }
-              void invoke('qiling_voice_barge_in').catch((error: unknown) => {
+              pendingBargeIn = invoke('qiling_voice_barge_in').catch((error: unknown) => {
                 console.warn('无法取消被打断的回答', String(error))
               })
               return
@@ -250,9 +256,14 @@ export default function PetApp(): JSX.Element {
             // A transcript while the pet is still talking is a barge-in: stop the
             // current line first so the reply cannot start over the old audio.
             interruptRef.current()
-            void invoke('qiling_voice_assistant_respond', { text: payload.text }).catch((error: unknown) => {
-              console.warn('本机语音对话失败', String(error))
-            })
+            const retired = pendingBargeIn
+            pendingBargeIn = Promise.resolve()
+            const text = payload.text
+            void retired
+              .then(() => invoke('qiling_voice_assistant_respond', { text }))
+              .catch((error: unknown) => {
+                console.warn('本机语音对话失败', String(error))
+              })
           },
         )
         if (active) unlisten = stop

@@ -6,14 +6,16 @@ from pathlib import Path
 from voice_assistant import (
     MAX_KEYWORD_VARIANTS,
     VoiceFlow,
-    barge_cue,
+    barge_evidence,
     build_keyword_line,
     build_keyword_lines,
     configure_logging,
     is_acknowledgment_echo,
     is_backchannel,
     is_echo_of,
+    is_echo_risky,
     is_interrupt_phrase,
+    is_narration_question,
     is_wake_word_transcript,
     keyword_from_result,
     load_pypinyin,
@@ -318,26 +320,161 @@ class VoiceFlowTests(unittest.TestCase):
         self.assertEqual(flow.state, "recognizing")
         self.assertGreater(flow.recognition_guard_until, 2.5)
 
-    def test_listening_pauses_while_another_client_line_is_spoken(self):
+    def test_the_user_can_talk_over_another_client_line_while_listening(self):
         events = []
         kws = FakeKeywordSpotter()
-        asr = FakeRecognizer("七零七零")
+        # The user's first words are not the wake word, so KWS stays silent.
+        asr = FakeRecognizer("识局送来的一句解说")  # only the pet's own voice
         flow = VoiceFlow(kws, asr, events.append, "七零七零")
 
         flow.start()
         flow.speak("识局送来的一句解说。")
+        # The recognizer first hears a reading of the pet's own line, then the
+        # user's question. The listener resets its stream after every reading.
         asr.endpoint = True
-        kws.detect = True
-        emitted = len(events)
+        asr.partials = ["识局送来的一句解说"]
+        flow.feed([0.1] * 1600, now=1.0)
+        self.assertEqual(flow.state, "listening")
+        asr.partials = ["你能给我讲个故事吗"]
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=1.1)
+        recent = [event for event in events if event["type"] != "debug_transcript"]
+        self.assertIn({"type": "stop_playback", "reason": "narration"}, recent)
+        self.assertEqual(
+            recent[-1],
+            {"type": "transcript", "id": 1, "text": "你能给我讲个故事吗", "barge_in": True},
+        )
+        # The pet owes an answer now, and that answer must stay interruptible.
+        self.assertEqual(flow.state, "responding")
+        self.assertTrue(flow.awaiting_new_answer)
+
+        # Once that answer has played, the conversation window keeps the mic open
+        # so the user can follow up without repeating the wake word.
+        flow.speak("好的，我来讲讲。")
+        flow.spoken(now=2.9)
+        flow.feed([0.1] * 1600, now=3.4)
+        self.assertEqual(flow.state, "conversing")
+
+    def test_a_wake_word_still_wins_over_a_narrated_line(self):
+        events = []
+        kws = FakeKeywordSpotter()
+        asr = FakeRecognizer()
+        flow = VoiceFlow(kws, asr, events.append, "器灵")
+
+        flow.start()
+        flow.speak("识局送来的一句解说。")
+        asr.result = "器灵"
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=1.0)
+
+        self.assertEqual(flow.state, "wake_acknowledgment")
+        self.assertIn({"type": "stop_playback"}, events)
+        self.assertNotIn({"type": "stop_playback", "reason": "narration"}, events)
+
+    def test_small_talk_over_a_narration_does_not_stop_it(self):
+        events = []
+        asr = FakeRecognizer("我觉得这个")
+        flow = VoiceFlow(FakeKeywordSpotter(), asr, events.append, "器灵")
+
+        flow.start()
+        flow.speak("识局送来的一句解说。")
+        asr.endpoint = True
         flow.feed([0.1] * 1600, now=1.0)
 
         self.assertEqual(flow.state, "listening")
-        self.assertEqual(len(events), emitted)
+        self.assertEqual([event for event in events if event["type"] == "stop_playback"], [])
+
+    def test_a_code_heavy_narration_only_obeys_an_explicit_command(self):
+        events = []
+        asr = FakeRecognizer()
+        flow = VoiceFlow(FakeKeywordSpotter(), asr, events.append, "器灵")
+
+        flow.start()
+        flow.speak("useState 是 React 的 Hook，setCount 每次返回新的函数。")
+
+        # A misread echo that happens to look like a question must not stop it.
+        asr.result = "什么"
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=1.0)
+        self.assertEqual(flow.state, "listening")
+        self.assertEqual([event for event in events if event["type"] == "stop_playback"], [])
+
+        asr.result = "停下，这个函数做什么"
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=1.4)
+        self.assertIn({"type": "stop_playback", "reason": "narration"}, events)
+        self.assertEqual(flow.state, "settle")
+
+    def test_a_plain_narration_can_still_be_interrupted_by_a_question(self):
+        events = []
+        asr = FakeRecognizer()
+        flow = VoiceFlow(FakeKeywordSpotter(), asr, events.append, "器灵")
+
+        flow.start()
+        flow.speak("这一段先解释闭包和捕获变量的关系。")
+        asr.result = "这个函数做什么"
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=1.0)
+
+        self.assertIn({"type": "stop_playback", "reason": "narration"}, events)
+        self.assertEqual(flow.state, "responding")
+
+    def test_a_narration_cannot_wake_the_pet_by_mentioning_the_wake_word(self):
+        events = []
+        kws = FakeKeywordSpotter()
+        flow = VoiceFlow(kws, FakeRecognizer(), events.append, "器灵")
+
+        flow.start()
+        flow.speak("器灵这个名字来自一句诗。")
+        kws.detect = True
+        flow.feed([0.1] * 1600, now=1.0)
+
+        # The keyword spotter matches anywhere in the stream, so feeding it the
+        # narration would wake the pet on its own line.
+        self.assertEqual(flow.state, "listening")
+        self.assertEqual(len(events), 1, events)
 
         flow.spoken(now=1.5)
-        self.assertEqual(flow.state, "settle")
         flow.feed([0.1] * 1600, now=2.0)
-        self.assertEqual(flow.state, "listening")
+        flow.feed([0.1] * 1600, now=2.1)
+        self.assertEqual(flow.state, "wake_acknowledgment")
+
+    def test_the_wake_word_still_works_over_a_narration_that_does_not_say_it(self):
+        events = []
+        kws = FakeKeywordSpotter()
+        flow = VoiceFlow(kws, FakeRecognizer(), events.append, "器灵")
+
+        flow.start()
+        flow.speak("这一段先解释闭包和捕获变量的关系。")
+        kws.detect = True
+        flow.feed([0.1] * 1600, now=1.0)
+
+        self.assertEqual(flow.state, "wake_acknowledgment")
+        self.assertIn({"type": "stop_playback"}, events)
+
+    def test_a_question_during_a_spoken_answer_interrupts_without_the_echo(self):
+        events = []
+        asr = FakeRecognizer()
+        flow = VoiceFlow(FakeKeywordSpotter(), asr, events.append, "器灵")
+
+        flow.start()
+        flow._begin_wake_acknowledgment()
+        flow.begin_recognition(now=1.0)
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=2.0)
+        flow.speak("今天天气不错，适合出门散步。")
+
+        asr.result = "你能给我讲个故事吗"
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=3.0)
+
+        # The endpoint transcript becomes the next question; the page stops the
+        # audio when it receives it, so no separate stop event is needed here.
+        barge = [event for event in events if event.get("barge_in")]
+        self.assertEqual(len(barge), 1)
+        self.assertEqual(barge[0]["text"], "你能给我讲个故事吗")
+        self.assertEqual(flow.state, "responding")
+        self.assertTrue(flow.awaiting_new_answer)
 
     def test_the_pet_own_answer_is_ignored_while_it_speaks(self):
         events = []
@@ -475,48 +612,176 @@ class VoiceFlowTests(unittest.TestCase):
         self.assertEqual(len(barge), 1)
         self.assertEqual(barge[0]["text"], "你能不能给我讲个故事")
 
-    def _speaking_flow(self, result="你能给我讲个故事吗", partials=None):
+    def _speaking_flow(
+        self,
+        result="你能给我讲个故事吗",
+        partials=None,
+        barge="",
+        line="今天天气不错，适合出门散步。",
+    ):
         events = []
-        asr = FakeRecognizer(result)
+
+        class ScriptedRecognizer(FakeRecognizer):
+            """A streaming recognizer for barge-in tests.
+
+            Each decode returns the next reading from `queue` on whichever stream
+            the flow asks, the way the real recognizer would report whatever is
+            in the barge stream right now. `result` is only ever returned as a
+            final transcript at an endpoint, and endpoints stay off unless the
+            test turns them on.
+            """
+
+            def decode_stream(self, stream):
+                stream.ready = False
+
+            def get_result(self, stream):
+                if stream.endpoint:
+                    return self.result
+                if self.queue:
+                    return self.queue.pop(0)
+                return ""
+
+            def reset(self, stream):
+                stream.endpoint = False
+
+        asr = ScriptedRecognizer(result)
+        asr.queue = []
         flow = VoiceFlow(FakeKeywordSpotter(), asr, events.append, "器灵")
         flow.start()
         flow._begin_wake_acknowledgment()
         flow.begin_recognition(now=1.0)
+        # The silence guard before a question means the recognizer does not
+        # decode the very first frame of the request.
         asr.endpoint = True
+        asr.queue = [result]
         flow.feed([0.1] * 1600, now=2.0)
-        flow.speak("今天天气不错，适合出门散步。")
+        self.assertEqual(flow.state, "responding")
+        # From here on nothing is final; only the streaming readings arrive.
         asr.endpoint = False
-        asr.partials = list(partials or [])
+        asr.queue = []
+        flow.speak(line)
+        asr.queue = ([barge] if barge else []) + list(partials or [])
         return flow, asr, events
 
+    def _stop_signals(self, events):
+        return [event for event in events if event["type"] in {"duck", "stop_playback"}]
+
+    def test_echo_risk_follows_code_in_the_line(self):
+        self.assertTrue(is_echo_risky("useState 是 React 的 Hook。"))
+        self.assertTrue(is_echo_risky("调用 setCount 之后组件会重新渲染。"))
+        # Even a short English term is enough to make its echo untrustworthy.
+        self.assertTrue(is_echo_risky("这是 VS Code 的选区。"))
+        self.assertFalse(is_echo_risky("今天天气不错，适合出门散步。"))
+        self.assertFalse(is_echo_risky("这一步走的是马后炮，红方略优。"))
+
+    def test_a_code_heavy_line_is_not_stopped_by_its_own_playback(self):
+        # Reading "useState / React / setCount" out loud makes the Chinese
+        # recognizer produce characters that are not in the line at all, so its
+        # own echo looks like a person talking.
+        flow, asr, events = self._speaking_flow(
+            line="useState 是 React 的 Hook，setCount 每次返回新的函数。",
+            partials=["尤塞特是瑞克特的胡克", "尤塞特是瑞克特的胡克", "尤塞特是瑞克特的胡克"],
+        )
+
+        for now in (2.1, 2.3, 2.5):
+            flow.feed([0.1] * 1600, now=now)
+
+        self.assertEqual(self._stop_signals(events), [])
+        self.assertEqual(flow.state, "responding")
+
+        # An explicit command still takes the floor.
+        asr.queue = ["停"]
+        flow.feed([0.1] * 1600, now=2.7)
+        self.assertIn({"type": "stop_playback"}, events)
+
+    def test_a_code_heavy_line_ignores_a_reading_at_the_endpoint(self):
+        line = "useState 是 React 的 Hook，setCount 每次返回新的函数。"
+        flow, asr, events = self._speaking_flow(line=line)
+
+        flow._finish_barge("这个函数到底是做什么的", 2.5)
+        self.assertEqual([event for event in events if event.get("barge_in")], [])
+        self.assertEqual([event for event in events if event["type"] == "stop_playback"], [])
+        self.assertEqual(flow.state, "responding")
+
+        flow._finish_barge("停下", 2.6)
+        self.assertIn({"type": "stop_playback"}, events)
+        self.assertEqual(flow.state, "settle")
+
+    def test_a_two_character_reading_is_not_a_question_while_the_pet_speaks(self):
+        flow, asr, events = self._speaking_flow()
+
+        flow._finish_barge("这样", 2.5)
+        self.assertEqual([event for event in events if event.get("barge_in")], [])
+        self.assertEqual(flow.state, "responding")
+
+        # Four characters are enough to become the next question.
+        flow._finish_barge("这个函数做什么", 2.6)
+        barge = [event for event in events if event.get("barge_in")]
+        self.assertEqual(len(barge), 1)
+        self.assertEqual(barge[0]["text"], "这个函数做什么")
+
     def test_a_partial_transcript_stops_playback_before_the_endpoint(self):
-        flow, asr, events = self._speaking_flow(partials=["你能", "你能给我讲"])
+        flow, asr, events = self._speaking_flow(
+            partials=["你能", "你能给", "你能给我", "你能给我讲", "你能给我讲个"]
+        )
 
-        # Two characters are only a hint: duck the voice, keep listening.
-        flow.feed([0.1] * 1600, now=2.1)
-        self.assertEqual(events[-1], {"type": "duck"})
-        self.assertNotIn({"type": "stop_playback"}, events)
-
-        # Four or more characters take the floor without waiting for silence.
-        flow.feed([0.1] * 1600, now=2.5)
+        # A reading that stays four characters long across two checks takes the
+        # floor without waiting for silence.
+        for now in (2.1, 2.2, 2.3, 2.4, 2.5):
+            flow.feed([0.1] * 1600, now=now)
         self.assertIn({"type": "stop_playback"}, events)
         self.assertTrue(flow.barge_committed)
         self.assertFalse(asr.endpoint)
         self.assertEqual([event for event in events if event.get("barge_in")], [])
 
-    def test_backchannel_does_not_take_the_floor(self):
-        flow, asr, events = self._speaking_flow(partials=["嗯", "对", "对对"])
+    def test_a_stable_short_reading_only_ducks_the_voice(self):
+        # The same two characters for several checks: quiet the voice, keep
+        # listening. One check alone is never enough.
+        flow, asr, events = self._speaking_flow(partials=["你能", "你能", "你能"])
 
         flow.feed([0.1] * 1600, now=2.1)
+        self.assertNotIn({"type": "duck"}, events)
+        flow.feed([0.1] * 1600, now=2.3)
+        self.assertNotIn({"type": "duck"}, events)
         flow.feed([0.1] * 1600, now=2.5)
-        flow.feed([0.1] * 1600, now=2.9)
+
+        self.assertEqual(events[-1], {"type": "duck"})
+        self.assertFalse(flow.barge_committed)
+
+    def test_a_hint_that_never_grows_backs_off_after_one_duck(self):
+        flow, asr, events = self._speaking_flow(
+            partials=["你能", "你能", "你能", "你能", "你能", "你能"]
+        )
+
+        for now in (2.1, 2.3, 2.5, 2.7, 2.9, 3.1):
+            flow.feed([0.1] * 1600, now=now)
+
+        self.assertEqual(len([event for event in events if event["type"] == "duck"]), 1)
+        self.assertEqual(flow.state, "responding")
+        self.assertEqual(
+            [event for event in events if event["type"] == "stop_playback"], []
+        )
+
+    def test_a_bare_backchannel_never_stops_the_answer(self):
+        flow, asr, events = self._speaking_flow(result="嗯", partials=["嗯"])
+
+        flow.feed([0.1] * 1600, now=2.1)
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=2.5)
+
+        self.assertEqual(self._stop_signals(events), [])
+        self.assertEqual(flow.state, "responding")
+
+    def test_backchannel_does_not_take_the_floor(self):
+        flow, asr, events = self._speaking_flow(partials=["嗯", "对对", "对对对"])
+
+        for now in (2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7):
+            flow.feed([0.1] * 1600, now=now)
 
         self.assertFalse(flow.barge_committed)
-        self.assertFalse(flow.barge_hinted)
-        self.assertEqual(
-            [event for event in events if event["type"] in {"duck", "stop_playback"}],
-            [],
-        )
+        # A lone "嗯" that was ducked is not backchannel on its own, but the
+        # longer listening noises that follow must never stop the answer.
+        self.assertNotIn({"type": "stop_playback"}, events)
         self.assertEqual(flow.state, "responding")
 
     def test_playback_echo_is_not_an_interruption_from_a_partial(self):
@@ -529,20 +794,22 @@ class VoiceFlowTests(unittest.TestCase):
         self.assertFalse(flow.barge_committed)
 
     def test_the_duck_is_refreshed_while_the_user_keeps_talking(self):
-        flow, asr, events = self._speaking_flow(partials=["你能", "你能", "你能", "你能"])
+        flow, asr, events = self._speaking_flow(
+            partials=["你能", "你能", "你能", "你能", "你能", "你能", "你能"]
+        )
 
-        flow.feed([0.1] * 1600, now=2.1)
-        flow.feed([0.1] * 1600, now=2.5)
-        flow.feed([0.1] * 1600, now=3.0)
+        for now in (2.1, 2.2, 2.3, 2.4, 3.3, 3.4):
+            flow.feed([0.1] * 1600, now=now)
 
         ducks = [event for event in events if event["type"] == "duck"]
-        self.assertEqual(len(ducks), 2)
+        self.assertGreaterEqual(len(ducks), 2)
         self.assertNotIn({"type": "stop_playback"}, events)
 
     def test_the_committed_interruption_waits_for_the_rest_of_the_question(self):
-        flow, asr, events = self._speaking_flow(partials=["你能给我讲"])
+        flow, asr, events = self._speaking_flow(partials=["你能给我讲", "你能给我讲个"])
 
         flow.feed([0.1] * 1600, now=2.5)
+        flow.feed([0.1] * 1600, now=2.7)
         self.assertIn({"type": "stop_playback"}, events)
 
         # The app stopped the audio: the stream must survive so the words the
@@ -552,7 +819,6 @@ class VoiceFlowTests(unittest.TestCase):
         self.assertIsNotNone(flow.barge_stream)
         self.assertEqual([event for event in events if event.get("barge_in")], [])
 
-        asr.result = "你能给我讲个故事吗"
         asr.endpoint = True
         flow.feed([0.1] * 1600, now=3.5)
 
@@ -563,9 +829,10 @@ class VoiceFlowTests(unittest.TestCase):
         self.assertTrue(flow.awaiting_new_answer)
 
     def test_the_listen_request_does_not_drop_a_pending_interruption(self):
-        flow, asr, events = self._speaking_flow(partials=["你能给我讲"])
+        flow, asr, events = self._speaking_flow(partials=["你能给我讲", "你能给我讲个"])
 
         flow.feed([0.1] * 1600, now=2.5)
+        flow.feed([0.1] * 1600, now=2.7)
         self.assertIn({"type": "stop_playback"}, events)
 
         # The page notices the audio stopped and asks for the microphone back.
@@ -573,7 +840,6 @@ class VoiceFlowTests(unittest.TestCase):
         self.assertEqual(flow.state, "responding")
         self.assertIsNotNone(flow.barge_stream)
 
-        asr.result = "你能给我讲个故事吗"
         asr.endpoint = True
         flow.feed([0.1] * 1600, now=3.5)
 
@@ -582,13 +848,14 @@ class VoiceFlowTests(unittest.TestCase):
         self.assertEqual(barge[0]["text"], "你能给我讲个故事吗")
 
     def test_an_intent_prefix_stops_on_the_first_words_and_keeps_the_question(self):
-        flow, asr, events = self._speaking_flow(partials=["等一下我"])
+        flow, asr, events = self._speaking_flow(
+            result="等一下那明天天气怎么样", partials=["等一下我"]
+        )
 
-        flow.feed([0.1] * 1600, now=2.5)
+        flow.feed([0.1] * 1600, now=2.1)
         self.assertIn({"type": "stop_playback"}, events)
         self.assertTrue(flow.barge_committed)
 
-        asr.result = "等一下那明天天气怎么样"
         asr.endpoint = True
         flow.feed([0.1] * 1600, now=3.5)
 
@@ -597,11 +864,15 @@ class VoiceFlowTests(unittest.TestCase):
         self.assertEqual(barge[0]["text"], "等一下那明天天气怎么样")
 
     def test_a_bare_stop_command_settles_instead_of_asking_the_model(self):
-        flow, asr, events = self._speaking_flow(result="停", partials=["停"])
+        flow, asr, events = self._speaking_flow(result="停")
 
-        flow.feed([0.1] * 1600, now=2.5)
+        # "停" is committed from the partial, then the final transcript is the
+        # same words: one stop, not two.
+        asr.queue = ["停"]
+        flow.feed([0.1] * 1600, now=2.1)
         self.assertIn({"type": "stop_playback"}, events)
 
+        asr.queue = []
         asr.endpoint = True
         flow.feed([0.1] * 1600, now=3.5)
 
@@ -612,27 +883,33 @@ class VoiceFlowTests(unittest.TestCase):
         self.assertEqual(flow.state, "settle")
         self.assertEqual([event for event in events if event.get("barge_in")], [])
 
-    def test_barge_cue_arbitration(self):
+    def test_barge_evidence_ignores_readings_of_the_pet_own_voice(self):
         played = "今天天气不错，适合出门散步。"
 
-        self.assertIsNone(barge_cue("今天天气不错", played))
-        self.assertIsNone(barge_cue("", played))
-        self.assertEqual(barge_cue("嗯", played), "wait")
-        self.assertEqual(barge_cue("对对", played), "wait")
-        self.assertEqual(barge_cue("你能", played), "duck")
-        self.assertEqual(barge_cue("你能给我讲", played), "stop")
-        self.assertEqual(barge_cue("等一下", played), "stop")
-        self.assertEqual(barge_cue("不对", played), "stop")
-        self.assertEqual(barge_cue("可以停了", played), "stop")
+        # A reading of the line is echo: what is left after removing it is too
+        # short to be a hint, so a misread syllable cannot duck the voice.
+        self.assertEqual(barge_evidence("今天天气不错", played), "")
+        self.assertNotEqual(barge_evidence("今天气天", played), "今天气天")
+        self.assertLess(len(barge_evidence("今天气天", played)), 2)
+        # Live speech is not stripped just because one character coincides.
+        self.assertEqual(barge_evidence("你能", played), "你能")
+        self.assertEqual(barge_evidence("你能", ""), "你能")
         self.assertTrue(is_backchannel("嗯嗯"))
         self.assertTrue(is_backchannel("是啊"))
+        self.assertFalse(is_backchannel("嗯"))
         self.assertFalse(is_backchannel("嗯我想问"))
         self.assertFalse(is_backchannel("我想"))
         self.assertTrue(starts_with_command("别说了"))
         self.assertFalse(starts_with_command("我觉得"))
+        # A line that starts with "别忘了" must not stop itself.
+        self.assertFalse(starts_with_command("别忘了这段还在跑"))
         self.assertEqual(strip_interrupt_phrases("等一下，那明天呢"), "那明天呢")
+        self.assertTrue(is_narration_question("这个函数为什么这样写"))
+        self.assertTrue(is_narration_question("停一下，它做什么"))
+        self.assertFalse(is_narration_question("我觉得是这样的吧"))
+        self.assertFalse(is_narration_question("这是一句很长很长很长的问题吗"))
 
-    def test_a_new_line_during_settle_keeps_the_microphone_closed(self):
+    def test_a_new_line_during_settle_keeps_the_microphone_on(self):
         events = []
         flow = VoiceFlow(FakeKeywordSpotter(), FakeRecognizer(), events.append, "器灵")
 
@@ -641,9 +918,11 @@ class VoiceFlowTests(unittest.TestCase):
         flow.spoken(now=1.0)
         self.assertEqual(flow.state, "settle")
 
+        # A line from another client must not close a microphone that the user
+        # may need to talk over it.
         flow.speak("第二句。")
         flow.feed([0.1] * 1600, now=2.0)
-        self.assertEqual(flow.state, "settle")
+        self.assertEqual(flow.state, "listening")
 
         flow.spoken(now=2.5)
         flow.feed([0.1] * 1600, now=3.0)

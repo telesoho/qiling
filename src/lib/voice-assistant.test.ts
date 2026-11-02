@@ -129,6 +129,10 @@ describe('barge-in events', () => {
     expect(voiceAssistantAction({ type: 'stop_playback' })).toBe('barge_in')
   })
 
+  it('marks a narration from another client, so its line can be cleared', () => {
+    expect(voiceAssistantAction({ type: 'stop_playback', reason: 'narration' })).toBe('barge_in')
+  })
+
   it('turns the final transcript into the next question', () => {
     expect(voiceAssistantAction({ type: 'transcript', id: 7, text: '那明天呢' })).toBe('transcript')
   })
