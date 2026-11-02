@@ -65,6 +65,40 @@ def common_subsequence_length(left: str, right: str) -> int:
     return previous[-1]
 
 
+def non_echo_text(transcript: str, played: str) -> str:
+    """Return transcript characters that do not align with the spoken line."""
+    heard = spoken_text(transcript)
+    spoken = spoken_text(played)
+    if not heard or not spoken:
+        return heard
+
+    rows = [[0] * (len(spoken) + 1) for _ in range(len(heard) + 1)]
+    for left_index, left_char in enumerate(heard, start=1):
+        for right_index, right_char in enumerate(spoken, start=1):
+            if left_char == right_char:
+                rows[left_index][right_index] = rows[left_index - 1][right_index - 1] + 1
+            else:
+                rows[left_index][right_index] = max(
+                    rows[left_index - 1][right_index],
+                    rows[left_index][right_index - 1],
+                )
+
+    unmatched = set()
+    left_index = len(heard)
+    right_index = len(spoken)
+    while left_index and right_index:
+        if heard[left_index - 1] == spoken[right_index - 1]:
+            left_index -= 1
+            right_index -= 1
+        elif rows[left_index - 1][right_index] >= rows[left_index][right_index - 1]:
+            left_index -= 1
+            unmatched.add(left_index)
+        else:
+            right_index -= 1
+    unmatched.update(range(left_index))
+    return "".join(char for index, char in enumerate(heard) if index in unmatched)
+
+
 def is_echo_of(transcript: str, played: str) -> bool:
     """True when the microphone mostly picked up the line the pet is speaking."""
     heard = spoken_text(transcript)
@@ -766,14 +800,21 @@ class VoiceFlow:
         self.recognizer.reset(self.barge_stream)
         if not text:
             return
+        separated_from_echo = False
         if is_echo_of(text, self.playing_text):
-            LOGGER.info("Ignoring the pet's own voice while it speaks: %s", text)
-            return
+            text = non_echo_text(text, self.playing_text)
+            if not text:
+                LOGGER.info("Ignoring the pet's own voice while it speaks.")
+                return
+            separated_from_echo = True
+            LOGGER.info("Separated speech from playback echo: %s", text)
         if is_wake_word_transcript(text, self.wake_word):
             LOGGER.info("Wake word heard while the pet speaks: %s", text)
             self._begin_wake_acknowledgment(current_time)
             return
-        if is_interrupt_phrase(text) and len(spoken_text(text)) <= 6:
+        if is_interrupt_phrase(text) and (
+            separated_from_echo or len(spoken_text(text)) <= 6
+        ):
             LOGGER.info("Interrupt phrase heard while the pet speaks: %s", text)
             self._extend_awake(current_time)
             self.emit({"type": "stop_playback"})

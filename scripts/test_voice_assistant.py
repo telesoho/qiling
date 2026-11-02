@@ -418,6 +418,45 @@ class VoiceFlowTests(unittest.TestCase):
         self.assertEqual(flow.state, "settle")
         self.assertEqual([event for event in events if event.get("barge_in")], [])
 
+    def test_interrupt_phrase_mixed_with_the_pet_voice_still_stops_playback(self):
+        events = []
+        asr = FakeRecognizer()
+        flow = VoiceFlow(FakeKeywordSpotter(), asr, events.append, "器灵")
+
+        flow.start()
+        flow._begin_wake_acknowledgment()
+        flow.begin_recognition(now=1.0)
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=2.0)
+        flow.speak("一只小兔它一直寻找回家的路它遇到了萤火虫。")
+
+        asr.result = "一只小兔可以停了别讲了它一直寻找回家的路它遇到了你别讲了萤火虫"
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=3.0)
+
+        self.assertIn({"type": "stop_playback"}, events)
+        self.assertEqual(flow.state, "settle")
+
+    def test_question_mixed_with_the_pet_voice_is_forwarded_without_the_echo(self):
+        events = []
+        asr = FakeRecognizer()
+        flow = VoiceFlow(FakeKeywordSpotter(), asr, events.append, "器灵")
+
+        flow.start()
+        flow._begin_wake_acknowledgment()
+        flow.begin_recognition(now=1.0)
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=2.0)
+        flow.speak("有一天一只小兔子在森林里寻找回家的路它遇到了萤火虫。")
+
+        asr.result = "有一天一只小兔子你能不能给我讲个故事在森林里寻找回家的路它遇到了萤火虫"
+        asr.endpoint = True
+        flow.feed([0.1] * 1600, now=3.0)
+
+        barge = [event for event in events if event.get("barge_in")]
+        self.assertEqual(len(barge), 1)
+        self.assertEqual(barge[0]["text"], "你能不能给我讲个故事")
+
     def test_a_new_line_during_settle_keeps_the_microphone_closed(self):
         events = []
         flow = VoiceFlow(FakeKeywordSpotter(), FakeRecognizer(), events.append, "器灵")
