@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     env, fs,
     io::{ErrorKind, Read},
     path::{Path, PathBuf},
@@ -30,7 +31,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LlmProvider {
     Ollama,
@@ -69,17 +70,27 @@ pub struct LlmSettingsView {
     pub base_url: String,
     pub model: String,
     pub api_key_configured: bool,
+    pub profiles: Vec<LlmProfileView>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PersistedSettings {
+pub struct LlmProfileView {
+    pub provider: LlmProvider,
+    pub base_url: String,
+    pub model: String,
+    pub api_key_configured: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmProfile {
     provider: LlmProvider,
     base_url: String,
     model: String,
 }
 
-impl From<&LlmSettings> for PersistedSettings {
+impl From<&LlmSettings> for LlmProfile {
     fn from(settings: &LlmSettings) -> Self {
         Self {
             provider: settings.provider.clone(),
@@ -89,19 +100,45 @@ impl From<&LlmSettings> for PersistedSettings {
     }
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedSettings {
+    provider: LlmProvider,
+    base_url: String,
+    model: String,
+    #[serde(default)]
+    profiles: Vec<LlmProfile>,
+}
+
+impl PersistedSettings {
+    fn new(settings: &LlmSettings, profiles: &HashMap<LlmProvider, LlmProfile>) -> Self {
+        Self {
+            provider: settings.provider.clone(),
+            base_url: settings.base_url.clone(),
+            model: settings.model.clone(),
+            profiles: ordered_providers()
+                .into_iter()
+                .filter_map(|provider| profiles.get(&provider).cloned())
+                .collect(),
+        }
+    }
+}
+
 pub struct LocalLlm {
     settings_path: PathBuf,
     settings: RwLock<LlmSettings>,
+    profiles: RwLock<HashMap<LlmProvider, LlmProfile>>,
     generation: AtomicU64,
     busy: AtomicBool,
 }
 
 impl LocalLlm {
     pub fn new(settings_path: PathBuf) -> Result<Self, String> {
-        let settings = read_settings(&settings_path)?;
+        let (settings, profiles) = read_settings(&settings_path)?;
         Ok(Self {
             settings_path,
             settings: RwLock::new(settings),
+            profiles: RwLock::new(profiles),
             generation: AtomicU64::new(0),
             busy: AtomicBool::new(false),
         })
@@ -116,6 +153,7 @@ impl LocalLlm {
                 base_url: endpoint,
                 model: "test-model".into(),
             }),
+            profiles: RwLock::new(HashMap::new()),
             generation: AtomicU64::new(0),
             busy: AtomicBool::new(false),
         }
@@ -127,19 +165,35 @@ impl LocalLlm {
             .read()
             .map_err(|_| "llm_settings_unavailable")?
             .clone();
-        let api_key_configured = match &settings.provider {
-            LlmProvider::Ollama => false,
-            provider => match key_entry(provider)?.get_password() {
-                Ok(_) => true,
-                Err(keyring::Error::NoEntry) => false,
-                Err(_) => return Err("credential_store_unavailable".into()),
-            },
-        };
+        let profiles = self
+            .profiles
+            .read()
+            .map_err(|_| "llm_settings_unavailable")?;
+        let profiles = ordered_providers()
+            .into_iter()
+            .map(|provider| {
+                let profile = profiles
+                    .get(&provider)
+                    .cloned()
+                    .unwrap_or_else(|| LlmProfile::from(&default_settings(provider.clone())));
+                Ok(LlmProfileView {
+                    api_key_configured: api_key_is_configured(&provider)?,
+                    provider: profile.provider,
+                    base_url: profile.base_url,
+                    model: profile.model,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let active_profile = profiles
+            .iter()
+            .find(|profile| profile.provider == settings.provider)
+            .ok_or("llm_settings_unavailable")?;
         Ok(LlmSettingsView {
             provider: settings.provider,
             base_url: settings.base_url,
             model: settings.model,
-            api_key_configured,
+            api_key_configured: active_profile.api_key_configured,
+            profiles,
         })
     }
 
@@ -171,11 +225,21 @@ impl LocalLlm {
                 .map_err(|_| "credential_store_unavailable")?;
         }
 
-        write_settings(&self.settings_path, &settings)?;
-        *self
-            .settings
-            .write()
-            .map_err(|_| "llm_settings_unavailable")? = settings;
+        {
+            let mut current_settings = self
+                .settings
+                .write()
+                .map_err(|_| "llm_settings_unavailable")?;
+            let mut current_profiles = self
+                .profiles
+                .write()
+                .map_err(|_| "llm_settings_unavailable")?;
+            let mut next_profiles = current_profiles.clone();
+            next_profiles.insert(settings.provider.clone(), LlmProfile::from(&settings));
+            write_settings(&self.settings_path, &settings, &next_profiles)?;
+            *current_settings = settings;
+            *current_profiles = next_profiles;
+        }
         self.cancel();
         self.settings()
     }
@@ -565,28 +629,81 @@ fn key_entry(provider: &LlmProvider) -> Result<Entry, String> {
     Entry::new(KEYRING_SERVICE, user).map_err(|_| "credential_store_unavailable".into())
 }
 
-fn read_settings(path: &Path) -> Result<LlmSettings, String> {
-    if !path.exists() {
+fn api_key_is_configured(provider: &LlmProvider) -> Result<bool, String> {
+    if provider == &LlmProvider::Ollama {
+        return Ok(false);
+    }
+    match key_entry(provider)?.get_password() {
+        Ok(_) => Ok(true),
+        Err(keyring::Error::NoEntry) => Ok(false),
+        Err(_) => Err("credential_store_unavailable".into()),
+    }
+}
+
+fn ordered_providers() -> [LlmProvider; 3] {
+    [
+        LlmProvider::Ollama,
+        LlmProvider::Deepseek,
+        LlmProvider::OpenaiCompatible,
+    ]
+}
+
+fn default_settings(provider: LlmProvider) -> LlmSettings {
+    match provider {
+        LlmProvider::Ollama => LlmSettings::default(),
+        LlmProvider::Deepseek => LlmSettings {
+            provider,
+            base_url: DEFAULT_DEEPSEEK_URL.into(),
+            model: "deepseek-chat".into(),
+        },
+        LlmProvider::OpenaiCompatible => LlmSettings {
+            provider,
+            base_url: "https://api.openai.com/v1".into(),
+            model: String::new(),
+        },
+    }
+}
+
+fn read_settings(path: &Path) -> Result<(LlmSettings, HashMap<LlmProvider, LlmProfile>), String> {
+    let mut profiles = HashMap::new();
+    let settings = if !path.exists() {
         let mut settings = LlmSettings::default();
         if let Ok(model) = env::var("QILING_LOCAL_LLM_MODEL") {
             settings.model = model;
         }
-        return validate_settings(settings);
-    }
-    let contents = fs::read_to_string(path).map_err(|_| "llm_settings_unavailable")?;
-    let persisted: PersistedSettings =
-        serde_json::from_str(&contents).map_err(|_| "llm_settings_invalid")?;
-    validate_settings(LlmSettings {
-        provider: persisted.provider,
-        base_url: persisted.base_url,
-        model: persisted.model,
-    })
+        validate_settings(settings)?
+    } else {
+        let contents = fs::read_to_string(path).map_err(|_| "llm_settings_unavailable")?;
+        let persisted: PersistedSettings =
+            serde_json::from_str(&contents).map_err(|_| "llm_settings_invalid")?;
+        for profile in persisted.profiles {
+            let profile = validate_settings(LlmSettings {
+                provider: profile.provider,
+                base_url: profile.base_url,
+                model: profile.model,
+            })
+            .map_err(|_| "llm_settings_invalid")?;
+            profiles.insert(profile.provider.clone(), LlmProfile::from(&profile));
+        }
+        validate_settings(LlmSettings {
+            provider: persisted.provider,
+            base_url: persisted.base_url,
+            model: persisted.model,
+        })
+        .map_err(|_| "llm_settings_invalid")?
+    };
+    profiles.insert(settings.provider.clone(), LlmProfile::from(&settings));
+    Ok((settings, profiles))
 }
 
-fn write_settings(path: &Path, settings: &LlmSettings) -> Result<(), String> {
+fn write_settings(
+    path: &Path,
+    settings: &LlmSettings,
+    profiles: &HashMap<LlmProvider, LlmProfile>,
+) -> Result<(), String> {
     let parent = path.parent().ok_or("llm_settings_unavailable")?;
     fs::create_dir_all(parent).map_err(|_| "llm_settings_unavailable")?;
-    let contents = serde_json::to_vec(&PersistedSettings::from(settings))
+    let contents = serde_json::to_vec(&PersistedSettings::new(settings, profiles))
         .map_err(|_| "llm_settings_unavailable")?;
     fs::write(path, contents).map_err(|_| "llm_settings_unavailable")?;
     Ok(())
@@ -648,7 +765,8 @@ mod tests {
     };
 
     use super::{
-        process_line, validate_settings, LlmProvider, LlmSettings, LocalLlm, DEFAULT_DEEPSEEK_URL,
+        process_line, read_settings, validate_settings, write_settings, LlmProfile, LlmProvider,
+        LlmSettings, LocalLlm, DEFAULT_DEEPSEEK_URL,
     };
 
     /// Accept one request, wait `delay`, then answer. The response is written even if
@@ -806,6 +924,50 @@ mod tests {
             validate_settings(remote_ollama).unwrap_err(),
             "ollama_must_use_loopback"
         );
+    }
+
+    #[test]
+    fn provider_profiles_survive_switching_and_old_settings_are_migrated() {
+        let path = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join(format!(
+                "qiling-llm-settings-{}-{}.json",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        std::fs::write(
+            &path,
+            r#"{"provider":"deepseek","baseUrl":"https://api.deepseek.com","model":"deepseek-reasoner"}"#,
+        )
+        .unwrap();
+
+        let (deepseek, mut profiles) = read_settings(&path).unwrap();
+        assert_eq!(deepseek.model, "deepseek-reasoner");
+        assert_eq!(
+            profiles.get(&LlmProvider::Deepseek).unwrap().model,
+            "deepseek-reasoner"
+        );
+
+        let ollama = LlmSettings {
+            provider: LlmProvider::Ollama,
+            base_url: "http://127.0.0.1:11434".into(),
+            model: "llama3.2:3b".into(),
+        };
+        profiles.insert(ollama.provider.clone(), LlmProfile::from(&ollama));
+        write_settings(&path, &ollama, &profiles).unwrap();
+
+        let (active, profiles) = read_settings(&path).unwrap();
+        assert_eq!(active.provider, LlmProvider::Ollama);
+        assert_eq!(active.model, "llama3.2:3b");
+        assert_eq!(
+            profiles.get(&LlmProvider::Deepseek).unwrap().model,
+            "deepseek-reasoner"
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

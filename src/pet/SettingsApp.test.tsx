@@ -5,6 +5,7 @@ import SettingsApp, {
   capabilitySummary,
   modelOptions,
   normalizeModelName,
+  settingsForProvider,
 } from './SettingsApp'
 
 const memory = () => {
@@ -109,5 +110,33 @@ describe('器灵设定', () => {
     expect(normalizeModelName(['qwen3:latest'], 'qwen3')).toBe('qwen3:latest')
     expect(normalizeModelName(['qwen3:0.6b'], 'qwen3')).toBe('qwen3')
     expect(normalizeModelName(['qwen3.5:4b'], ' qwen3.5:4b ')).toBe('qwen3.5:4b')
+  })
+
+  it('restores a provider-specific saved model and API-key status after switching', () => {
+    const saved = {
+      provider: 'ollama' as const,
+      baseUrl: 'http://127.0.0.1:11434',
+      model: 'qwen3.5:4b',
+      apiKeyConfigured: false,
+      profiles: [
+        {
+          provider: 'deepseek' as const,
+          baseUrl: 'https://api.deepseek.com',
+          model: 'deepseek-reasoner',
+          apiKeyConfigured: true,
+        },
+      ],
+    }
+
+    expect(settingsForProvider(saved, 'deepseek')).toMatchObject({
+      provider: 'deepseek',
+      model: 'deepseek-reasoner',
+      apiKeyConfigured: true,
+    })
+    expect(settingsForProvider(saved, 'ollama')).toMatchObject({
+      provider: 'ollama',
+      model: 'qwen3.5:4b',
+      apiKeyConfigured: false,
+    })
   })
 })

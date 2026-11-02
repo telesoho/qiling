@@ -53,11 +53,19 @@ interface PairingCode {
 
 type LlmProvider = 'ollama' | 'deepseek' | 'openai_compatible'
 
+interface LlmProfile {
+  provider: LlmProvider
+  baseUrl: string
+  model: string
+  apiKeyConfigured: boolean
+}
+
 interface LlmSettings {
   provider: LlmProvider
   baseUrl: string
   model: string
   apiKeyConfigured: boolean
+  profiles: LlmProfile[]
 }
 
 interface EdgeVoiceOption {
@@ -71,6 +79,25 @@ const defaultLlmSettings: LlmSettings = {
   baseUrl: 'http://127.0.0.1:11434',
   model: 'qwen3.5:4b',
   apiKeyConfigured: false,
+  profiles: [],
+}
+
+const defaultLlmProfiles: Record<LlmProvider, Pick<LlmProfile, 'baseUrl' | 'model'>> = {
+  ollama: { baseUrl: 'http://127.0.0.1:11434', model: 'qwen3.5:4b' },
+  deepseek: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-chat' },
+  openai_compatible: { baseUrl: 'https://api.openai.com/v1', model: '' },
+}
+
+export function settingsForProvider(settings: LlmSettings, provider: LlmProvider): LlmSettings {
+  const saved = settings.profiles.find((profile) => profile.provider === provider)
+  const defaults = defaultLlmProfiles[provider]
+  return {
+    ...settings,
+    provider,
+    baseUrl: saved?.baseUrl ?? defaults.baseUrl,
+    model: saved?.model ?? defaults.model,
+    apiKeyConfigured: saved?.apiKeyConfigured ?? false,
+  }
 }
 
 function llmSettingsErrorMessage(reason: unknown): string {
@@ -838,17 +865,7 @@ export default function SettingsApp(): JSX.Element {
           onChange={(event) => {
             const provider = event.target.value
             if (provider !== 'ollama' && provider !== 'deepseek' && provider !== 'openai_compatible') return
-            const defaults: Record<LlmProvider, Pick<LlmSettings, 'baseUrl' | 'model'>> = {
-              ollama: { baseUrl: 'http://127.0.0.1:11434', model: 'qwen3.5:4b' },
-              deepseek: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-chat' },
-              openai_compatible: { baseUrl: 'https://api.openai.com/v1', model: '' },
-            }
-            setLlmSettings((current) => ({
-              ...current,
-              provider,
-              apiKeyConfigured: false,
-              ...defaults[provider],
-            }))
+            setLlmSettings(settingsForProvider(savedLlmSettings, provider))
             setClearLlmApiKey(false)
             setLlmError('')
             setLlmStatus('')
