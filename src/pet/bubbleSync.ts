@@ -6,18 +6,22 @@ export interface BubbleSnap {
   voice: boolean
   speaking: boolean
   open: boolean
+  name: string
 }
 
 export const defaultBubbleSnap: BubbleSnap = {
   text: '',
+  name: '诗琚',
   voice: true,
   speaking: false,
   open: false,
 }
 
 export function sanitizeBubble(value: Partial<BubbleSnap> | null | undefined): BubbleSnap {
+  const name = typeof value?.name === 'string' ? value.name.trim().slice(0, 40) : ''
   return {
     text: typeof value?.text === 'string' ? value.text : '',
+    name: name || defaultBubbleSnap.name,
     voice: value?.voice !== false,
     speaking: value?.speaking === true,
     open: value?.open === true,

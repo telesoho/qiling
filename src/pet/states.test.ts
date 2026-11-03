@@ -1,5 +1,18 @@
 import { describe, expect, it } from 'vitest'
-import { PET_STATES, isPetStateId, petState, pickIdleBeat, playbackFor, poseForLine, type Mood, type SpeechPlayback } from './states'
+import {
+  IDLE_BEATS,
+  PET_STATES,
+  builtinBeatOptions,
+  isPetStateId,
+  packBeatOptions,
+  petState,
+  pickIdleBeat,
+  pickPackBeat,
+  playbackFor,
+  poseForLine,
+  type Mood,
+  type SpeechPlayback,
+} from './states'
 
 describe('器灵姿势', () => {
   it('covers the five poses', () => {
@@ -39,7 +52,27 @@ describe('器灵姿势', () => {
     expect(playbackFor({ voice: true, phase: 'say', text: line, audible: false, audibleLine: '', heardLine: '' })).toBe('waiting')
     expect(playbackFor({ voice: true, phase: 'say', text: line, audible: true, audibleLine: line, heardLine: '' })).toBe('playing')
     expect(playbackFor({ voice: true, phase: 'say', text: line, audible: false, audibleLine: '', heardLine: line })).toBe('done')
-    expect(playbackFor({ voice: true, phase: 'thinking', text: line, audible: true, audibleLine: line, heardLine: '' })).toBe('done')
+    expect(playbackFor({ voice: true, phase: 'thinking', text: line, audible: true, audibleLine: '', heardLine: '' })).toBe('done')
     expect(playbackFor({ voice: false, phase: 'say', text: line, audible: false, audibleLine: '', heardLine: '' })).toBe('done')
+  })
+
+  it('drops built-in beats whose tracks are missing', () => {
+    const onlyBreath = builtinBeatOptions((track) => track === 'idle')
+    expect(onlyBreath.map((option) => option.key)).toEqual(['breath'])
+    expect(onlyBreath[0]).toMatchObject({ track: 'idle', line: IDLE_BEATS.breath.line })
+  })
+
+  it('uses declared pack beats, or butterfly/angry as the fallback', () => {
+    const declared = packBeatOptions(
+      [{ action: 'splash', line: '扑通' }],
+      (track) => track === 'idle' || track === 'splash',
+    )
+    expect(declared.map((option) => option.key)).toEqual(['breath', 'splash'])
+    expect(pickPackBeat(0.05, declared).key).toBe('splash')
+    expect(pickPackBeat(0.5, declared).key).toBe('breath')
+
+    const fallback = packBeatOptions([], (track) => track === 'idle' || track === 'butterfly')
+    expect(fallback.map((option) => option.key)).toEqual(['breath', 'butterfly'])
+    expect(pickPackBeat(0.05, [fallback[0]]).key).toBe('breath')
   })
 })

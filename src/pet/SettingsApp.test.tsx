@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+﻿import { beforeEach, describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { saveQiLingSettings } from '../lib/settings'
 import SettingsApp, {
@@ -66,6 +66,14 @@ describe('器灵设定', () => {
     expect(page).toContain('自定义 OpenAI 兼容服务')
     expect(page).toContain('连接测试会向当前模型发送一条简短测试提示')
     expect(page).not.toContain('id="llm-api-key"')
+  })
+
+  it('shows the current character and the pack management entry', () => {
+    const page = renderToStaticMarkup(<SettingsApp />)
+    expect(page).toContain('宠物角色')
+    expect(page).toContain('当前角色：诗琚')
+    expect(page).toContain('管理角色资源包…')
+    expect(page).toContain('正在读取角色资源包…')
   })
 
   it('shows client pairing controls and the empty state', () => {

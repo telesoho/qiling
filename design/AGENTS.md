@@ -94,7 +94,8 @@ design/
 | `public/pet/` | 运行时已烘焙桌宠动画；`public/pet/anim/` 由 `npm run bake:anim` 生成（gitignore），勿手改 |
 | `src-tauri/icons/` | 应用图标导出（由 `_brand/icons` 源稿生成） |
 | `assets/qiling/` | 语音等非视觉资源 |
-| `docs/` | HTTP／OpenAPI，不放美术 |
+| `docs/` | HTTP／OpenAPI、资源包制作文档（`docs/pet-packs.md`），不放美术 |
+| `docs/pet-packs.md` | 安装态角色资源包格式与制作；资源包不进 `design/`，bake 仍只服务内置角色 |
 
 ## 迁移时 AI 应遵守
 

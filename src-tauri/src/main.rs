@@ -5,6 +5,7 @@ mod edge_tts;
 mod http;
 mod local_llm;
 mod narration;
+mod pet_pack;
 mod spirit;
 mod voice;
 mod voice_assistant;
@@ -19,6 +20,7 @@ use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, PhysicalPosition, Runtime, State,
     WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
+use tauri_plugin_dialog::DialogExt;
 
 const PET_FALLBACK_W: f64 = 210.0;
 const PET_FALLBACK_H: f64 = 270.0;
@@ -36,6 +38,8 @@ pub struct AppState {
     turns: Arc<voice_assistant::TurnGate>,
     /// The last lines other apps asked the pet to read, for "刚才讲了什么".
     narrations: Arc<narration::NarrationLog>,
+    /// Installed character resource packs and the active character.
+    packs: Arc<pet_pack::PetPackRegistry>,
 }
 
 fn place_pet(pet: &WebviewWindow) {
@@ -153,6 +157,113 @@ fn pet_is_open(app: AppHandle) -> bool {
     app.get_webview_window("pet")
         .and_then(|pet| pet.is_visible().ok())
         .unwrap_or(false)
+}
+
+#[tauri::command]
+fn pet_packs_open(app: AppHandle) -> Result<(), String> {
+    open_pet_packs(&app)
+}
+
+#[tauri::command]
+fn pet_packs_list(state: State<AppState>) -> pet_pack::PacksView {
+    state.packs.packs_view()
+}
+
+#[tauri::command]
+fn pet_character_current(state: State<AppState>) -> pet_pack::ActiveCharacter {
+    state.packs.active_character()
+}
+
+#[tauri::command]
+async fn pet_pack_load(
+    state: State<'_, AppState>,
+    pack_id: String,
+) -> Result<pet_pack::PackRuntime, String> {
+    let packs = Arc::clone(&state.packs);
+    tauri::async_runtime::spawn_blocking(move || packs.load_runtime(&pack_id))
+        .await
+        .map_err(|_| "pack_io_failed".to_string())?
+}
+
+#[tauri::command]
+async fn pet_pack_install(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+    replace: bool,
+) -> Result<pet_pack::CharacterSummary, String> {
+    let packs = Arc::clone(&state.packs);
+    let summary = tauri::async_runtime::spawn_blocking(move || {
+        packs.install(std::path::Path::new(&path), replace)
+    })
+    .await
+    .map_err(|_| "pack_io_failed".to_string())??;
+    if summary.active {
+        // Replacing the active pack keeps the same id but new bytes; the pet
+        // window must drop its cached library and images.
+        let _ = app.emit(
+            "qiling-character-changed",
+            pet_pack::ActiveCharacter {
+                id: summary.id.clone(),
+                name: summary.name.clone(),
+                builtin: false,
+            },
+        );
+    }
+    Ok(summary)
+}
+
+#[tauri::command]
+async fn pet_pack_uninstall(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    pack_id: String,
+) -> Result<pet_pack::ActiveCharacter, String> {
+    let before = state.packs.active_character();
+    let packs = Arc::clone(&state.packs);
+    let active = tauri::async_runtime::spawn_blocking(move || packs.uninstall(&pack_id))
+        .await
+        .map_err(|_| "pack_io_failed".to_string())??;
+    if before.id != active.id {
+        let _ = app.emit("qiling-character-changed", active.clone());
+    }
+    Ok(active)
+}
+
+#[tauri::command]
+async fn pet_pack_set_active(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    pack_id: String,
+) -> Result<pet_pack::ActiveCharacter, String> {
+    let packs = Arc::clone(&state.packs);
+    let active = tauri::async_runtime::spawn_blocking(move || packs.set_active(&pack_id))
+        .await
+        .map_err(|_| "pack_io_failed".to_string())??;
+    let _ = app.emit("qiling-character-changed", active.clone());
+    Ok(active)
+}
+
+#[tauri::command]
+async fn pet_pack_pick_archive(app: AppHandle) -> Result<Option<String>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let mut dialog = app
+        .dialog()
+        .file()
+        .add_filter("器灵角色资源包", &["qilingpet", "zip"]);
+    if let Some(window) = app
+        .get_webview_window("packs")
+        .or_else(|| app.get_webview_window("settings"))
+    {
+        dialog = dialog.set_parent(&window);
+    }
+    dialog.pick_file(move |picked| {
+        let _ = tx.send(picked);
+    });
+    let picked = rx.await.map_err(|_| "pack_io_failed".to_string())?;
+    Ok(picked
+        .and_then(|file| file.into_path().ok())
+        .map(|path| path.to_string_lossy().to_string()))
 }
 
 #[tauri::command]
@@ -615,6 +726,35 @@ async fn spirit_invoke_narrate_current(
     }
 }
 
+fn open_pet_packs(app: &AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("packs") {
+        let _ = window.unminimize();
+        window.show().map_err(|err| err.to_string())?;
+        window.set_focus().map_err(|err| err.to_string())?;
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(app, "packs", WebviewUrl::App("index.html".into()))
+        .title("器灵 · 角色资源包")
+        .inner_size(720.0, 780.0)
+        .min_inner_size(560.0, 620.0)
+        .resizable(true)
+        .maximizable(false)
+        .minimizable(true)
+        .closable(true)
+        .focused(true)
+        .decorations(true)
+        .always_on_top(false)
+        .skip_taskbar(false)
+        .transparent(false)
+        .theme(Some(tauri::Theme::Dark))
+        .background_color(Color(246, 238, 227, 255))
+        .visible(true)
+        .center()
+        .build()
+        .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
 fn open_settings(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("settings") {
         let _ = window.unminimize();
@@ -643,13 +783,15 @@ fn open_settings(app: &AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 fn pet_menu(app: AppHandle) -> Result<(), String> {
+    let packs = MenuItem::with_id(&app, "packs", "角色资源包…", true, None::<&str>)
+        .map_err(|err| err.to_string())?;
     let settings = MenuItem::with_id(&app, "settings", "设定", true, None::<&str>)
         .map_err(|err| err.to_string())?;
     let quit = MenuItem::with_id(&app, "quit", "退出", true, None::<&str>)
         .map_err(|err| err.to_string())?;
     let separator = PredefinedMenuItem::separator(&app).map_err(|err| err.to_string())?;
-    let menu =
-        Menu::with_items(&app, &[&settings, &separator, &quit]).map_err(|err| err.to_string())?;
+    let menu = Menu::with_items(&app, &[&packs, &settings, &separator, &quit])
+        .map_err(|err| err.to_string())?;
     let pet = app.get_webview_window("pet").ok_or("没有器灵窗口")?;
     pet.popup_menu(&menu).map_err(|err| err.to_string())
 }
@@ -669,9 +811,10 @@ fn tray_menu(app: &AppHandle, visible: bool) -> tauri::Result<Menu<tauri::Wry>> 
         None::<&str>,
     )?;
     let settings = MenuItem::with_id(app, "tray-settings", "设定…", true, None::<&str>)?;
+    let packs = MenuItem::with_id(app, "tray-packs", "角色资源包…", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "tray-quit", "退出器灵", true, None::<&str>)?;
-    Menu::with_items(app, &[&toggle, &settings, &separator, &quit])
+    Menu::with_items(app, &[&toggle, &settings, &packs, &separator, &quit])
 }
 
 /// Keep the tray menu label and tooltip in step with the pet window.
@@ -711,6 +854,9 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             "tray-settings" => {
                 let _ = open_settings(app);
             }
+            "tray-packs" => {
+                let _ = open_pet_packs(app);
+            }
             "tray-quit" => app.exit(0),
             _ => {}
         })
@@ -730,10 +876,18 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 
 fn main() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .register_asynchronous_uri_scheme_protocol("qilingpet", |ctx, request, responder| {
+            let packs = ctx.app_handle().state::<AppState>().packs.clone();
+            std::thread::spawn(move || {
+                responder.respond(packs.asset_response(&request));
+            });
+        })
         .setup(|app| {
             let protocol_dir = app.path().app_config_dir()?.join("spirit-clients");
             let llm_settings_path = app.path().app_config_dir()?.join("llm-settings.json");
             let voice_data_dir = app.path().app_data_dir()?;
+            let packs_root = app.path().app_data_dir()?.join("pet-packs");
             let bundled_voice_script = app
                 .path()
                 .resource_dir()?
@@ -750,6 +904,10 @@ fn main() {
                     .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?,
             );
             let narrations = Arc::new(narration::NarrationLog::default());
+            let packs = Arc::new(
+                pet_pack::PetPackRegistry::load(packs_root)
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?,
+            );
             app.manage(AppState {
                 pet_placed: AtomicBool::new(true),
                 voice: Arc::new(cosyvoice::VoiceHost::new()),
@@ -765,6 +923,7 @@ fn main() {
                 protocol: protocol.clone(),
                 turns: Arc::new(voice_assistant::TurnGate::default()),
                 narrations: Arc::clone(&narrations),
+                packs,
             });
             if let Some(pet) = app.get_webview_window("pet") {
                 place_pet(&pet);
@@ -809,6 +968,8 @@ fn main() {
         .on_menu_event(|app, event| {
             if event.id() == "settings" {
                 let _ = open_settings(app);
+            } else if event.id() == "packs" {
+                let _ = open_pet_packs(app);
             } else if event.id() == "quit" {
                 app.exit(0);
             }
@@ -816,6 +977,14 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             pet_set_open,
             pet_is_open,
+            pet_packs_open,
+            pet_packs_list,
+            pet_character_current,
+            pet_pack_load,
+            pet_pack_install,
+            pet_pack_uninstall,
+            pet_pack_set_active,
+            pet_pack_pick_archive,
             qiling_voice_status,
             qiling_voice_synthesize,
             qiling_voice_cancel,

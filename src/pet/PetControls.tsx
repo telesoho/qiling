@@ -29,19 +29,22 @@ export function PetSpeechBubble(props: {
   speaking: boolean
   onToggleVoice: () => void
   onCollapse: () => void
+  /** 当前角色显示名；内置诗琚是默认值。 */
+  name?: string
   /** Standalone window. No drag region; layout fills that window. */
   windowed?: boolean
 }): JSX.Element {
+  const name = props.name?.trim() || '诗琚'
   const voiceLabel = props.speaking && props.voiceOn ? '停止' : props.voiceOn ? '静音' : '开声'
   const voiceTitle =
     voiceLabel === '停止' ? '停止当前播报' : voiceLabel === '静音' ? '关闭语音' : '打开语音'
   const drag = props.windowed ? undefined : ''
 
   return (
-    <section className={`pet-bubble${props.windowed ? ' is-window' : ''}`} aria-label="诗琚">
+    <section className={`pet-bubble${props.windowed ? ' is-window' : ''}`} aria-label={name}>
       <div className="pet-bubble-bar">
         <div className="pet-bubble-name" data-tauri-drag-region={drag}>
-          <span>诗琚</span>
+          <span>{name}</span>
           <span className="pet-online" aria-hidden="true" />
         </div>
         <div className="pet-bubble-actions">

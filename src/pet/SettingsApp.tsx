@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+﻿import { useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import {
   isVoiceEnginePreference,
@@ -14,6 +14,13 @@ import {
   voiceAssistantStateLabel,
   type VoiceAssistantEvent,
 } from '../lib/voice-assistant'
+import {
+  CHARACTER_EVENT,
+  loadPacksView,
+  packErrorMessage,
+  type PacksView,
+} from './packs'
+import { inTauri } from './sync'
 
 interface ClientInfo {
   id: string
@@ -170,6 +177,7 @@ export function capabilitySummary(capabilities: CapabilityManifest): string {
 }
 
 export default function SettingsApp(): JSX.Element {
+  const native = inTauri()
   const [settings, setSettings] = useState<PetSettings>(loadQiLingSettings)
   const [wakeWordDraft, setWakeWordDraft] = useState(() => loadQiLingSettings().wakeWord)
   const [savingWakeWord, setSavingWakeWord] = useState(false)
@@ -206,9 +214,44 @@ export default function SettingsApp(): JSX.Element {
   const [edgeVoices, setEdgeVoices] = useState<EdgeVoiceOption[]>([])
   const [loadingEdgeVoices, setLoadingEdgeVoices] = useState(false)
   const [edgeVoiceError, setEdgeVoiceError] = useState('')
+  const [characterView, setCharacterView] = useState<PacksView | null>(null)
+  const [characterError, setCharacterError] = useState('')
 
   useEffect(() => watchQiLingSettings(setSettings), [])
   useEffect(() => setWakeWordDraft(settings.wakeWord), [settings.wakeWord])
+
+  useEffect(() => {
+    if (!native) return
+    let active = true
+    let stop: (() => void) | undefined
+    const refresh = () => {
+      void loadPacksView()
+        .then((view) => {
+          if (active) {
+            setCharacterView(view)
+            setCharacterError('')
+          }
+        })
+        .catch((reason: unknown) => {
+          if (active) setCharacterError(packErrorMessage(reason))
+        })
+    }
+    refresh()
+    const onFocus = () => refresh()
+    window.addEventListener('focus', onFocus)
+    void import('@tauri-apps/api/event')
+      .then(({ listen }) => listen(CHARACTER_EVENT, refresh))
+      .then((unlisten) => {
+        if (active) stop = unlisten
+        else unlisten()
+      })
+      .catch(() => {})
+    return () => {
+      active = false
+      stop?.()
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [native])
 
   useEffect(() => {
     if (!('__TAURI_INTERNALS__' in window || '__TAURI__' in window)) return
@@ -720,12 +763,30 @@ export default function SettingsApp(): JSX.Element {
     }
   }
 
+  const activeCharacter = characterView?.characters.find((character) => character.active)
+  const packCount = characterView?.characters.filter((character) => !character.builtin).length ?? 0
+
   return (
     <main className="pet-settings" aria-label="设定">
       <header className="settings-header">
         <h1>器灵设定</h1>
-        <p>管理语音、对话模型与已授权的桌面客户端。</p>
+        <p>管理宠物角色、语音、对话模型与已授权的桌面客户端。</p>
       </header>
+
+      <section className="settings-section" aria-labelledby="character-title">
+        <h2 id="character-title">宠物角色</h2>
+        <p>
+          当前角色：{activeCharacter?.name ?? '诗琚'}。
+          {characterView
+            ? `已安装 ${packCount} 个第三方角色资源包；内置诗琚始终可用。`
+            : '正在读取角色资源包…'}
+        </p>
+        <p>安装资源包后会立即注册为可选角色；同一时间只有一个角色在场，切换在资源包页面完成。</p>
+        <button type="button" disabled={!native} onClick={() => void invoke('pet_packs_open')}>
+          管理角色资源包…
+        </button>
+        {characterError && <p className="settings-error" role="alert">{characterError}</p>}
+      </section>
 
       <section className="settings-section" aria-labelledby="voice-title">
         <h2 id="voice-title">语音与唤醒</h2>

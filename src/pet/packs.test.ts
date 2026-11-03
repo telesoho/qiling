@@ -1,0 +1,96 @@
+import { describe, expect, it } from 'vitest'
+import { frameUrl, phaseImageUrl } from './anim'
+import { createPackLibrary, formatInstalledAt, packErrorMessage, type PackRuntime } from './packs'
+
+const runtime: PackRuntime = {
+  character: { id: 'dafeiyu', name: '大肥鱼', builtin: false },
+  assetBase: 'http://qilingpet.localhost/dafeiyu/',
+  idleBeats: [{ action: 'splash', line: '扑通' }],
+  tracks: [
+    {
+      id: 'dafeiyu-idle',
+      displayName: '大肥鱼·待机',
+      tags: ['idle', 'dafeiyu'],
+      path: 'tracks/idle/track_struct.json',
+      struct: {
+        fps: 24,
+        frameSize: { width: 180, height: 240 },
+        phases: {
+          idle: {
+            playback: 'loop',
+            asset: { type: 'animatedWebp', src: 'idle.webp', durationMs: 3000 },
+          },
+        },
+      },
+    },
+    {
+      id: 'dafeiyu-think',
+      tags: ['pose', 'think', 'dafeiyu'],
+      path: 'tracks/think/track_struct.json',
+      struct: {
+        phases: {
+          idle: {
+            playback: 'loop',
+            asset: { type: 'animatedWebp', src: 'think.webp' },
+          },
+        },
+      },
+    },
+    {
+      id: 'dafeiyu-pickup',
+      tags: ['pickup', 'dafeiyu'],
+      path: 'tracks/pickup/track_struct.json',
+      struct: {
+        fps: 24,
+        frameSize: { width: 180, height: 260 },
+        phases: {
+          lift: {
+            playback: 'once',
+            asset: {
+              type: 'frameSequence',
+              dir: 'frames',
+              pattern: 'frame{NNN}.webp',
+              zeroPad: 3,
+              from: 1,
+              to: 2,
+            },
+          },
+        },
+      },
+    },
+  ],
+}
+
+describe('角色资源包运行时', () => {
+  it('builds a character-scoped library from the compiled tracks', () => {
+    const library = createPackLibrary(runtime)
+    expect(library.byTag('idle')?.id).toBe('dafeiyu-idle')
+    expect(library.byTag('think')?.tags).toEqual(['pose', 'think', 'dafeiyu'])
+    expect(library.byId.get('dafeiyu-think')?.id).toBe('dafeiyu-think')
+    expect(phaseImageUrl(library.byTag('idle'))).toBe(
+      'http://qilingpet.localhost/dafeiyu/tracks/idle/idle.webp',
+    )
+  })
+
+  it('resolves frame sequences relative to the pack track', () => {
+    const library = createPackLibrary(runtime)
+    const pickup = library.byTag('pickup')
+    expect(pickup).toBeTruthy()
+    expect(frameUrl(pickup!, 'lift', 2)).toBe(
+      'http://qilingpet.localhost/dafeiyu/tracks/pickup/frames/frame002.webp',
+    )
+  })
+
+  it('maps stable error codes to readable Chinese', () => {
+    expect(packErrorMessage('pack_id_invalid')).toContain('id')
+    expect(packErrorMessage('pack_builtin_protected')).toContain('诗琚')
+    expect(packErrorMessage('pack_mvp_tracks_missing:think,explain')).toContain('think,explain')
+    expect(packErrorMessage('some_new_code')).toContain('some_new_code')
+  })
+
+  it('formats installed timestamps defensively', () => {
+    expect(formatInstalledAt(undefined)).toBe('')
+    expect(formatInstalledAt(0)).toBe('')
+    expect(formatInstalledAt(1_760_000_000)).not.toBe('')
+  })
+})

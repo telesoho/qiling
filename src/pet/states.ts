@@ -41,6 +41,81 @@ export function pickIdleBeat(roll: number): IdleBeat {
   return 'breath'
 }
 
+/** 待机节拍的一项。资源包用 action 作为 key/track，内置角色用 IDLE_BEATS 的 key。 */
+export interface IdleBeatOption {
+  key: string
+  track: string
+  line: string
+  ms?: number
+}
+
+/** 内置诗琚的节拍；只保留当前动画库里真实存在的轨（缺轨就只呼吸）。 */
+export function builtinBeatOptions(
+  hasTrack: (track: string) => boolean = () => true,
+): IdleBeatOption[] {
+  const options: IdleBeatOption[] = []
+  for (const key of ['angry', 'butterfly', 'breath'] as const) {
+    const beat = IDLE_BEATS[key]
+    if (key !== 'breath' && !hasTrack(beat.track)) continue
+    options.push({ key, track: beat.track, line: beat.line, ms: beat.ms })
+  }
+  return options
+}
+
+export interface PackBeatDecl {
+  action: string
+  line: string
+  ms?: number
+}
+
+/**
+ * 资源包的节拍：优先用 pet.json.idleBeats 的声明；
+ * 未声明时沿用 butterfly/angry 的既有语义作为兜底。
+ * 永远保留呼吸。
+ */
+export function packBeatOptions(
+  declared: readonly PackBeatDecl[],
+  hasTrack: (track: string) => boolean,
+): IdleBeatOption[] {
+  const source: PackBeatDecl[] =
+    declared.length > 0
+      ? [...declared]
+      : (['butterfly', 'angry'] as const)
+          .filter((action) => hasTrack(action))
+          .map((action) => ({
+            action,
+            line: IDLE_BEATS[action].line,
+            ms: IDLE_BEATS[action].ms,
+          }))
+  const breath: IdleBeatOption = {
+    key: 'breath',
+    track: IDLE_BEATS.breath.track,
+    line: IDLE_BEATS.breath.line,
+    ms: IDLE_BEATS.breath.ms,
+  }
+  const extras = source
+    .filter((beat) => beat.action !== 'breath' && hasTrack(beat.action))
+    .map((beat) => ({
+      key: beat.action,
+      track: beat.action,
+      line: beat.line,
+      ms: beat.ms,
+    }))
+  return [breath, ...extras]
+}
+
+/** 资源包一次 roll：约 20% 触发性格节拍（多个 beat 均分），其余呼吸。 */
+export function pickPackBeat(
+  roll: number,
+  options: readonly IdleBeatOption[],
+): IdleBeatOption {
+  const breath = options.find((option) => option.key === 'breath') ?? options[0]
+  const extras = options.filter((option) => option.key !== 'breath')
+  if (extras.length === 0 || roll >= 0.2) return breath
+  const index = Math.min(extras.length - 1, Math.floor((roll / 0.2) * extras.length))
+  return extras[index]
+}
+
 export type SpeechPlayback = 'waiting' | 'playing' | 'done'
 
 /** Voice only counts once a say-line is actually playing. Thinking stays think either way. */

@@ -155,4 +155,18 @@ describe('运行时动画目录', () => {
       expect(lift.zeroPad).toBe(3)
     }
   })
+
+  it('selects a track by action and character tag together', () => {
+    const base = {
+      fps: 24,
+      frameSize: { width: 180, height: 240 },
+      phases: {},
+      baseUrl: 'http://test/pet/anim/track/track_struct.json',
+    }
+    const shiju: AnimTrack = { ...base, id: 'shiju-idle', tags: ['idle', 'shiju'] }
+    const other: AnimTrack = { ...base, id: 'dafeiyu-idle', tags: ['idle', 'dafeiyu'] }
+    expect(createLibrary(manifest, [other, shiju], 'shiju').byTag('idle')?.id).toBe('shiju-idle')
+    expect(createLibrary(manifest, [other, shiju], 'dafeiyu').byTag('idle')?.id).toBe('dafeiyu-idle')
+    expect(createLibrary(manifest, [other, shiju]).byTag('idle')?.id).toBe('dafeiyu-idle')
+  })
 })

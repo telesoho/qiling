@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<title>器灵 · 角色资源包</title>
+<style>
+  :root{
+    --bg:#F6EEE3;
+    --bg2:#EFE4D4;
+    --ink:#4A3728;
+    --ink-soft:#7A6554;
+    --line:rgba(90,70,50,.14);
+    --glass:linear-gradient(180deg,rgba(255,255,255,.72),rgba(245,238,228,.48));
+    --accent:#C45A4A;
+    --ok:#5A4636;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:#2a2a2a;font-family:"Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;color:var(--ink)}
+  .window{
+    width:720px;height:780px;margin:24px auto;border-radius:12px;overflow:hidden;
+    background:radial-gradient(120% 80% at 20% 0%, #FFF8EE 0%, var(--bg) 45%, var(--bg2) 100%);
+    box-shadow:0 24px 60px rgba(0,0,0,.35);
+    display:flex;flex-direction:column;
+  }
+  .titlebar{
+    height:36px;background:#2C2C2C;color:#ddd;display:flex;align-items:center;justify-content:space-between;
+    padding:0 12px;font-size:12px;flex:none;
+  }
+  .titlebar .dots{display:flex;gap:6px}
+  .titlebar .dots i{width:10px;height:10px;border-radius:50%;display:block;background:#555}
+  .body{padding:22px 28px 18px;display:flex;flex-direction:column;gap:18px;overflow:auto;flex:1}
+  .head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+  .head h1{margin:0;font-size:22px;font-weight:650;letter-spacing:.04em}
+  .head p{margin:6px 0 0;font-size:13px;color:var(--ink-soft);line-height:1.5;max-width:340px}
+  .actions{display:flex;gap:8px;flex:none}
+  .btn{
+    appearance:none;border:1px solid rgba(255,255,255,.7);border-radius:999px;padding:9px 16px;
+    font:inherit;font-size:13px;font-weight:500;cursor:pointer;color:var(--ink);
+    background:var(--glass);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+    box-shadow:0 4px 14px rgba(58,46,34,.12), inset 0 1px 0 rgba(255,255,255,.75);
+  }
+  .btn-primary{background:linear-gradient(180deg,#C96B5C,#B04A3C);color:#fff;border-color:rgba(255,255,255,.25);box-shadow:0 6px 16px rgba(176,74,60,.28)}
+  .btn-ghost{padding:9px 12px;min-width:40px}
+  .section-label{font-size:12px;font-weight:600;letter-spacing:.12em;color:var(--ink-soft);margin:2px 0 0}
+  .hero{
+    display:grid;grid-template-columns:168px 1fr;gap:18px;align-items:center;
+    padding:16px;border-radius:22px;border:1px solid rgba(255,255,255,.65);
+    background:var(--glass);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+    box-shadow:0 8px 24px rgba(58,46,34,.1), inset 0 1px 0 rgba(255,255,255,.8);
+    position:relative;overflow:hidden;
+  }
+  .hero::before{
+    content:"";position:absolute;left:18px;right:18px;top:4px;height:16px;border-radius:8px;
+    background:linear-gradient(180deg,rgba(255,255,255,.55),transparent);pointer-events:none;
+  }
+  .hero-art{
+    width:168px;height:168px;border-radius:18px;background:#FBF4EA;
+    border:1px solid var(--line);display:flex;align-items:flex-end;justify-content:center;overflow:hidden;
+  }
+  .hero-art img{width:100%;height:100%;object-fit:contain}
+  .hero-meta h2{margin:0 0 8px;font-size:20px;font-weight:650}
+  .badges{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+  .badge{
+    font-size:11px;padding:3px 10px;border-radius:999px;font-weight:560;
+    background:rgba(90,70,50,.1);color:var(--ink-soft);
+  }
+  .badge-on{background:var(--ok);color:#fff}
+  .badge-builtin{background:rgba(196,90,74,.12);color:var(--accent)}
+  .hero-meta .desc{margin:0;font-size:13px;color:var(--ink-soft);line-height:1.55}
+  .hero-meta .hint{margin:10px 0 0;font-size:12px;color:var(--ink-soft);opacity:.85}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .card{
+    display:grid;grid-template-columns:72px 1fr;gap:12px;align-items:center;
+    padding:12px;border-radius:18px;border:1px solid rgba(255,255,255,.6);
+    background:rgba(255,255,255,.42);box-shadow:0 4px 14px rgba(58,46,34,.06);
+  }
+  .card.is-active{outline:1.5px solid rgba(196,90,74,.45);background:rgba(255,255,255,.58)}
+  .card-art{
+    width:72px;height:72px;border-radius:14px;background:#FBF4EA;border:1px solid var(--line);
+    overflow:hidden;display:flex;align-items:flex-end;justify-content:center;
+  }
+  .card-art img{width:100%;height:100%;object-fit:contain}
+  .card h3{margin:0 0 4px;font-size:14px;font-weight:620}
+  .card .sub{margin:0;font-size:11px;color:var(--ink-soft)}
+  .card .row{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+  .chip{
+    font-size:11px;padding:4px 10px;border-radius:999px;border:1px solid var(--line);
+    background:rgba(255,255,255,.55);color:var(--ink);cursor:pointer;
+  }
+  .chip-danger{color:#A03A30;border-color:rgba(160,58,48,.25)}
+  .chip[disabled]{opacity:.4;cursor:default}
+  .foot{
+    margin-top:auto;display:flex;flex-direction:column;gap:8px;padding-top:4px;
+  }
+  details.help{
+    border-radius:14px;border:1px solid var(--line);background:rgba(255,255,255,.35);padding:0 14px;
+  }
+  details.help summary{
+    list-style:none;cursor:pointer;padding:12px 0;font-size:13px;font-weight:560;
+    display:flex;align-items:center;gap:8px;
+  }
+  details.help summary::-webkit-details-marker{display:none}
+  details.help summary::before{content:"▸";opacity:.55;font-size:11px}
+  details.help[open] summary::before{content:"▾"}
+  details.help .inner{padding:0 0 12px;font-size:12px;color:var(--ink-soft);line-height:1.65}
+  .path{font-size:11px;color:var(--ink-soft);opacity:.75;word-break:break-all}
+</style>
+</head>
+<body>
+<div class="window">
+  <div class="titlebar">
+    <span>器灵 · 角色资源包</span>
+    <div class="dots"><i></i><i></i><i></i></div>
+  </div>
+  <div class="body">
+    <div class="head">
+      <div>
+        <h1>角色资源包</h1>
+        <p>安装角色包后可切换桌宠形象。同时只能启用一位角色。</p>
+      </div>
+      <div class="actions">
+        <button class="btn btn-ghost" title="刷新" aria-label="刷新">↻</button>
+        <button class="btn btn-primary">安装资源包…</button>
+      </div>
+    </div>
+
+    <div class="section-label">当前角色</div>
+    <section class="hero" aria-label="当前角色">
+      <div class="hero-art"><img src="shiju-plate.png" alt="诗琚"/></div>
+      <div class="hero-meta">
+        <h2>诗琚</h2>
+        <div class="badges">
+          <span class="badge badge-on">启用中</span>
+          <span class="badge badge-builtin">内置</span>
+        </div>
+        <p class="desc">红唐装圆扇棋灵 · 待机 / 讲解 / 思考 / 优势 / 劣势 · 吊起四相位</p>
+        <p class="hint">内置角色始终可用，不可卸载。</p>
+      </div>
+    </section>
+
+    <div class="section-label">已安装</div>
+    <div class="grid">
+      <article class="card is-active">
+        <div class="card-art"><img src="shiju-thumb.png" alt=""/></div>
+        <div>
+          <h3>诗琚</h3>
+          <p class="sub">内置 · 启用中</p>
+          <div class="row">
+            <button class="chip" disabled>已启用</button>
+          </div>
+        </div>
+      </article>
+      <article class="card">
+        <div class="card-art"><img src="dafeiyu-thumb.png" alt=""/></div>
+        <div>
+          <h3>小鲸娘</h3>
+          <p class="sub">用户安装 · 未启用</p>
+          <div class="row">
+            <button class="chip">启用</button>
+            <button class="chip chip-danger">卸载</button>
+          </div>
+        </div>
+      </article>
+    </div>
+
+    <div class="foot">
+      <details class="help">
+        <summary>安全与格式说明</summary>
+        <div class="inner">
+          资源包是自包含 ZIP（建议扩展名 <code>.qilingpet</code>），只含 WebP / PNG 与 JSON，应用不会执行其中的代码。请只安装可信来源的包；安装、替换、卸载均需在此确认。
+        </div>
+      </details>
+      <details class="help">
+        <summary>怎样制作角色资源包？</summary>
+        <div class="inner">按 track_struct 约定组织动画轨与预览图，打包为 ZIP 即可。详见设计目录 AGENTS / anim/spec。</div>
+      </details>
+      <div class="path">本地目录 · C:\Users\telesoho\AppData\Roaming\com.qiling.pet\pet-packs</div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
