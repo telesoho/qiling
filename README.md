@@ -11,7 +11,7 @@
   - Spirit Protocol V1 的本机 WebSocket、配对、撤销、状态事件和 `siju.narrate_current` 已通过实现和桌面验收。
   - TypeScript 客户端 SDK 和参考示例已通过阶段 4 验收，见 [SDK README](sdk/typescript/README.md)。
   - VS Code Connector 已实现并可打包，见 [Connector README](connectors/vscode/README.md)。
-  - 语音闭环与桌面验收仍在推进。
+  - 语音闭环与第二客户端（VS Code）已通过阶段 5 验收；下一阶段见开发计划「阶段 6：产品化可试用」。
 
 ## 2. 本机接口
 
