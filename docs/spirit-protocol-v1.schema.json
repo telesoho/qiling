@@ -1,0 +1,584 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:qiling:spirit-protocol:v1",
+  "title": "Spirit Protocol V1 message envelope",
+  "description": "JSON-RPC 2.0 message shapes for Spirit Protocol V1, including the constrained Siju and VS Code client profiles, status events, and approved Actions.",
+  "oneOf": [
+    { "$ref": "#/$defs/clientPairRequest" },
+    { "$ref": "#/$defs/clientAuthenticateRequest" },
+    { "$ref": "#/$defs/clientInitializeRequest" },
+    { "$ref": "#/$defs/clientUnpairRequest" },
+    { "$ref": "#/$defs/actionInvokeRequest" },
+    { "$ref": "#/$defs/eventPublishNotification" },
+    { "$ref": "#/$defs/cancelNotification" },
+    { "$ref": "#/$defs/pairResponse" },
+    { "$ref": "#/$defs/authenticateResponse" },
+    { "$ref": "#/$defs/initializeResponse" },
+    { "$ref": "#/$defs/clientUnpairResponse" },
+    { "$ref": "#/$defs/actionSuccessResponse" },
+    { "$ref": "#/$defs/errorResponse" }
+  ],
+  "examples": [
+    {
+      "jsonrpc": "2.0",
+      "id": "pair-1",
+      "method": "client.pair",
+      "params": {
+        "pairingCode": "ABCDEFGH",
+        "client": {
+          "id": "com.siju.app",
+          "name": "识局",
+          "version": "0.1.0"
+        },
+        "requestedCapabilities": {
+          "actions": [
+            {
+              "id": "siju.narrate_current",
+              "risk": "no_state_change",
+              "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+              "outputSchema": {
+                "type": "object",
+                "required": ["text", "mood"],
+                "properties": {
+                  "text": { "type": "string", "maxLength": 400 },
+                  "mood": { "type": "string", "enum": ["neutral", "up", "down"] }
+                },
+                "additionalProperties": false
+              },
+              "supportsCancellation": false
+            }
+          ],
+          "events": {
+            "publishes": ["siju.analysis.status"],
+            "subscribes": []
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "init-1",
+      "method": "client.initialize",
+      "params": {
+        "protocolVersion": "1",
+        "client": {
+          "id": "com.siju.app",
+          "name": "识局",
+          "version": "0.1.0"
+        },
+        "capabilities": {
+          "actions": [
+            {
+              "id": "siju.narrate_current",
+              "risk": "no_state_change",
+              "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+              "outputSchema": {
+                "type": "object",
+                "required": ["text", "mood"],
+                "properties": {
+                  "text": { "type": "string", "maxLength": 400 },
+                  "mood": { "type": "string", "enum": ["neutral", "up", "down"] }
+                },
+                "additionalProperties": false
+              },
+              "supportsCancellation": false
+            }
+          ],
+          "events": {
+            "publishes": ["siju.analysis.status"],
+            "subscribes": []
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "vscode-pair-1",
+      "method": "client.pair",
+      "params": {
+        "pairingCode": "ABCDEFGH",
+        "client": {
+          "id": "com.qiling.vscode",
+          "name": "Visual Studio Code",
+          "version": "0.1.0"
+        },
+        "requestedCapabilities": {
+          "actions": [
+            {
+              "id": "vscode.explain_selection",
+              "risk": "sensitive",
+              "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+              "outputSchema": {
+                "type": "object",
+                "required": ["text", "mood"],
+                "properties": {
+                  "text": { "type": "string", "maxLength": 400 },
+                  "mood": { "type": "string", "enum": ["neutral", "up", "down"] }
+                },
+                "additionalProperties": false
+              },
+              "supportsCancellation": false
+            }
+          ],
+          "events": {
+            "publishes": ["vscode.editor.status"],
+            "subscribes": []
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "vscode-action-1",
+      "method": "action.invoke",
+      "params": {
+        "action": "vscode.explain_selection",
+        "arguments": {},
+        "timeoutMs": 60000
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "auth-1",
+      "method": "client.authenticate",
+      "params": {
+        "accessToken": "example-only-not-a-credential-0123456789"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "pair-1",
+      "result": {
+        "clientId": "com.siju.app",
+        "accessToken": "example-only-not-a-credential-0123456789"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "auth-1",
+      "result": {
+        "authenticated": true,
+        "clientId": "com.siju.app"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "init-1",
+      "result": {
+        "sessionId": "session-example",
+        "protocolVersion": "1",
+        "serverInfo": {
+          "id": "com.qiling.pet",
+          "name": "器灵",
+          "version": "0.1.0"
+        },
+        "runtimeCapabilities": [],
+        "grantedCapabilities": ["siju.narrate_current"]
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "unpair-1",
+      "method": "client.unpair",
+      "params": {}
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "unpair-1",
+      "result": { "unpaired": true }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "action-42",
+      "method": "action.invoke",
+      "params": {
+        "action": "siju.narrate_current",
+        "arguments": {},
+        "timeoutMs": 60000
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "action-42",
+      "result": {
+        "text": "红方略优。",
+        "mood": "up"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "action-42",
+      "error": {
+        "code": -32000,
+        "message": "Action failed",
+        "data": {
+          "code": "state_unavailable",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "event.publish",
+      "params": {
+        "eventId": "evt-7",
+        "eventType": "siju.analysis.status",
+        "occurredAt": "2026-11-01T00:00:00Z",
+        "payload": {
+          "status": "ready"
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "requestId": {
+      "oneOf": [
+        { "type": "string", "minLength": 1, "maxLength": 128 },
+        { "type": "integer" }
+      ]
+    },
+    "clientPairRequest": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/requestId" },
+        "method": { "const": "client.pair" },
+        "params": { "$ref": "#/$defs/clientPairParams" }
+      },
+      "additionalProperties": false
+    },
+    "clientInitializeRequest": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/requestId" },
+        "method": { "const": "client.initialize" },
+        "params": { "$ref": "#/$defs/clientInitializeParams" }
+      },
+      "additionalProperties": false
+    },
+    "clientAuthenticateRequest": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/requestId" },
+        "method": { "const": "client.authenticate" },
+        "params": {
+          "type": "object",
+          "required": ["accessToken"],
+          "properties": {
+            "accessToken": { "type": "string", "minLength": 32 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "clientUnpairRequest": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/requestId" },
+        "method": { "const": "client.unpair" },
+        "params": {
+          "type": "object",
+          "maxProperties": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "clientUnpairResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/requestId" },
+        "result": {
+          "type": "object",
+          "required": ["unpaired"],
+          "properties": {
+            "unpaired": { "const": true }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "actionInvokeRequest": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/requestId" },
+        "method": { "const": "action.invoke" },
+        "params": { "$ref": "#/$defs/actionInvokeParams" }
+      },
+      "additionalProperties": false
+    },
+    "eventPublishNotification": {
+      "type": "object",
+      "required": ["jsonrpc", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "method": { "const": "event.publish" },
+        "params": { "$ref": "#/$defs/eventPublishParams" }
+      },
+      "additionalProperties": false
+    },
+    "cancelNotification": {
+      "type": "object",
+      "required": ["jsonrpc", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "method": { "const": "$/cancelRequest" },
+        "params": { "$ref": "#/$defs/cancelParams" }
+      },
+      "additionalProperties": false
+    },
+    "pairResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/requestId" },
+        "result": {
+          "type": "object",
+          "required": ["clientId", "accessToken"],
+          "properties": {
+            "clientId": { "type": "string" },
+            "accessToken": { "type": "string", "minLength": 32 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "authenticateResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/requestId" },
+        "result": {
+          "type": "object",
+          "required": ["authenticated", "clientId"],
+          "properties": {
+            "authenticated": { "const": true },
+            "clientId": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "initializeResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/requestId" },
+        "result": {
+          "type": "object",
+          "required": [
+            "sessionId",
+            "protocolVersion",
+            "serverInfo",
+            "runtimeCapabilities",
+            "grantedCapabilities"
+          ],
+          "properties": {
+            "sessionId": { "type": "string", "minLength": 1 },
+            "protocolVersion": { "const": "1" },
+            "serverInfo": { "$ref": "#/$defs/serverIdentity" },
+            "runtimeCapabilities": { "$ref": "#/$defs/eventTypes" },
+            "grantedCapabilities": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "type": "string" }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "actionSuccessResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/requestId" },
+        "result": { "$ref": "#/$defs/narrationResult" }
+      },
+      "additionalProperties": false
+    },
+    "errorResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "error"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/requestId" },
+        "error": { "$ref": "#/$defs/protocolError" }
+      },
+      "additionalProperties": false
+    },
+    "protocolError": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "integer" },
+        "message": { "type": "string" },
+        "data": {
+          "type": "object",
+          "required": ["code"],
+          "properties": {
+            "code": {
+              "type": "string",
+              "enum": [
+                "pairing_required",
+                "pairing_expired",
+                "not_authorized",
+                "version_unsupported",
+                "action_not_found",
+                "invalid_params",
+                "client_unavailable",
+                "state_unavailable",
+                "state_stale",
+                "summarizer_unavailable",
+                "busy",
+                "deadline_exceeded",
+                "cancelled",
+                "internal_error"
+              ]
+            },
+            "retryable": { "type": "boolean" }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "clientInitializeParams": {
+      "type": "object",
+      "required": ["protocolVersion", "client", "capabilities"],
+      "properties": {
+        "protocolVersion": { "const": "1" },
+        "client": { "$ref": "#/$defs/clientIdentity" },
+        "capabilities": { "$ref": "#/$defs/clientCapabilities" }
+      },
+      "additionalProperties": false
+    },
+    "clientPairParams": {
+      "type": "object",
+      "required": ["pairingCode", "client", "requestedCapabilities"],
+      "properties": {
+        "pairingCode": { "type": "string", "pattern": "^[A-Z2-7]{8}$" },
+        "client": { "$ref": "#/$defs/clientIdentity" },
+        "requestedCapabilities": { "$ref": "#/$defs/clientCapabilities" }
+      },
+      "additionalProperties": false
+    },
+    "clientIdentity": {
+      "type": "object",
+      "required": ["id", "name", "version"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,128}$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "version": { "type": "string", "minLength": 1, "maxLength": 40 }
+      },
+      "additionalProperties": false
+    },
+    "serverIdentity": {
+      "type": "object",
+      "required": ["id", "name", "version"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,128}$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "version": { "type": "string", "minLength": 1, "maxLength": 40 }
+      },
+      "additionalProperties": false
+    },
+    "clientCapabilities": {
+      "type": "object",
+      "required": ["actions", "events"],
+      "properties": {
+        "actions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/actionCapability" }
+        },
+        "events": {
+          "type": "object",
+          "required": ["publishes", "subscribes"],
+          "properties": {
+            "publishes": { "$ref": "#/$defs/eventTypes" },
+            "subscribes": { "$ref": "#/$defs/eventTypes" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "actionCapability": {
+      "type": "object",
+      "required": ["id", "risk", "inputSchema", "outputSchema", "supportsCancellation"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9]*(\\.[a-z][a-z0-9_]*)+$" },
+        "risk": {
+          "type": "string",
+          "enum": ["no_state_change", "state_change", "sensitive"]
+        },
+        "inputSchema": { "type": "object" },
+        "outputSchema": { "type": "object" },
+        "supportsCancellation": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "eventTypes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z][a-z0-9]*(\\.[a-z][a-z0-9_]*)+$" }
+    },
+    "eventPublishParams": {
+      "type": "object",
+      "required": ["eventId", "eventType", "occurredAt", "payload"],
+      "properties": {
+        "eventId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "eventType": { "type": "string", "pattern": "^[a-z][a-z0-9]*(\\.[a-z][a-z0-9_]*)+$" },
+        "occurredAt": { "type": "string", "format": "date-time" },
+        "payload": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "actionInvokeParams": {
+      "type": "object",
+      "required": ["action", "arguments"],
+      "properties": {
+        "action": { "type": "string", "pattern": "^[a-z][a-z0-9]*(\\.[a-z][a-z0-9_]*)+$" },
+        "arguments": { "type": "object" },
+        "timeoutMs": { "type": "integer", "minimum": 1000, "maximum": 120000 }
+      },
+      "additionalProperties": false
+    },
+    "cancelParams": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": { "$ref": "#/$defs/requestId" }
+      },
+      "additionalProperties": false
+    },
+    "narrationResult": {
+      "type": "object",
+      "required": ["text", "mood"],
+      "properties": {
+        "text": { "type": "string", "maxLength": 400 },
+        "mood": { "type": "string", "enum": ["neutral", "up", "down"] }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { captionAt, fallbackToSystem, pickChineseVoice, planUtterance, schedulePcmChunk, streamSpeakResult, voiceEngineFor, voiceEngineLabel } from './speech'
+import { BARGE_DUCK_GAIN, captionAt, duckQiLing, fallbackToSystem, pickChineseVoice, planUtterance, restoreQiLing, schedulePcmChunk, startVoiceTest, streamSpeakResult, VOICE_TEST_LINE, voiceEngineFor, voiceEngineLabel } from './speech'
 
 describe('器灵语音', () => {
   it('speaks only a settled line, and stops when hidden or muted', () => {
@@ -20,9 +20,13 @@ describe('器灵语音', () => {
     ])?.name).toBe('Microsoft Huihui')
   })
 
-  it('uses CosyVoice only when the local service is ready', () => {
-    expect(voiceEngineFor(null)).toBe('system')
-    expect(voiceEngineFor({ ready: true })).toBe('cosyvoice')
+  it('uses Edge by default and preserves explicit local and system choices', () => {
+    expect(voiceEngineFor(null)).toBe('edge')
+    expect(voiceEngineFor({ ready: true })).toBe('edge')
+    expect(voiceEngineFor(null, 'edge')).toBe('edge')
+    expect(voiceEngineFor(null, 'cosyvoice')).toBe('cosyvoice')
+    expect(voiceEngineFor({ ready: true }, 'system')).toBe('system')
+    expect(voiceEngineLabel('edge')).toBe('Edge在线语音')
     expect(voiceEngineLabel('cosyvoice')).toBe('本地神经音')
     expect(fallbackToSystem('failed')).toBe(true)
     expect(fallbackToSystem('cancelled')).toBe(false)
@@ -39,5 +43,25 @@ describe('器灵语音', () => {
     expect(second.start).toBe(first.start + 0.4)
     expect(fallbackToSystem(streamSpeakResult({ chunks: 1, error: 'failed' }))).toBe(false)
     expect(fallbackToSystem(streamSpeakResult({ chunks: 0, error: 'failed' }))).toBe(true)
+  })
+
+  it('plays a preview line and settles when no voice engine is available', async () => {
+    const playback = startVoiceTest(VOICE_TEST_LINE)
+    await expect(playback.done).resolves.toBe('unavailable')
+    expect(VOICE_TEST_LINE).toContain('试听')
+  })
+
+  it('stops a running preview without waiting for playback to end', async () => {
+    const playback = startVoiceTest(VOICE_TEST_LINE)
+    playback.stop()
+    await expect(playback.done).resolves.toBe('unavailable')
+  })
+
+  it('ducks the voice before interruption and is harmless without a player', () => {
+    expect(BARGE_DUCK_GAIN).toBeGreaterThan(0)
+    expect(BARGE_DUCK_GAIN).toBeLessThan(1)
+    // Nothing has been played yet, so there is no gain to move.
+    expect(() => duckQiLing()).not.toThrow()
+    expect(() => restoreQiLing()).not.toThrow()
   })
 })

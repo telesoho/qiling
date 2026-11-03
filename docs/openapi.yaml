@@ -6,17 +6,19 @@ info:
   description: |
     「器灵」是本机桌宠。别的程序把写好的一句经本机 HTTP 交给它，它用姿势和语音念出来；识局是第一个客户端。
 
+    本 OpenAPI 仅描述当前已实现的 HTTP 接口。双向 Spirit Protocol V1 已通过设计评审；Qiling 服务端和识局客户端分别已有本机 WebSocket 线协议测试，但真实 Tauri 桌面配对/审批和两应用互通仍待验证。本文档不代表新协议已可供客户端依赖，也不代表语音输入或 Action 已实现。
+
     服务只监听回环地址，默认 `http://127.0.0.1:8766`。启动前设置 `QILING_PORT` 可以换端口；值不是 1–65535 的整数时回落到 8766。
 
     约定：
 
-    - 无鉴权，也不要暴露到局域网；能连上端口的人都能让器灵说话。
+    - 旧 HTTP API 无客户端身份认证，也不要暴露到局域网；本机原生程序仍可直接调用。浏览器写请求要求可信 Origin，`/v1/say` 还要求 `application/json`，但 Origin 校验不是身份认证。
     - `POST /v1/say` 只是把台词交给宠物，返回 `{"ok": true}` 时还没有开始朗读。是否出声取决于宠物当前是否静音，以及本机语音服务是否就绪。
     - 新的 `/v1/say` 会接管正在读的上一句；要主动停下用 `POST /v1/cancel`。
-    - 请求体最多读 64 KiB；超过会被截断，通常得到 `bad_json`。
-    - 所有路径都接受 `OPTIONS` 预检，返回 `204` 和 CORS 头：`Access-Control-Allow-Origin: *`、`Access-Control-Allow-Methods: GET, POST, OPTIONS`、`Access-Control-Allow-Headers: Content-Type`。
-    - 未匹配的方法或路径一律 `404`，响应体为空。
-    - 请求由单个线程逐条处理，适合低频台词，不做高并发承诺。
+    - 请求体上限为 64 KiB；超限返回 `413`。
+    - 已知 API 路径接受 `OPTIONS` 预检；CORS 只允许器灵/识局本机开发 Origin、当前本机服务 Origin 与 Tauri 应用 Origin，不使用通配符。写请求也会拒绝非可信 Origin。
+    - 未知路径返回 `404`；不支持的方法通常返回 `405`。旧 `/v1/say` 和 `/v1/cancel` 的 GET 明确返回空 `404`。
+    - 请求由本机异步 HTTP/WebSocket 服务并行处理；不对高并发作额外承诺。
 
     本协议原文在 `GET /openapi.yaml`，Swagger UI 在 `GET /docs`。
 servers:
@@ -119,6 +121,12 @@ paths:
                   value:
                     ok: false
                     error: bad_text
+        '403':
+          description: Origin 不受信任
+        '413':
+          description: 请求体超过 64 KiB
+        '415':
+          description: Content-Type 不是 application/json
   /v1/cancel:
     post:
       tags: [台词]
@@ -130,6 +138,8 @@ paths:
       responses:
         '204':
           description: 已发出打断，无响应体
+        '403':
+          description: Origin 不受信任
   /openapi.yaml:
     get:
       tags: [文档]

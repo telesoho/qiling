@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "器灵",
+  "productName": "qiling",
   "version": "0.1.0",
   "identifier": "com.qiling.pet",
   "build": {
@@ -53,7 +53,18 @@
     ],
     "resources": {
       "../assets/qiling/voice-prompt-girl-child.wav": "qiling/voice-prompt-girl-child.wav",
-      "../assets/qiling/voice-prompt-girl-child.txt": "qiling/voice-prompt-girl-child.txt"
+      "../assets/qiling/voice-prompt-girl-child.txt": "qiling/voice-prompt-girl-child.txt",
+      "../scripts/voice_assistant.py": "qiling/voice_assistant.py"
+    },
+    "windows": {
+      "wix": {
+        "upgradeCode": "8532b4b5-593f-550f-b5cb-a042976dbced",
+        "language": {
+          "en-US": {
+            "localePath": "wix\\en-us.wxl"
+          }
+        }
+      }
     }
   }
 }

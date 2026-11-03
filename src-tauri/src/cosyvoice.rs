@@ -46,7 +46,7 @@ impl VoiceHost {
                     voice::ready_report(voice::READY_DETAIL)
                 }
                 _ => voice::offline_report(
-                    "本机这个端口有响应，但不是诗琚的 CosyVoice 3 儿童音色。",
+                    "本机这个端口有响应，但不是器灵的 CosyVoice 3 语音服务。",
                 ),
             },
             Err(_) => voice::offline_report(format!(
@@ -71,9 +71,13 @@ impl VoiceHost {
 
     /// Read PCM on this thread and push each chunk. Call it from `spawn_blocking`.
     ///
+    /// The count says how many audio frames were handed to the page. The page needs
+    /// it because channel messages can arrive after this call returns; without the
+    /// count it cannot tell "no local voice" from "audio still in flight".
+    ///
     /// If any chunk was already sent, a later cancel or failure returns `Ok` so the
     /// page can finish audio it has queued instead of speaking the line again.
-    pub fn synthesize(&self, text: &str, on_chunk: Channel<VoiceChunk>) -> Result<(), String> {
+    pub fn synthesize(&self, text: &str, on_chunk: Channel<VoiceChunk>) -> Result<u32, String> {
         let line = text.trim();
         if line.is_empty() {
             return Err("failed:empty".into());
@@ -110,7 +114,7 @@ impl VoiceHost {
         resp: ureq::Response,
         epoch: u64,
         on_chunk: &Channel<VoiceChunk>,
-    ) -> Result<(), String> {
+    ) -> Result<u32, String> {
         let content_type = resp
             .header("Content-Type")
             .unwrap_or("")
@@ -125,11 +129,11 @@ impl VoiceHost {
         let mut reader = resp.into_reader().take(32 * 1024 * 1024);
         let mut parser = voice::FrameParser::default();
         let mut buf = [0u8; 16 * 1024];
-        let mut sent = false;
+        let mut sent = 0u32;
         loop {
             if self.generation.load(Ordering::SeqCst) != epoch {
-                return if sent {
-                    Ok(())
+                return if sent > 0 {
+                    Ok(sent)
                 } else {
                     Err("cancelled".into())
                 };
@@ -140,12 +144,12 @@ impl VoiceHost {
                     if let Err(err) =
                         self.emit_frames(parser.push(&buf[..n]), sample_rate, on_chunk, &mut sent)
                     {
-                        return if sent { Ok(()) } else { Err(err) };
+                        return if sent > 0 { Ok(sent) } else { Err(err) };
                     }
                 }
                 Err(err) => {
-                    return if sent {
-                        Ok(())
+                    return if sent > 0 {
+                        Ok(sent)
                     } else {
                         Err(format!("unavailable:CosyVoice 服务没有响应 {err}"))
                     };
@@ -154,18 +158,18 @@ impl VoiceHost {
         }
         if let Some(frame) = parser.finish() {
             if let Err(err) = self.emit_frames(vec![frame], sample_rate, on_chunk, &mut sent) {
-                return if sent { Ok(()) } else { Err(err) };
+                return if sent > 0 { Ok(sent) } else { Err(err) };
             }
         }
         if self.generation.load(Ordering::SeqCst) != epoch {
-            return if sent {
-                Ok(())
+            return if sent > 0 {
+                Ok(sent)
             } else {
                 Err("cancelled".into())
             };
         }
-        if sent {
-            Ok(())
+        if sent > 0 {
+            Ok(sent)
         } else {
             Err("failed:CosyVoice 没有返回音频".into())
         }
@@ -176,7 +180,7 @@ impl VoiceHost {
         resp: ureq::Response,
         epoch: u64,
         on_chunk: &Channel<VoiceChunk>,
-    ) -> Result<(), String> {
+    ) -> Result<u32, String> {
         let mut bytes = Vec::new();
         resp.into_reader()
             .take(32 * 1024 * 1024)
@@ -191,7 +195,8 @@ impl VoiceHost {
         if pcm.is_empty() {
             return Err("failed:CosyVoice 没有返回音频".into());
         }
-        send_pcm(on_chunk, sample_rate, &pcm)
+        send_pcm(on_chunk, sample_rate, &pcm)?;
+        Ok(1)
     }
 
     fn emit_frames(
@@ -199,7 +204,7 @@ impl VoiceHost {
         frames: Vec<voice::StreamFrame>,
         sample_rate: u32,
         on_chunk: &Channel<VoiceChunk>,
-        sent: &mut bool,
+        sent: &mut u32,
     ) -> Result<(), String> {
         for frame in frames {
             match frame {
@@ -208,11 +213,11 @@ impl VoiceHost {
                         continue;
                     }
                     send_pcm(on_chunk, sample_rate, &pcm)?;
-                    *sent = true;
+                    *sent += 1;
                 }
                 voice::StreamFrame::End => {}
                 voice::StreamFrame::Status(text) => {
-                    if *sent {
+                    if *sent > 0 {
                         return Ok(());
                     }
                     if text.contains("cancelled") {

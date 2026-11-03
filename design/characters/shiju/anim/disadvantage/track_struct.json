@@ -1,0 +1,64 @@
+{
+  "id": "shiju-disadvantage",
+  "displayName": "诗琚·劣势",
+  "description": "仅 idle 循环：public/pet/disadvantage.webp。桌宠五态之一。",
+  "version": "0.5.0",
+  "fps": 24,
+  "frameSize": {
+    "width": 180,
+    "height": 240
+  },
+  "anchor": {
+    "x": 0.5,
+    "y": 0.12,
+    "note": "无形线抓手约在头顶"
+  },
+  "paths": {
+    "struct": "track_struct.json"
+  },
+  "phases": {
+    "idle": {
+      "label": "待机",
+      "playback": "loop",
+      "asset": {
+        "type": "animatedWebp",
+        "src": "../../../../../public/pet/disadvantage.webp",
+        "fps": 24,
+        "note": "一体化循环 WebP"
+      },
+      "note": "桌宠劣势姿势"
+    }
+  },
+  "interrupt": {},
+  "assetTypes": {
+    "animatedWebp": {
+      "required": [
+        "src"
+      ],
+      "optional": [
+        "fps",
+        "loopStart",
+        "loopEnd"
+      ],
+      "desc": "单个有动画的 WebP 文件，整段作为该相位"
+    },
+    "frameSequence": {
+      "required": [
+        "dir",
+        "from",
+        "to"
+      ],
+      "optional": [
+        "pattern",
+        "zeroPad",
+        "indexBase",
+        "ext"
+      ],
+      "desc": "目录内连续帧；pattern 默认 frame{NNN}.webp"
+    }
+  },
+  "compat": {
+    "idleWebpSize": "180x240",
+    "note": "仅 idle 相位；桌宠姿势轨"
+  }
+}

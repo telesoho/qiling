@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { QiLingPhase } from './phase'
+import { loadQiLingSettings, type VoiceEnginePreference } from './settings'
 
 export interface VoiceChoice {
   lang: string
@@ -35,12 +36,18 @@ export function planUtterance(input: {
   return { action: 'speak', line }
 }
 
-/** CosyVoice is primary only when the local service health check says it is ready. */
-export function voiceEngineFor(status: { ready?: boolean } | null | undefined): 'cosyvoice' | 'system' {
-  return status?.ready ? 'cosyvoice' : 'system'
+/** Automatic speech uses Edge first; local and system engines remain explicit choices. */
+export function voiceEngineFor(
+  _status: { ready?: boolean } | null | undefined,
+  preference: VoiceEnginePreference = 'auto',
+): 'edge' | 'cosyvoice' | 'system' {
+  if (preference === 'system') return 'system'
+  if (preference === 'cosyvoice') return 'cosyvoice'
+  return 'edge'
 }
 
-export function voiceEngineLabel(engine: 'cosyvoice' | 'system'): '本地神经音' | '系统音' {
+export function voiceEngineLabel(engine: 'edge' | 'cosyvoice' | 'system'): 'Edge在线语音' | '本地神经音' | '系统音' {
+  if (engine === 'edge') return 'Edge在线语音'
   return engine === 'cosyvoice' ? '本地神经音' : '系统音'
 }
 
@@ -66,7 +73,7 @@ export function schedulePcmChunk(cursor: number, now: number, duration: number):
 }
 
 /**
- * System voice only if nothing from CosyVoice was heard.
+ * System voice only if nothing from local synthesis was heard.
  * Audio already queued should finish; the same sentence must not be spoken twice.
  */
 export function streamSpeakResult(input: {
@@ -80,12 +87,14 @@ export function streamSpeakResult(input: {
 }
 
 export interface VoiceRoute {
-  engine: 'cosyvoice' | 'system'
+  engine: 'edge' | 'cosyvoice' | 'system'
   detail: string
+  preference: VoiceEnginePreference
+  edgeVoice: string
 }
 
-const SYSTEM_DETAIL = '本机 CosyVoice 服务没接上，先用系统语音。'
-const FALLBACK_DETAIL = '本地合成这次没成功，先改用系统语音。重启识局会再探测本机服务。'
+const SYSTEM_DETAIL = '使用 Windows 系统语音。'
+const FALLBACK_DETAIL = '语音合成这次没成功，先改用系统语音。重新启动器灵后会再尝试所选引擎。'
 
 type BoundaryEvent = { charIndex?: number; charLength?: number }
 
@@ -109,11 +118,6 @@ interface SpeechEngine {
   removeEventListener?: (type: string, listener: () => void) => void
 }
 
-interface LocalVoiceStatus {
-  ready?: boolean
-  detail?: string
-}
-
 interface PcmChunk {
   sampleRate: number
   pcmBase64: string
@@ -132,6 +136,8 @@ let captionLine = ''
 let activeLine = ''
 let captionFrame = 0
 let captionTimer = 0
+let edgeRequestSequence = 0
+let activeEdgeRequestId: string | null = null
 let audible = false
 let audibleLine = ''
 let heardLine = ''
@@ -196,6 +202,14 @@ function inTauri(): boolean {
   return typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
 }
 
+function newEdgeRequestId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  edgeRequestSequence += 1
+  return `${Date.now()}-${edgeRequestSequence}`
+}
+
 function engine(): SpeechEngine | null {
   if (typeof window === 'undefined' || !window.speechSynthesis) return null
   return window.speechSynthesis as unknown as SpeechEngine
@@ -234,13 +248,282 @@ function classifyLocalError(error: unknown): 'cancelled' | 'unavailable' | 'fail
   return 'failed'
 }
 
+export type VoiceTestEngine = 'edge' | 'cosyvoice' | 'system' | 'unavailable'
+
+export const VOICE_TEST_LINE = '你好，现在听到的是播报声音试听。'
+
+export interface VoiceTestPlayback {
+  /** `cosyvoice` / `system` say which engine was actually heard. */
+  done: Promise<VoiceTestEngine>
+  stop: () => void
+}
+
+let activeTest: { stop: () => void } | null = null
+
+/**
+ * Play one short line with the configured broadcast voice. This is a preview, not
+ * a narration: it never touches the pet's line, and it keeps its own player so the
+ * setting can be checked while the pet is quiet.
+ */
+export function startVoiceTest(text: string = VOICE_TEST_LINE): VoiceTestPlayback {
+  activeTest?.stop()
+  const line = text.trim()
+  let resolveDone: (engine: VoiceTestEngine) => void = () => {}
+  let finished = false
+  const done = new Promise<VoiceTestEngine>((resolve) => {
+    resolveDone = resolve
+  })
+  const settle = (engine: VoiceTestEngine) => {
+    if (finished) return
+    finished = true
+    resolveDone(engine)
+  }
+
+  // Create the audio context inside the click handler so the preview is allowed to sound.
+  let context: AudioContext | null = null
+  if (typeof AudioContext !== 'undefined') {
+    try {
+      context = new AudioContext()
+    } catch {
+      context = null
+    }
+  }
+  let cancelled = false
+  let edgeRequestId: string | null = null
+  let stopAudio = () => {}
+  const stop = () => {
+    if (cancelled) return
+    cancelled = true
+    stopAudio()
+    if (inTauri()) {
+      if (edgeRequestId) {
+        void cancelEdgeVoice(edgeRequestId).catch((error: unknown) => {
+          console.warn('无法取消 Edge TTS 试听', String(error))
+        })
+      }
+    }
+    const current = context
+    context = null
+    if (current) void current.close().catch(() => {})
+    try {
+      engine()?.cancel()
+    } catch {
+      // engines that throw on cancel still must not keep the button busy
+    }
+    settle('unavailable')
+  }
+  const playback: VoiceTestPlayback = { done, stop }
+  activeTest = playback
+  void done.then(() => {
+    if (activeTest === playback) activeTest = null
+  })
+
+  const finish = (engine: VoiceTestEngine) => {
+    if (!cancelled) settle(engine)
+  }
+
+  void (async () => {
+    try {
+      if (!line) {
+        settle('unavailable')
+        return
+      }
+      const route: VoiceRoute = inTauri()
+        ? await loadVoiceRoute()
+        : {
+            engine: 'system',
+            detail: SYSTEM_DETAIL,
+            preference: loadQiLingSettings().voiceEngine,
+            edgeVoice: loadQiLingSettings().edgeVoice,
+          }
+      if (cancelled) return
+
+      if (route.engine === 'edge' && context) {
+        const audio = context
+        try {
+          const { invoke } = await import('@tauri-apps/api/core')
+          edgeRequestId = newEdgeRequestId()
+          const audioBase64 = await invoke<string>('qiling_edge_voice_synthesize', {
+            requestId: edgeRequestId,
+            text: line,
+            voice: loadQiLingSettings().edgeVoice,
+          })
+          if (cancelled) return
+          const buffer = await audio.decodeAudioData(decodeBase64(audioBase64))
+          if (cancelled) return
+          const source = audio.createBufferSource()
+          source.buffer = buffer
+          source.connect(audio.destination)
+          const played = await new Promise<boolean>((resolve) => {
+            let finished = false
+            const finishEdgePreview = (didPlay: boolean) => {
+              if (finished) return
+              finished = true
+              stopAudio = () => {}
+              resolve(didPlay)
+            }
+            source.onended = () => finishEdgePreview(true)
+            stopAudio = () => {
+              source.onended = null
+              try {
+                source.stop()
+              } catch {
+                // already stopped
+              }
+              finishEdgePreview(false)
+            }
+            try {
+              source.start()
+            } catch {
+              finishEdgePreview(false)
+            }
+          })
+          if (cancelled) return
+          if (played) {
+            settle('edge')
+            return
+          }
+        } catch (error) {
+          if (cancelled) return
+          console.warn('Edge TTS 试听失败，改用系统语音', String(error))
+        }
+      }
+
+      if (route.engine === 'cosyvoice' && context) {
+        const audio = context
+        const { Channel, invoke } = await import('@tauri-apps/api/core')
+        if (cancelled) return
+        let cursor = audio.currentTime
+        let lastEnd = cursor
+        let played = false
+        let abandoned = false
+        const sources: AudioBufferSourceNode[] = []
+        stopAudio = () => {
+          for (const source of sources) {
+            try {
+              source.stop()
+            } catch {
+              // already stopped
+            }
+          }
+          sources.length = 0
+        }
+        const onChunk = new Channel<PcmChunk>()
+        onChunk.onmessage = (chunk) => {
+          if (cancelled || abandoned) return
+          let floats: Float32Array
+          try {
+            floats = pcm16ToFloat(decodeBase64(chunk.pcmBase64))
+          } catch {
+            return
+          }
+          if (floats.length === 0 || !(chunk.sampleRate > 0)) return
+          try {
+            const buffer = audio.createBuffer(1, floats.length, chunk.sampleRate)
+            buffer.getChannelData(0).set(floats)
+            const slot = schedulePcmChunk(cursor, audio.currentTime, buffer.duration)
+            cursor = slot.next
+            lastEnd = cursor
+            const source = audio.createBufferSource()
+            source.buffer = buffer
+            source.connect(audio.destination)
+            source.start(slot.start)
+            sources.push(source)
+            played = true
+          } catch {
+            // a rejected chunk must not swallow the preview
+          }
+        }
+        let frames = 0
+        try {
+          frames = await invoke<number>('qiling_voice_synthesize', { text: line, onChunk })
+        } catch {
+          // No local voice: fall back to the system voice below.
+        }
+        if (cancelled) return
+        if (frames > 0 && !played) {
+          // Channel messages can trail the command reply; wait for the first one.
+          const deadline = Date.now() + 1_000
+          while (!played && !cancelled && Date.now() < deadline) {
+            await new Promise((resolve) => window.setTimeout(resolve, 10))
+          }
+        }
+        if (cancelled) return
+        if (played) {
+          const wait = Math.max(0, (lastEnd - audio.currentTime) * 1000) + 150
+          await new Promise((resolve) => window.setTimeout(resolve, wait))
+          if (cancelled) return
+          settle('cosyvoice')
+          return
+        }
+        abandoned = true
+        context = null
+        void audio.close().catch(() => {})
+      }
+
+      if (cancelled) return
+      speakSystemTest(line, finish)
+    } catch {
+      finish('unavailable')
+    }
+  })()
+
+  return playback
+}
+
+function speakSystemTest(line: string, finish: (engine: VoiceTestEngine) => void): void {
+  const synth = engine()
+  if (!synth) {
+    finish('unavailable')
+    return
+  }
+  let utter: UtteranceLike
+  try {
+    const voices = synth.getVoices() as Array<VoiceChoice & SpeechSynthesisVoice>
+    const chosen = pickChineseVoice(voices)
+    utter = makeUtterance(line, (chosen as SpeechSynthesisVoice | undefined) ?? null)
+  } catch {
+    finish('unavailable')
+    return
+  }
+  const settleOnce = (engine: VoiceTestEngine) => {
+    clearTimeout(timer)
+    finish(engine)
+  }
+  // WebView2 occasionally drops the end event; the preview must still come back.
+  const timer = window.setTimeout(
+    () => settleOnce('system'),
+    (Array.from(line).length / SYSTEM_CHARS_PER_SEC + 5) * 1000,
+  )
+  utter.onend = () => settleOnce('system')
+  utter.onerror = () => settleOnce('unavailable')
+  try {
+    synth.resume?.()
+    synth.speak(utter)
+  } catch {
+    settleOnce('unavailable')
+  }
+}
+
+export function stopVoiceTest(): void {
+  activeTest?.stop()
+  activeTest = null
+}
+
 export function noteVoiceFallback(): void {
-  routeMemo = { engine: 'system', detail: FALLBACK_DETAIL }
+  const settings = loadQiLingSettings()
+  console.warn(FALLBACK_DETAIL)
+  routeMemo = {
+    engine: 'system',
+    detail: FALLBACK_DETAIL,
+    preference: settings.voiceEngine,
+    edgeVoice: settings.edgeVoice,
+  }
   if (typeof window === 'undefined') return
   window.dispatchEvent(new CustomEvent('qiling-voice-fallback'))
   void import('@tauri-apps/api/event')
-    .then(({ emit }) => emit('qiling-voice-route', { engine: 'system' }))
-    .catch(() => {})
+    .then(({ emit }) => emit('qiling-voice-route', { engine: 'system', detail: FALLBACK_DETAIL }))
+    .catch((error: unknown) => console.warn('无法通知语音回退状态', String(error)))
 }
 
 async function cancelCosyVoice(): Promise<void> {
@@ -253,26 +536,46 @@ async function cancelCosyVoice(): Promise<void> {
   }
 }
 
+async function cancelEdgeVoice(requestId: string | null): Promise<void> {
+  if (!inTauri() || !requestId) return
+  const { invoke } = await import('@tauri-apps/api/core')
+  await invoke('qiling_edge_voice_cancel', { requestId })
+}
+
 export async function loadVoiceRoute(): Promise<VoiceRoute> {
-  if (routeMemo) return routeMemo
+  const settings = loadQiLingSettings()
+  const { voiceEngine: preference, edgeVoice } = settings
+  if (routeMemo?.preference === preference && routeMemo.edgeVoice === edgeVoice) return routeMemo
   if (!inTauri()) {
-    routeMemo = { engine: 'system', detail: SYSTEM_DETAIL }
+    routeMemo = { engine: 'system', detail: SYSTEM_DETAIL, preference, edgeVoice }
     return routeMemo
   }
-  try {
-    const { invoke } = await import('@tauri-apps/api/core')
-    const status = await invoke<LocalVoiceStatus>('qiling_voice_status')
+  if (preference === 'system') {
+    routeMemo = { engine: 'system', detail: SYSTEM_DETAIL, preference, edgeVoice }
+    return routeMemo
+  }
+  if (preference === 'cosyvoice') {
     routeMemo = {
-      engine: voiceEngineFor(status),
-      detail: status?.detail || SYSTEM_DETAIL,
+      engine: 'cosyvoice',
+      detail: '优先使用本机 CosyVoice。',
+      preference,
+      edgeVoice,
     }
-  } catch {
-    routeMemo = { engine: 'system', detail: SYSTEM_DETAIL }
+    return routeMemo
+  }
+  routeMemo = {
+    engine: voiceEngineFor(null, preference),
+    detail: preference === 'edge'
+      ? '使用 Edge 在线语音；播报文本会发送到在线服务。'
+      : '自动优先使用 Edge 在线语音；失败时改用 Windows 系统语音。',
+    preference,
+    edgeVoice,
   }
   return routeMemo
 }
 
 function stopAudio(): void {
+  restoreQiLing()
   const stopStream = streamStop
   streamStop = null
   stopStream?.()
@@ -303,6 +606,70 @@ function decodeBase64(value: string): ArrayBuffer {
   return buffer
 }
 
+/**
+ * One AudioContext for the pet's voice. Creating and closing one per sentence
+ * restarts the Windows render device and adds a start-up gap before every line,
+ * which sounds like the pet stalling on its first word.
+ */
+let sharedAudio: AudioContext | null = null
+/**
+ * Everything the pet says runs through this gain, so a detected interruption can
+ * pull the voice down before the playback is confirmed and stopped. The system
+ * voice has no such control; it can only be stopped.
+ */
+let voiceGain: GainNode | null = null
+
+/** How far the voice drops while the user is (maybe) interrupting. */
+export const BARGE_DUCK_GAIN = 0.35
+const DUCK_RAMP_SECONDS = 0.04
+/** A hint that is never confirmed fades back instead of leaving the pet quiet. */
+const DUCK_HOLD_MS = 1_200
+let duckTimer = 0
+
+function audioContextFor(sampleRate: number): AudioContext {
+  if (!sharedAudio || sharedAudio.state === 'closed') {
+    sharedAudio = new AudioContext({ sampleRate })
+    voiceGain = null
+  }
+  if (sharedAudio.state === 'suspended') void sharedAudio.resume().catch(() => {})
+  return sharedAudio
+}
+
+function voiceDestination(context: AudioContext): AudioNode {
+  if (context !== sharedAudio) return context.destination
+  if (!voiceGain || voiceGain.context !== context) {
+    voiceGain = context.createGain()
+    voiceGain.connect(context.destination)
+  }
+  return voiceGain
+}
+
+function rampVoiceGain(level: number): void {
+  const context = sharedAudio
+  if (!context || context.state === 'closed' || !voiceGain) return
+  const now = context.currentTime
+  voiceGain.gain.cancelScheduledValues(now)
+  voiceGain.gain.setTargetAtTime(level, now, DUCK_RAMP_SECONDS)
+}
+
+/** Pull the voice down while the runtime decides whether this is a real barge-in. */
+export function duckQiLing(): void {
+  if (!voiceGain) return
+  rampVoiceGain(BARGE_DUCK_GAIN)
+  if (typeof window === 'undefined') return
+  window.clearTimeout(duckTimer)
+  duckTimer = window.setTimeout(() => restoreQiLing(), DUCK_HOLD_MS)
+}
+
+/** Full volume again: the hint was a false positive, or the line ended. */
+export function restoreQiLing(): void {
+  if (typeof window !== 'undefined') {
+    window.clearTimeout(duckTimer)
+    duckTimer = 0
+  }
+  rampVoiceGain(1)
+}
+
 function pcm16ToFloat(pcm: ArrayBuffer): Float32Array {
   const view = new DataView(pcm)
   const samples = Math.floor(pcm.byteLength / 2)
@@ -315,12 +682,15 @@ function startPcmStream(line: string, mine: number): {
   started: boolean
   push: (chunk: PcmChunk) => void
   finish: () => Promise<'played' | 'cancelled' | 'failed'>
+  /** Wait for the first channel chunk. Channel messages can trail the command reply. */
+  whenStarted: (timeoutMs: number) => Promise<boolean>
   stop: () => void
 } {
   const playback = {
     started: false,
     push(_chunk: PcmChunk) {},
     finish: (): Promise<'played' | 'cancelled' | 'failed'> => Promise.resolve('failed'),
+    whenStarted: (_timeoutMs: number) => Promise.resolve(false),
     stop() {},
   }
   if (typeof AudioContext === 'undefined') return playback
@@ -377,7 +747,7 @@ function startPcmStream(line: string, mine: number): {
     if (floats.length === 0 || !(chunk.sampleRate > 0)) return
     try {
       if (!ctx) {
-        ctx = new AudioContext({ sampleRate: chunk.sampleRate })
+        ctx = audioContextFor(chunk.sampleRate)
         cursor = ctx.currentTime
         origin = cursor
       }
@@ -388,7 +758,7 @@ function startPcmStream(line: string, mine: number): {
       scheduled = cursor - origin
       const source = ctx.createBufferSource()
       source.buffer = buffer
-      source.connect(ctx.destination)
+      source.connect(voiceDestination(ctx))
       source.start(slot.start)
       sources.push(source)
       if (!playback.started) {
@@ -418,12 +788,74 @@ function startPcmStream(line: string, mine: number): {
       }
     }
     sources.length = 0
-    const current = ctx
-    ctx = null
-    if (current) void current.close().catch(() => {})
+    // The context is shared, so it stays open for the next line.
     settle('cancelled')
   }
+  playback.whenStarted = async (timeoutMs) => {
+    const deadline = Date.now() + timeoutMs
+    while (!playback.started && !settled && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    return playback.started
+  }
   return playback
+}
+
+function playDecodedAudio(
+  line: string,
+  mine: number,
+  context: AudioContext,
+  buffer: AudioBuffer,
+): Promise<LocalSpeakResult> {
+  const source = context.createBufferSource()
+  source.buffer = buffer
+  source.connect(voiceDestination(context))
+
+  return new Promise((resolve) => {
+    let settled = false
+    const settle = (result: LocalSpeakResult) => {
+      if (settled) return
+      settled = true
+      clearCaptionClock()
+      if (streamStop === stop) streamStop = null
+      if (finishPlay === settle) finishPlay = null
+      if (mine === token && result === 'played') {
+        setCaption(line)
+        pending = false
+        setSpeaking(false)
+        finishLine(line)
+      }
+      resolve(result)
+    }
+    const stop = () => {
+      source.onended = null
+      try {
+        source.stop()
+      } catch {
+        // already stopped
+      }
+    }
+    streamStop = stop
+    finishPlay = settle
+
+    const origin = context.currentTime
+    const tick = () => {
+      captionFrame = 0
+      if (settled || mine !== token) return
+      setCaption(captionAt(line, context.currentTime - origin, buffer.duration, true))
+      captionFrame = requestAnimationFrame(tick)
+    }
+    source.onended = () => settle('played')
+    try {
+      source.start()
+      needsGap = false
+      setSpeaking(true)
+      setAudible(true)
+      captionFrame = requestAnimationFrame(tick)
+    } catch {
+      settle('failed')
+    }
+  })
 }
 
 async function tryCosyVoice(line: string, mine: number): Promise<LocalSpeakResult> {
@@ -438,22 +870,63 @@ async function tryCosyVoice(line: string, mine: number): Promise<LocalSpeakResul
     const { Channel, invoke } = await import('@tauri-apps/api/core')
     const onChunk = new Channel<PcmChunk>()
     onChunk.onmessage = (chunk) => playback.push(chunk)
-    await invoke('qiling_voice_synthesize', { text: line, onChunk })
+    const frames = await invoke<number>('qiling_voice_synthesize', { text: line, onChunk })
     if (mine !== token) return 'cancelled'
-    const outcome = streamSpeakResult({ chunks: playback.started ? 1 : 0, error: null })
+    if (frames > 0 && !playback.started) {
+      // The command reply can overtake the channel messages. Without this wait the
+      // system voice would start while the local audio is still on its way, and
+      // both would speak the same line.
+      await playback.whenStarted(1_000)
+    }
+    if (mine !== token) return 'cancelled'
     if (!playback.started) {
+      // Nothing will sound from the local engine: close it so a straggling chunk
+      // can never play under the system voice.
+      playback.stop()
       streamStop = null
-      return outcome
+      return 'failed'
     }
     return await playback.finish()
   } catch (error) {
     if (mine !== token) return 'cancelled'
     const kind = classifyLocalError(error)
     if (playback.started) return playback.finish()
+    playback.stop()
     streamStop = null
     if (kind === 'cancelled') return 'cancelled'
     noteVoiceFallback()
     return streamSpeakResult({ chunks: 0, error: kind })
+  }
+}
+
+async function tryEdgeVoice(line: string, mine: number): Promise<LocalSpeakResult> {
+  const route = await loadVoiceRoute()
+  if (mine !== token) return 'cancelled'
+  if (route.engine !== 'edge') return 'unavailable'
+  const requestId = newEdgeRequestId()
+  activeEdgeRequestId = requestId
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    const audioBase64 = await invoke<string>('qiling_edge_voice_synthesize', {
+      requestId,
+      text: line,
+      voice: loadQiLingSettings().edgeVoice,
+    })
+    if (mine !== token) return 'cancelled'
+    const context = audioContextFor(24_000)
+    const buffer = await context.decodeAudioData(decodeBase64(audioBase64))
+    if (mine !== token) return 'cancelled'
+    const result = await playDecodedAudio(line, mine, context, buffer)
+    if (result === 'failed' || result === 'unavailable') noteVoiceFallback()
+    return result
+  } catch (error) {
+    if (mine !== token) return 'cancelled'
+    const kind = classifyLocalError(error)
+    if (kind === 'cancelled') return 'cancelled'
+    noteVoiceFallback()
+    return kind
+  } finally {
+    if (activeEdgeRequestId === requestId) activeEdgeRequestId = null
   }
 }
 
@@ -560,13 +1033,21 @@ function speakSystem(line: string, mine: number): void {
 }
 
 async function runSpeak(line: string, mine: number): Promise<void> {
-  const local = await tryCosyVoice(line, mine)
+  const route = await loadVoiceRoute()
+  if (mine !== token) return
+  if (route.engine === 'system') {
+    speakSystem(line, mine)
+    return
+  }
+  const local = route.engine === 'edge'
+    ? await tryEdgeVoice(line, mine)
+    : await tryCosyVoice(line, mine)
   if (mine !== token) return
   if (!fallbackToSystem(local)) return
   speakSystem(line, mine)
 }
 
-/** Read one settled line. CosyVoice 3 when the local service is healthy, otherwise the system voice. */
+/** Read a settled line with the selected engine, falling back to system speech if needed. */
 export function speakQiLing(text: string): void {
   const line = text.trim()
   if (!line || (!inTauri() && !engine())) {
@@ -578,6 +1059,7 @@ export function speakQiLing(text: string): void {
   const mine = ++token
   pending = true
   activeLine = line
+  restoreQiLing()
   clearCaptionClock()
   setCaption('')
   setHeard('')
@@ -592,6 +1074,11 @@ export function speakQiLing(text: string): void {
       // ignore engines that throw on cancel
     }
     void cancelCosyVoice()
+    if (activeEdgeRequestId) {
+      void cancelEdgeVoice(activeEdgeRequestId).catch((error: unknown) => {
+        console.warn('无法取消 Edge TTS 播报', String(error))
+      })
+    }
   }
   void runSpeak(line, mine)
 }
@@ -615,6 +1102,11 @@ export function stopQiLing(): void {
     // ignore
   }
   void cancelCosyVoice()
+  if (activeEdgeRequestId) {
+    void cancelEdgeVoice(activeEdgeRequestId).catch((error: unknown) => {
+      console.warn('无法取消 Edge TTS 播报', String(error))
+    })
+  }
 }
 
 export function subscribeQiLingSpeaking(onChange: (speaking: boolean) => void): () => void {

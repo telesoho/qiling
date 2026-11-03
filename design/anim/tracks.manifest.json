@@ -1,0 +1,54 @@
+{
+  "version": "1.0.0",
+  "defaultTrack": "shiju-pickup-hover",
+  "tracks": [
+    {
+      "id": "shiju-pickup-hover",
+      "displayName": "诗琚·吊起悬停",
+      "path": "../characters/shiju/anim/pickup/track_struct.json",
+      "tags": ["pickup", "shiju"]
+    },
+    {
+      "id": "shiju-idle",
+      "displayName": "诗琚·待机",
+      "path": "../characters/shiju/anim/idle/track_struct.json",
+      "tags": ["idle", "shiju"]
+    },
+    {
+      "id": "shiju-butterfly",
+      "displayName": "诗琚·追蝴蝶",
+      "path": "../characters/shiju/anim/butterfly/track_struct.json",
+      "tags": ["butterfly", "shiju"]
+    },
+    {
+      "id": "shiju-angry",
+      "displayName": "诗琚·生气",
+      "path": "../characters/shiju/anim/angry/track_struct.json",
+      "tags": ["angry", "shiju"]
+    },
+    {
+      "id": "shiju-explain",
+      "displayName": "诗琚·讲解",
+      "path": "../characters/shiju/anim/explain/track_struct.json",
+      "tags": ["pose", "explain", "shiju"]
+    },
+    {
+      "id": "shiju-think",
+      "displayName": "诗琚·思考",
+      "path": "../characters/shiju/anim/think/track_struct.json",
+      "tags": ["pose", "think", "shiju"]
+    },
+    {
+      "id": "shiju-advantage",
+      "displayName": "诗琚·优势",
+      "path": "../characters/shiju/anim/advantage/track_struct.json",
+      "tags": ["pose", "advantage", "shiju"]
+    },
+    {
+      "id": "shiju-disadvantage",
+      "displayName": "诗琚·劣势",
+      "path": "../characters/shiju/anim/disadvantage/track_struct.json",
+      "tags": ["pose", "disadvantage", "shiju"]
+    }
+  ]
+}

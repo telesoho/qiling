@@ -1,14 +1,20 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod cosyvoice;
+mod edge_tts;
 mod http;
+mod local_llm;
+mod narration;
+mod spirit;
 mod voice;
+mod voice_assistant;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use tauri::utils::config::{BackgroundThrottlingPolicy, Color};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::utils::config::{BackgroundThrottlingPolicy, Color};
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, PhysicalPosition, Runtime, State,
     WebviewUrl, WebviewWindow, WebviewWindowBuilder,
@@ -17,10 +23,19 @@ use tauri::{
 const PET_FALLBACK_W: f64 = 210.0;
 const PET_FALLBACK_H: f64 = 270.0;
 const BUBBLE_GAP: f64 = 16.0;
+const TRAY_ID: &str = "qiling-tray";
 
 pub struct AppState {
     pet_placed: AtomicBool,
     voice: Arc<cosyvoice::VoiceHost>,
+    edge_voice: Arc<edge_tts::EdgeVoiceHost>,
+    voice_assistant: Arc<voice_assistant::VoiceAssistantHost>,
+    local_llm: Arc<local_llm::LocalLlm>,
+    protocol: Arc<spirit::PairingManager>,
+    /// Which voice turn owns the speakers; see `voice_assistant::TurnGate`.
+    turns: Arc<voice_assistant::TurnGate>,
+    /// The last lines other apps asked the pet to read, for "刚才讲了什么".
+    narrations: Arc<narration::NarrationLog>,
 }
 
 fn place_pet(pet: &WebviewWindow) {
@@ -63,7 +78,14 @@ fn bubble_size(width: f64, height: f64) -> (f64, f64) {
     (width.clamp(160.0, 280.0), height.clamp(72.0, 220.0))
 }
 
-fn bubble_origin(pet_x: i32, pet_y: i32, pet_w: i32, bubble_w: i32, bubble_h: i32, gap: i32) -> (i32, i32) {
+fn bubble_origin(
+    pet_x: i32,
+    pet_y: i32,
+    pet_w: i32,
+    bubble_w: i32,
+    bubble_h: i32,
+    gap: i32,
+) -> (i32, i32) {
     (pet_x + (pet_w - bubble_w) / 2, pet_y - bubble_h - gap)
 }
 
@@ -93,8 +115,13 @@ fn glue_bubble(pet: &WebviewWindow, bubble: &WebviewWindow, bubble_w: i32, bubbl
 }
 
 #[tauri::command]
-fn pet_set_open(app: AppHandle, state: State<AppState>, open: bool) -> Result<bool, String> {
+fn pet_set_open(app: AppHandle, open: bool) -> Result<bool, String> {
+    set_pet_open(&app, open)
+}
+
+fn set_pet_open(app: &AppHandle, open: bool) -> Result<bool, String> {
     let pet = app.get_webview_window("pet").ok_or("没有器灵窗口")?;
+    let state = app.state::<AppState>();
     if open {
         if !state.pet_placed.swap(true, Ordering::SeqCst) {
             place_pet(&pet);
@@ -102,10 +129,22 @@ fn pet_set_open(app: AppHandle, state: State<AppState>, open: bool) -> Result<bo
         pet.set_always_on_top(true).map_err(|err| err.to_string())?;
         pet.show().map_err(|err| err.to_string())?;
     } else {
-        hide_bubble(&app);
+        state.turns.retire();
+        state.local_llm.cancel();
+        state.voice.cancel();
+        state.edge_voice.cancel_all()?;
+        let stopped = state.voice_assistant.stop();
+        let _ = app.emit("qiling-interrupt", ());
+        let _ = app.emit(
+            "voice-assistant-event",
+            serde_json::json!({ "type": "state", "state": "stopped" }),
+        );
+        hide_bubble(app);
         pet.hide().map_err(|err| err.to_string())?;
+        stopped?;
     }
     let _ = app.emit("pet-visibility", open);
+    refresh_tray(app);
     Ok(open)
 }
 
@@ -148,26 +187,27 @@ fn create_bubble<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
     let Some(pet) = app.get_webview_window("pet") else {
         return Ok(());
     };
-    let mut builder = WebviewWindowBuilder::new(app, "bubble", WebviewUrl::App("index.html".into()))
-        .title("器灵")
-        .inner_size(210.0, 120.0)
-        .resizable(false)
-        .maximizable(false)
-        .minimizable(false)
-        .closable(false)
-        .focused(false)
-        .focusable(true)
-        .transparent(true)
-        .decorations(false)
-        .always_on_top(true)
-        .visible_on_all_workspaces(true)
-        .skip_taskbar(true)
-        .shadow(false)
-        .visible(false)
-        .no_redirection_bitmap(true)
-        .zoom_hotkeys_enabled(false)
-        .background_color(Color(0, 0, 0, 0))
-        .background_throttling(BackgroundThrottlingPolicy::Disabled);
+    let mut builder =
+        WebviewWindowBuilder::new(app, "bubble", WebviewUrl::App("index.html".into()))
+            .title("器灵")
+            .inner_size(210.0, 120.0)
+            .resizable(false)
+            .maximizable(false)
+            .minimizable(false)
+            .closable(false)
+            .focused(false)
+            .focusable(true)
+            .transparent(true)
+            .decorations(false)
+            .always_on_top(true)
+            .visible_on_all_workspaces(true)
+            .skip_taskbar(true)
+            .shadow(false)
+            .visible(false)
+            .no_redirection_bitmap(true)
+            .zoom_hotkeys_enabled(false)
+            .background_color(Color(0, 0, 0, 0))
+            .background_throttling(BackgroundThrottlingPolicy::Disabled);
     #[cfg(windows)]
     {
         builder = builder.owner(&pet)?;
@@ -186,11 +226,36 @@ fn qiling_voice_status(state: State<AppState>) -> voice::VoiceReport {
 }
 
 #[tauri::command]
+async fn qiling_edge_voice_list(
+    state: State<'_, AppState>,
+) -> Result<Vec<edge_tts::VoiceOption>, String> {
+    state.edge_voice.list_voices().await
+}
+
+#[tauri::command]
+async fn qiling_edge_voice_synthesize(
+    state: State<'_, AppState>,
+    request_id: String,
+    text: String,
+    voice: String,
+) -> Result<String, String> {
+    state
+        .edge_voice
+        .synthesize(&request_id, &text, &voice)
+        .await
+}
+
+#[tauri::command]
+fn qiling_edge_voice_cancel(state: State<AppState>, request_id: String) -> Result<(), String> {
+    state.edge_voice.cancel(&request_id)
+}
+
+#[tauri::command]
 async fn qiling_voice_synthesize(
     state: State<'_, AppState>,
     text: String,
     on_chunk: tauri::ipc::Channel<cosyvoice::VoiceChunk>,
-) -> Result<(), String> {
+) -> Result<u32, String> {
     let voice = Arc::clone(&state.voice);
     tauri::async_runtime::spawn_blocking(move || voice.synthesize(&text, on_chunk))
         .await
@@ -202,6 +267,354 @@ fn qiling_voice_cancel(state: State<AppState>) {
     state.voice.cancel();
 }
 
+#[tauri::command]
+fn qiling_llm_get_settings(state: State<AppState>) -> Result<local_llm::LlmSettingsView, String> {
+    state.local_llm.settings()
+}
+
+#[tauri::command]
+fn qiling_llm_save_settings(
+    state: State<AppState>,
+    provider: local_llm::LlmProvider,
+    base_url: String,
+    model: String,
+    api_key: String,
+    clear_api_key: bool,
+) -> Result<local_llm::LlmSettingsView, String> {
+    state.local_llm.save_settings(
+        local_llm::LlmSettings {
+            provider,
+            base_url,
+            model,
+        },
+        &api_key,
+        clear_api_key,
+    )
+}
+
+#[tauri::command]
+async fn qiling_llm_test_connection(state: State<'_, AppState>) -> Result<(), String> {
+    let llm = Arc::clone(&state.local_llm);
+    tauri::async_runtime::spawn_blocking(move || llm.test_connection())
+        .await
+        .map_err(|error| format!("llm_test_failed:{error}"))?
+}
+
+#[tauri::command]
+async fn qiling_llm_list_models(
+    state: State<'_, AppState>,
+    base_url: String,
+) -> Result<Vec<String>, String> {
+    let llm = Arc::clone(&state.local_llm);
+    tauri::async_runtime::spawn_blocking(move || llm.list_ollama_models(&base_url))
+        .await
+        .map_err(|error| format!("llm_models_failed:{error}"))?
+}
+
+#[tauri::command]
+fn qiling_voice_assistant_start(
+    app: AppHandle,
+    state: State<AppState>,
+    wake_word: String,
+) -> Result<(), String> {
+    match state.voice_assistant.start(app.clone(), &wake_word) {
+        Ok(()) => Ok(()),
+        Err(code) => {
+            let _ = app.emit(
+                "voice-assistant-event",
+                serde_json::json!({ "type": "error", "code": code }),
+            );
+            Err(code)
+        }
+    }
+}
+
+#[tauri::command]
+fn qiling_voice_assistant_status(state: State<AppState>) -> Result<String, String> {
+    state.voice_assistant.current_state()
+}
+
+#[tauri::command]
+fn qiling_voice_assistant_cancel(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    state.turns.retire();
+    state.local_llm.cancel();
+    state.voice.cancel();
+    app.emit("qiling-interrupt", ())
+        .map_err(|error| format!("voice_interrupt_failed:{error}"))?;
+    state.voice_assistant.cancel()
+}
+
+/// The runtime decided the user took the floor back. Cancel the model answer,
+/// both synthesis paths and the audio still queued, in one step, and tell the
+/// page to stop playing. The runtime's own recognition is left alone: it is
+/// still listening to the rest of the interruption.
+#[tauri::command]
+fn qiling_voice_barge_in(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    state.turns.retire();
+    state.local_llm.cancel();
+    state.voice.cancel();
+    state.edge_voice.cancel_all()?;
+    app.emit("qiling-interrupt", ())
+        .map_err(|error| format!("voice_interrupt_failed:{error}"))
+}
+
+#[tauri::command]
+fn qiling_voice_assistant_listen(state: State<AppState>) -> Result<(), String> {
+    state.voice_assistant.listen()
+}
+
+#[tauri::command]
+fn qiling_voice_assistant_speaking(state: State<AppState>, text: String) -> Result<(), String> {
+    if text.trim().is_empty() || text.chars().count() > 2_000 {
+        return Err("invalid_voice_prompt".into());
+    }
+    state.voice_assistant.speaking(&text)
+}
+
+#[tauri::command]
+fn qiling_voice_assistant_spoken(state: State<AppState>) -> Result<(), String> {
+    state.voice_assistant.spoken()
+}
+
+#[tauri::command]
+fn qiling_voice_assistant_stop(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    state.turns.retire();
+    state.local_llm.cancel();
+    state.voice.cancel();
+    app.emit("qiling-interrupt", ())
+        .map_err(|error| format!("voice_interrupt_failed:{error}"))?;
+    state.voice_assistant.stop()?;
+    app.emit(
+        "voice-assistant-event",
+        serde_json::json!({ "type": "state", "state": "stopped" }),
+    )
+    .map_err(|error| format!("voice_status_feedback_failed:{error}"))
+}
+
+#[tauri::command]
+async fn qiling_voice_assistant_respond(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    text: String,
+) -> Result<(), String> {
+    if !state.voice_assistant.is_running()? {
+        return Err("voice_assistant_unavailable".into());
+    }
+    let transcript = text.trim().to_string();
+    if transcript.is_empty() || transcript.chars().count() > 2_000 {
+        return Err("invalid_voice_prompt".into());
+    }
+    // A new question owns the speakers from here on. Anything the previous turn
+    // is still generating is retired before this question reaches the model.
+    let turn = state.turns.begin();
+    let turns = Arc::clone(&state.turns);
+    app.emit(
+        "qiling-line",
+        serde_json::json!({ "phase": "thinking", "text": "", "mood": "neutral" }),
+    )
+    .map_err(|error| format!("voice_feedback_failed:{error}"))?;
+    // Synthesis that was already streaming belongs to the cancelled turn.
+    state.voice.cancel();
+    state.edge_voice.cancel_all()?;
+    // "刚才讲了什么" style questions get the recent narrated lines, and only
+    // those questions: an ordinary question never carries them.
+    let context = state.narrations.context_for(&transcript);
+    let llm = Arc::clone(&state.local_llm);
+    let response = tauri::async_runtime::spawn_blocking(move || {
+        // Replaces the answer that was still running instead of failing `busy`.
+        llm.begin_turn()?;
+        llm.respond_in_context(&transcript, context.as_deref())
+    })
+    .await
+    .map_err(|_| "local_llm_failed".to_string())?;
+    if !turns.is_current(turn) {
+        // A barge-in or a newer question retired this turn while the model was
+        // thinking; publishing the answer now would revive the interrupted line.
+        return Ok(());
+    }
+    match response {
+        Ok(text) => app
+            .emit(
+                "qiling-line",
+                serde_json::json!({ "phase": "say", "text": text, "mood": "neutral" }),
+            )
+            .map_err(|error| format!("voice_feedback_failed:{error}")),
+        Err(code) => {
+            let message = match code.as_str() {
+                "cancelled" => "已取消本轮语音对话。",
+                "model_unavailable" => "所选语言模型不存在，请检查服务商和模型名称。",
+                "invalid_voice_prompt" => "识别到的语音内容为空或过长，请重新说一次。",
+                "response_too_large" => "模型回答太长，请缩短问题后重试。",
+                "busy" => "器灵正在回答上一条语音，请稍后再试。",
+                "llm_api_key_missing" => "尚未配置所选云端模型的 API 密钥，请先到设定页保存密钥。",
+                "llm_auth_failed" => "语言模型 API 密钥无效或已失效，请检查设定。",
+                "llm_timeout" => "等待语言模型响应超时，请检查网络和模型服务后重试。",
+                "credential_store_unavailable" => {
+                    "无法访问 Windows 凭据管理器，请检查系统凭据服务。"
+                }
+                _ => "语言模型服务暂时不可用，请检查设定和服务状态。",
+            };
+            let _ = app.emit(
+                "qiling-line",
+                serde_json::json!({ "phase": "say", "text": message, "mood": "down" }),
+            );
+            Err(code)
+        }
+    }
+}
+
+#[tauri::command]
+async fn spirit_invoke_vscode_explain_selection(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    // The narration owns the speakers until it is interrupted. A barge-in, a new
+    // question or another narration retires this turn, so a client answer that
+    // arrives after the user cut the line off is dropped instead of resuming.
+    let turn = state.turns.begin();
+    let turns = Arc::clone(&state.turns);
+    app.emit(
+        "qiling-line",
+        serde_json::json!({ "phase": "thinking", "text": "", "mood": "neutral" }),
+    )
+    .map_err(|error| format!("narration_feedback_unavailable:{error}"))?;
+    let outcome = state
+        .protocol
+        .invoke_action(
+            "com.qiling.vscode",
+            "vscode.explain_selection",
+            spirit::DEFAULT_ACTION_TIMEOUT,
+        )
+        .await;
+    // Remembered even when the user cut the line off: the part that was heard is
+    // exactly what a follow-up question may refer to.
+    if let Ok(result) = &outcome {
+        state.narrations.record("com.qiling.vscode", &result.text);
+    }
+    if !turns.is_current(turn) {
+        return Ok(());
+    }
+    match outcome {
+        Ok(result) => app
+            .emit(
+                "qiling-line",
+                serde_json::json!({
+                    "phase": "say",
+                    "text": result.text,
+                    "mood": result.mood
+                }),
+            )
+            .map_err(|error| format!("narration_display_failed:{error}")),
+        Err(code) => {
+            let message = match code.as_str() {
+                "client_unavailable" => "VS Code 当前未连接，暂时无法解释选区。",
+                "action_not_found" | "not_authorized" => "VS Code 尚未获准提供选区解释能力。",
+                "busy" => "VS Code 正在处理另一条解释请求，请稍后再试。",
+                "selection_unavailable" => "VS Code 当前没有可解释的选区。",
+                "selection_too_large" => "当前选区太长，请缩小选区后再试。",
+                "model_unavailable" => "VS Code 当前没有可用且已授权的语言模型。",
+                "cancelled" => "已取消本次选区解释。",
+                "deadline_exceeded" => "解释选区超时，请稍后重试。",
+                _ => "解释选区失败，请检查 VS Code 状态后重试。",
+            };
+            let _ = app.emit(
+                "qiling-line",
+                serde_json::json!({ "phase": "say", "text": message, "mood": "down" }),
+            );
+            Err(code)
+        }
+    }
+}
+
+#[tauri::command]
+fn spirit_start_pairing(state: State<AppState>) -> Result<spirit::PairingCode, String> {
+    state.protocol.begin_pairing()
+}
+
+#[tauri::command]
+fn spirit_pending_pairings(
+    state: State<AppState>,
+) -> Result<Vec<spirit::PairingRequestView>, String> {
+    state.protocol.pending_pairings()
+}
+
+#[tauri::command]
+fn spirit_approve_pairing(state: State<AppState>, request_id: String) -> Result<(), String> {
+    state.protocol.approve_pairing(&request_id)
+}
+
+#[tauri::command]
+fn spirit_reject_pairing(state: State<AppState>, request_id: String) -> Result<(), String> {
+    state.protocol.reject_pairing(&request_id)
+}
+
+#[tauri::command]
+fn spirit_list_clients(
+    state: State<AppState>,
+) -> Result<Vec<spirit::AuthorizedClientView>, String> {
+    state.protocol.list_clients()
+}
+
+#[tauri::command]
+fn spirit_revoke_client(state: State<AppState>, client_key: String) -> Result<(), String> {
+    state.protocol.revoke_client(&client_key)
+}
+
+#[tauri::command]
+async fn spirit_invoke_narrate_current(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    // Same ownership rule as the VS Code narration: an interrupted request must
+    // not speak its answer later.
+    let turn = state.turns.begin();
+    let turns = Arc::clone(&state.turns);
+    app.emit(
+        "qiling-line",
+        serde_json::json!({ "phase": "thinking", "text": "", "mood": "neutral" }),
+    )
+    .map_err(|error| format!("narration_feedback_unavailable:{error}"))?;
+    let outcome = state
+        .protocol
+        .invoke_narrate_current("com.siju.app", spirit::DEFAULT_ACTION_TIMEOUT)
+        .await;
+    if let Ok(result) = &outcome {
+        state.narrations.record("com.siju.app", &result.text);
+    }
+    if !turns.is_current(turn) {
+        return Ok(());
+    }
+    match outcome {
+        Ok(result) => app
+            .emit(
+                "qiling-line",
+                serde_json::json!({
+                    "phase": "say",
+                    "text": result.text,
+                    "mood": result.mood
+                }),
+            )
+            .map_err(|error| format!("narration_display_failed:{error}")),
+        Err(code) => {
+            let message = match code.as_str() {
+                "client_unavailable" => "识局当前未连接，暂时无法重新解说。",
+                "not_authorized" => "识局尚未获准提供重新解说能力。",
+                "busy" => "识局正在处理另一条解说请求，请稍后再试。",
+                "state_unavailable" => "识局当前没有可用的局面分析。",
+                "state_stale" => "局面已经变化，请等待识局更新分析后再试。",
+                "summarizer_unavailable" => "识局当前的解说服务不可用，请检查解说设置。",
+                "deadline_exceeded" => "重新解说超时，请确认识局状态后再试。",
+                _ => "重新解说失败，请检查识局状态后重试。",
+            };
+            let _ = app.emit(
+                "qiling-line",
+                serde_json::json!({ "phase": "say", "text": message, "mood": "down" }),
+            );
+            Err(code)
+        }
+    }
+}
+
 fn open_settings(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("settings") {
         let _ = window.unminimize();
@@ -211,7 +624,7 @@ fn open_settings(app: &AppHandle) -> Result<(), String> {
     }
     WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
         .title("设定")
-        .inner_size(320.0, 220.0)
+        .inner_size(460.0, 580.0)
         .resizable(false)
         .maximizable(false)
         .minimizable(true)
@@ -235,18 +648,123 @@ fn pet_menu(app: AppHandle) -> Result<(), String> {
     let quit = MenuItem::with_id(&app, "quit", "退出", true, None::<&str>)
         .map_err(|err| err.to_string())?;
     let separator = PredefinedMenuItem::separator(&app).map_err(|err| err.to_string())?;
-    let menu = Menu::with_items(&app, &[&settings, &separator, &quit])
-        .map_err(|err| err.to_string())?;
+    let menu =
+        Menu::with_items(&app, &[&settings, &separator, &quit]).map_err(|err| err.to_string())?;
     let pet = app.get_webview_window("pet").ok_or("没有器灵窗口")?;
     pet.popup_menu(&menu).map_err(|err| err.to_string())
+}
+
+fn pet_is_visible(app: &AppHandle) -> bool {
+    app.get_webview_window("pet")
+        .and_then(|pet| pet.is_visible().ok())
+        .unwrap_or(false)
+}
+
+fn tray_menu(app: &AppHandle, visible: bool) -> tauri::Result<Menu<tauri::Wry>> {
+    let toggle = MenuItem::with_id(
+        app,
+        "tray-toggle",
+        if visible { "隐藏器灵" } else { "显示器灵" },
+        true,
+        None::<&str>,
+    )?;
+    let settings = MenuItem::with_id(app, "tray-settings", "设定…", true, None::<&str>)?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let quit = MenuItem::with_id(app, "tray-quit", "退出器灵", true, None::<&str>)?;
+    Menu::with_items(app, &[&toggle, &settings, &separator, &quit])
+}
+
+/// Keep the tray menu label and tooltip in step with the pet window.
+fn refresh_tray(app: &AppHandle) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+    let visible = pet_is_visible(app);
+    if let Ok(menu) = tray_menu(app, visible) {
+        let _ = tray.set_menu(Some(menu));
+    }
+    let _ = tray.set_tooltip(Some(if visible {
+        "器灵"
+    } else {
+        "器灵（已隐藏）"
+    }));
+}
+
+fn toggle_pet_from_tray(app: &AppHandle) {
+    let open = !pet_is_visible(app);
+    let _ = set_pet_open(app, open);
+}
+
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    let menu = tray_menu(app, pet_is_visible(app))?;
+    let icon = match app.default_window_icon() {
+        Some(icon) => icon.clone(),
+        None => tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))?,
+    };
+    TrayIconBuilder::with_id(TRAY_ID)
+        .icon(icon)
+        .tooltip("器灵")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "tray-toggle" => toggle_pet_from_tray(app),
+            "tray-settings" => {
+                let _ = open_settings(app);
+            }
+            "tray-quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                toggle_pet_from_tray(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(())
 }
 
 fn main() {
     let app = tauri::Builder::default()
         .setup(|app| {
+            let protocol_dir = app.path().app_config_dir()?.join("spirit-clients");
+            let llm_settings_path = app.path().app_config_dir()?.join("llm-settings.json");
+            let voice_data_dir = app.path().app_data_dir()?;
+            let bundled_voice_script = app
+                .path()
+                .resource_dir()?
+                .join("qiling")
+                .join("voice_assistant.py");
+            let voice_script = if bundled_voice_script.is_file() {
+                bundled_voice_script
+            } else {
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../scripts/voice_assistant.py")
+            };
+            let protocol = Arc::new(
+                spirit::PairingManager::load(protocol_dir)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?,
+            );
+            let narrations = Arc::new(narration::NarrationLog::default());
             app.manage(AppState {
                 pet_placed: AtomicBool::new(true),
                 voice: Arc::new(cosyvoice::VoiceHost::new()),
+                edge_voice: Arc::new(edge_tts::EdgeVoiceHost::new()),
+                voice_assistant: Arc::new(voice_assistant::VoiceAssistantHost::new(
+                    voice_script,
+                    voice_data_dir,
+                )),
+                local_llm: Arc::new(
+                    local_llm::LocalLlm::new(llm_settings_path)
+                        .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?,
+                ),
+                protocol: protocol.clone(),
+                turns: Arc::new(voice_assistant::TurnGate::default()),
+                narrations: Arc::clone(&narrations),
             });
             if let Some(pet) = app.get_webview_window("pet") {
                 place_pet(&pet);
@@ -254,16 +772,21 @@ fn main() {
                 let _ = pet.show();
             }
             create_bubble(app)?;
+            build_tray(app.handle())?;
             let handle = app.handle().clone();
-            std::thread::spawn(move || http::serve(handle));
+            std::thread::spawn(move || http::serve(handle, protocol, narrations));
             Ok(())
         })
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::CloseRequested { api, .. } if window.label() == "bubble" => {
                 api.prevent_close();
             }
-            tauri::WindowEvent::CloseRequested { .. } if window.label() == "pet" => {
-                hide_bubble(window.app_handle());
+            tauri::WindowEvent::CloseRequested { api, .. } if window.label() == "pet" => {
+                // The tray keeps the pet reachable; closing hides it instead of
+                // shutting the app down with no way back.
+                api.prevent_close();
+                let app = window.app_handle().clone();
+                let _ = set_pet_open(&app, false);
             }
             tauri::WindowEvent::Moved(_) if window.label() == "pet" => {
                 let app = window.app_handle();
@@ -296,6 +819,30 @@ fn main() {
             qiling_voice_status,
             qiling_voice_synthesize,
             qiling_voice_cancel,
+            qiling_edge_voice_list,
+            qiling_edge_voice_synthesize,
+            qiling_edge_voice_cancel,
+            qiling_voice_assistant_start,
+            qiling_llm_get_settings,
+            qiling_llm_save_settings,
+            qiling_llm_test_connection,
+            qiling_llm_list_models,
+            qiling_voice_assistant_status,
+            qiling_voice_assistant_cancel,
+            qiling_voice_barge_in,
+            qiling_voice_assistant_listen,
+            qiling_voice_assistant_speaking,
+            qiling_voice_assistant_spoken,
+            qiling_voice_assistant_stop,
+            qiling_voice_assistant_respond,
+            spirit_start_pairing,
+            spirit_pending_pairings,
+            spirit_approve_pairing,
+            spirit_reject_pairing,
+            spirit_list_clients,
+            spirit_revoke_client,
+            spirit_invoke_narrate_current,
+            spirit_invoke_vscode_explain_selection,
             bubble_present,
             pet_menu
         ])
@@ -305,6 +852,8 @@ fn main() {
         if let tauri::RunEvent::Exit = event {
             if let Some(state) = app_handle.try_state::<AppState>() {
                 state.voice.shutdown();
+                state.voice_assistant.shutdown();
+                state.local_llm.cancel();
             }
         }
     });

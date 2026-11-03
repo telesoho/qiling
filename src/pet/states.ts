@@ -1,9 +1,9 @@
 export const PET_STATES = [
-  { id: 'idle', label: '待机', bubble: '待命', line: '在旁边看着', file: 'idle.webp' },
-  { id: 'explain', label: '讲解', bubble: '讲解中', line: '这一步这样看', file: 'explain.webp' },
-  { id: 'think', label: '思考', bubble: '思考中', line: '让我想想', file: 'think.webp' },
-  { id: 'advantage', label: '优势', bubble: '占优', line: '这步不错', file: 'advantage.webp' },
-  { id: 'disadvantage', label: '劣势', bubble: '当心', line: '这里要小心', file: 'disadvantage.webp' },
+  { id: 'idle', label: '待机', bubble: '待命', line: '在旁边看着', file: 'idle.webp', track: 'idle' },
+  { id: 'explain', label: '讲解', bubble: '讲解中', line: '这一步这样看', file: 'explain.webp', track: 'explain' },
+  { id: 'think', label: '思考', bubble: '思考中', line: '让我想想', file: 'think.webp', track: 'think' },
+  { id: 'advantage', label: '优势', bubble: '占优', line: '这步不错', file: 'advantage.webp', track: 'advantage' },
+  { id: 'disadvantage', label: '劣势', bubble: '当心', line: '这里要小心', file: 'disadvantage.webp', track: 'disadvantage' },
 ] as const
 
 export type PetStateId = (typeof PET_STATES)[number]['id']
@@ -25,11 +25,11 @@ export function isPetStateId(value: string): value is PetStateId {
   return PET_STATES.some((state) => state.id === value)
 }
 
-/** Idle extras. `ms` is that webp's loop length. */
+/** Idle extras. `ms` is a fallback loop length; runtime prefers the track's baked `durationMs`. */
 export const IDLE_BEATS = {
-  breath: { file: 'idle.webp', line: '在旁边看着', ms: 3000 },
-  butterfly: { file: 'butterfly.webp', line: '有只蝴蝶', ms: 6125 },
-  angry: { file: 'angry.webp', line: '哼', ms: 6125 },
+  breath: { file: 'idle.webp', line: '在旁边看着', ms: 3000, track: 'idle' },
+  butterfly: { file: 'butterfly.webp', line: '有只蝴蝶', ms: 6125, track: 'butterfly' },
+  angry: { file: 'angry.webp', line: '哼', ms: 6125, track: 'angry' },
 } as const
 
 export type IdleBeat = keyof typeof IDLE_BEATS

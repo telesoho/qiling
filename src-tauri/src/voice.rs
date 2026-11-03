@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 pub const ENGINE_ID: &str = "cosyvoice3-0.5b";
 pub const CHILD_VOICE: &str = "child-girl-zero-shot";
 pub const DEFAULT_SERVICE_URL: &str = "http://127.0.0.1:8765";
-pub const READY_DETAIL: &str = "CosyVoice 3 0.5B 本机零样本，儿童女孩参考音";
+pub const READY_DETAIL: &str = "CosyVoice 3 0.5B 本机零样本多角色语音";
 /// CosyVoice3 requires this control prefix. It does not choose the speaker.
 #[cfg(test)]
 pub const PROMPT_PREFIX: &str = "You are a helpful assistant.<|endofprompt|>";
@@ -94,13 +94,26 @@ pub fn configured_service_url() -> Result<String, String> {
 }
 
 /// Health is the only readiness signal. A process that merely has weights on disk is not ready.
+///
+/// An older service reports only `voice`, always the builtin child voice. A
+/// multi-voice service reports `voice` as the current default plus
+/// `defaultVoice`; the two must agree. Any registered preset may be the default.
 pub fn health_ready(body: &str) -> bool {
     let Ok(value) = serde_json::from_str::<Value>(body) else {
         return false;
     };
-    value.get("ok").and_then(Value::as_bool) == Some(true)
-        && value.get("engine").and_then(Value::as_str) == Some(ENGINE_ID)
-        && value.get("voice").and_then(Value::as_str) == Some(CHILD_VOICE)
+    if value.get("ok").and_then(Value::as_bool) != Some(true)
+        || value.get("engine").and_then(Value::as_str) != Some(ENGINE_ID)
+    {
+        return false;
+    }
+    let voice = value.get("voice").and_then(Value::as_str);
+    let default_voice = value.get("defaultVoice").and_then(Value::as_str);
+    match (voice, default_voice) {
+        (Some(voice), Some(default)) => voice == default,
+        (Some(voice), None) => voice == CHILD_VOICE,
+        _ => false,
+    }
 }
 
 /// Body sent to the local service. The reference clip is not included.
@@ -458,6 +471,19 @@ mod tests {
     fn health_and_speech_body_do_not_carry_a_reference_clip() {
         let ready = r#"{"ok":true,"engine":"cosyvoice3-0.5b","model":"Fun-CosyVoice3-0.5B-2512","voice":"child-girl-zero-shot","sampleRate":24000}"#;
         assert!(health_ready(ready));
+        // A multi-voice service reports the current default in both fields;
+        // any registered preset may be that default.
+        let ready_multi = r#"{"ok":true,"engine":"cosyvoice3-0.5b","model":"Fun-CosyVoice3-0.5B-2512","voice":"pet-a","defaultVoice":"pet-a","voiceCount":3,"sampleRate":24000}"#;
+        assert!(health_ready(ready_multi));
+        assert!(!health_ready(
+            r#"{"ok":true,"engine":"cosyvoice3-0.5b","voice":"pet-a","defaultVoice":"child-girl-zero-shot"}"#
+        ));
+        assert!(!health_ready(
+            r#"{"ok":true,"engine":"cosyvoice3-0.5b","voice":"child-girl-zero-shot","defaultVoice":"pet-a"}"#
+        ));
+        assert!(!health_ready(
+            r#"{"ok":true,"engine":"cosyvoice3-0.5b","defaultVoice":"pet-a"}"#
+        ));
         assert!(!health_ready(
             r#"{"ok":false,"engine":"cosyvoice3-0.5b","voice":"child-girl-zero-shot"}"#
         ));

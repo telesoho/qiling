@@ -1,0 +1,112 @@
+{
+  "petManifestVersion": 2,
+  "id": "shiju-pickup",
+  "displayName": "诗琚·吊起",
+  "description": "诗琚红唐装圆扇：按下吊起 → 拖动悬空 → 松开落下。绿幕预烘焙透明 PNG 序列。",
+  "version": "0.1.0",
+  "renderer": "frames2d",
+  "fps": 24,
+  "frameSize": {
+    "width": 720,
+    "height": 720
+  },
+  "source": {
+    "video": "诗琚-无形线吊起晃动-绿幕.mp4",
+    "chromaKey": "#00FF00",
+    "totalFrames": 193
+  },
+  "frames2d": {
+    "dir": "tracks",
+    "defaultFrameMs": 42,
+    "tracks": {
+      "idle": {
+        "loop": true
+      },
+      "lift": {
+        "loop": false,
+        "holdAtEnd": true,
+        "fallback": "hover"
+      },
+      "hover": {
+        "loop": true
+      },
+      "drop": {
+        "loop": false,
+        "holdAtEnd": true,
+        "fallback": "idle"
+      }
+    },
+    "phases": {
+      "idle": "idle",
+      "lift": "lift",
+      "hover": "hover",
+      "drop": "drop"
+    }
+  },
+  "interaction": {
+    "dragState": "hover",
+    "phases": [
+      {
+        "id": "lift",
+        "label": "吊起",
+        "track": "lift",
+        "frames": {
+          "from": 37,
+          "to": 72
+        },
+        "time": {
+          "from": 1.5,
+          "to": 3.0
+        },
+        "trigger": "pointerdown",
+        "playback": "once",
+        "holdAtEnd": true
+      },
+      {
+        "id": "hover",
+        "label": "悬空",
+        "track": "hover",
+        "frames": {
+          "from": 73,
+          "to": 132
+        },
+        "time": {
+          "from": 3.0,
+          "to": 5.5
+        },
+        "trigger": "pointermove",
+        "playback": "loop",
+        "while": "pointerdown",
+        "followPointer": true
+      },
+      {
+        "id": "drop",
+        "label": "落下",
+        "track": "drop",
+        "frames": {
+          "from": 133,
+          "to": 193
+        },
+        "time": {
+          "from": 5.5,
+          "to": 8.0
+        },
+        "trigger": "pointerup",
+        "playback": "once",
+        "holdAtEnd": true
+      }
+    ],
+    "idle": {
+      "track": "idle",
+      "frames": {
+        "from": 1,
+        "to": 36
+      },
+      "time": {
+        "from": 0.0,
+        "to": 1.5
+      },
+      "playback": "loop"
+    }
+  }
+}
