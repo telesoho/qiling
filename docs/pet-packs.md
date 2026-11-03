@@ -1,4 +1,4 @@
-﻿# 角色资源包：制作与安装
+# 角色资源包：制作与安装
 
 > 面向角色作者。器灵通过角色资源包安装、注册并切换多个桌面角色；本文件规定包格式、动画轨要求和校验规则。
 > 动画命名与状态约定以《[多角色动画资产规范](multi-character-animation-spec.md)》为准；本文件只描述**运行时安装态**的资源包。
@@ -36,7 +36,7 @@
 | `action: "advantage"` | `id: "<packId>-advantage"`，`tags: ["pose", "advantage", "<packId>"]` |
 | `action: "disadvantage"` | `id: "<packId>-disadvantage"`，`tags: ["pose", "disadvantage", "<packId>"]` |
 | `action: "pickup"` | `id: "<packId>-pickup"`，`tags: ["pickup", "<packId>"]` |
-| 其他动作（如 `splash`） | `id: "<packId>-<action>"`，`tags: ["<action>", "<packId>"]` |
+| 其他动作（如 `water_splash`） | `id: "<packId>-<action>"`，`tags: ["<action>", "<packId>"]` |
 
 因此：
 
@@ -97,7 +97,7 @@ dafeiyu.qilingpet (ZIP)
   "description": "Q 版鲸尾女孩",
   "thumbnail": "thumbnail.webp",
   "pickup": "animated",
-  "idleBeats": [{ "action": "splash", "line": "扑通", "ms": 4000 }],
+  "idleBeats": [{ "action": "water_splash", "line": "扑通", "ms": 4000 }],
   "tracks": [
     { "action": "idle", "displayName": "大肥鱼·待机" },
     { "action": "think", "displayName": "大肥鱼·思考" },
@@ -105,7 +105,7 @@ dafeiyu.qilingpet (ZIP)
     { "action": "advantage", "displayName": "大肥鱼·优势" },
     { "action": "disadvantage", "displayName": "大肥鱼·劣势" },
     { "action": "pickup", "displayName": "大肥鱼·吊起" },
-    { "action": "splash", "displayName": "大肥鱼·水花" }
+    { "action": "water_splash", "displayName": "大肥鱼·水花" }
   ]
 }
 ```
@@ -127,7 +127,7 @@ dafeiyu.qilingpet (ZIP)
 
 ### 4.2 `tracks[]` 与必做动作
 
-- `action`：`^[a-z][a-z0-9]{0,23}$`，不能是保留名 `pose`、`breath`，也不能写成 `<characterId>-<action>` 形式。
+- `action`：`^[a-z][a-z0-9_]{0,23}$`；首字符为小写字母，后续允许小写字母、数字与下划线（如 `water_splash`、`tail_wag`）。不能是保留名 `pose`、`breath`，不能使用连字符（避免与 `<characterId>-<action>` 的边界歧义），也不能写成 `<characterId>-<action>` 形式。
 - `displayName`（可选）：≤80 字符；缺省为 `<name>·<动作中文名>`。
 - 同一 action 只能有一条轨。
 - **必做**：`idle`、`think`、`explain`、`advantage`、`disadvantage`。
@@ -161,7 +161,7 @@ dafeiyu.qilingpet (ZIP)
 
 ```json
 "idleBeats": [
-  { "action": "splash", "line": "扑通", "ms": 4000 }
+  { "action": "water_splash", "line": "扑通", "ms": 4000 }
 ]
 ```
 

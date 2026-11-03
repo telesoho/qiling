@@ -223,7 +223,7 @@ public/pet/anim/                   # bake 生成物（gitignore），勿手改
 | 项 | 现行约定 | 示例 |
 | --- | --- | --- |
 | 角色目录 | 稳定英文 id | `shiju`、`dafeiyu` |
-| 动作目录 | 英文 action = 状态／轨语义 | `idle`、`pickup`、`butterfly` |
+| 动作目录 | 英文 action = 状态／轨语义；小写字母开头，允许数字与下划线，不用连字符 | `idle`、`pickup`、`water_splash` |
 | Manifest 轨 id | `<characterId>-<action>`；pickup 诗琚为历史名 `shiju-pickup-hover` | `shiju-idle`、`dafeiyu-think` |
 | tags | 动作 tag + 角色 id；姿势轨另加 `pose` | `["pose","explain","shiju"]` |
 | path | 相对 `design/anim/` | `../characters/shiju/anim/idle/track_struct.json` |
@@ -237,7 +237,7 @@ public/pet/anim/                   # bake 生成物（gitignore），勿手改
 ### 7.2 建议（仓库尚无统一处，新角色按此执行并标「建议」）
 
 1. **新 pickup 轨 id** 建议用 `<characterId>-pickup`（与 `shiju-idle` 对称）。诗琚保留 `shiju-pickup-hover` 作为历史 id，**不必强行改名**以免破坏 bake／测试；新角色不要再发明第三种命名。  
-2. **性格 beat 目录名** 用稳定英文语义（`butterfly`、`angry`、或新角色的 `splash` 等），并在本文 §3 与 manifest tags 登记；禁止只用中文目录名。  
+2. **性格 beat 目录名** 用稳定英文语义（`butterfly`、`angry`、或新角色的 `water_splash`、`tail_wag` 等），并在本文 §3 与 manifest tags 登记；action 允许小写字母、数字与下划线，不使用连字符；禁止只用中文目录名。  
 3. **角色专属 public 源 WebP**（若不用 tracks 逐帧）建议：`public/pet/<characterId>/<action>.webp`，由该角色 `track_struct` 的 `animatedWebp.src` 相对引用。现行诗琚多姿势仍指向 `public/pet/*.webp` 根下文件——迁移时可逐步收拢，**非阻塞 MVP**。  
 4. **多角色默认轨**：`tracks.manifest.json` 的 `defaultTrack` 可为当前默认角色的 pickup 或 idle；切换角色时由运行时按角色 tag 重选，不靠改 action 名。
 
@@ -245,7 +245,7 @@ public/pet/anim/                   # bake 生成物（gitignore），勿手改
 
 内置角色走 `design/` + `npm run bake:anim`；安装态角色走自包含资源包，两者在运行时遵守同一套 stateId／tag／轨 id 约定。包格式、校验与制作步骤见 **[角色资源包：制作与安装](pet-packs.md)**。
 
-- **编译而非手写**：`pet.json.tracks[].action` 在安装时编译为 §7.1 的条目：`id = <characterId>-<action>`，`tags = [action, characterId]`（姿势动作加 `pose`），`path = tracks/<action>/track_struct.json`。作者不写 id/tags/path。
+- **编译而非手写**：`pet.json.tracks[].action` 在安装时编译为 §7.1 的条目：`id = <characterId>-<action>`，`tags = [action, characterId]`（姿势动作加 `pose`），`path = tracks/<action>/track_struct.json`。作者不写 id/tags/path。`action` 允许小写字母、数字与下划线，不使用连字符。
 - **必做动作**：`idle`、`think`、`explain`、`advantage`、`disadvantage`；`pickup` 默认必须为 animated（lift/hover/drop 三段逐帧）。允许 `"pickup": "window-only"` 声明「暂无吊起、仅移窗」的例外。
 - **性格 beat**：`pet.json.idleBeats` 是 §3 所说的「后继配置」；未声明时自动沿用 `butterfly`/`angry`，缺 beat 回退呼吸。自定义动作必须先出现在 `tracks` 中。
 - **运行时消费**：与 §5.4 完全一致；`walk`/`wave`/`work`/`sleep`/`celebrate`/`error` 等额外动作可注册，但当前版本不消费，不得宣称已实现（§9.6）。

@@ -5,7 +5,7 @@ import { createPackLibrary, formatInstalledAt, packErrorMessage, type PackRuntim
 const runtime: PackRuntime = {
   character: { id: 'dafeiyu', name: '大肥鱼', builtin: false },
   assetBase: 'http://qilingpet.localhost/dafeiyu/',
-  idleBeats: [{ action: 'splash', line: '扑通' }],
+  idleBeats: [{ action: 'water_splash', line: '扑通' }],
   tracks: [
     {
       id: 'dafeiyu-idle',
@@ -58,6 +58,19 @@ const runtime: PackRuntime = {
         },
       },
     },
+    {
+      id: 'dafeiyu-water_splash',
+      tags: ['water_splash', 'dafeiyu'],
+      path: 'tracks/water_splash/track_struct.json',
+      struct: {
+        phases: {
+          idle: {
+            playback: 'loop',
+            asset: { type: 'animatedWebp', src: 'water_splash.webp' },
+          },
+        },
+      },
+    },
   ],
 }
 
@@ -67,8 +80,12 @@ describe('角色资源包运行时', () => {
     expect(library.byTag('idle')?.id).toBe('dafeiyu-idle')
     expect(library.byTag('think')?.tags).toEqual(['pose', 'think', 'dafeiyu'])
     expect(library.byId.get('dafeiyu-think')?.id).toBe('dafeiyu-think')
+    expect(library.byTag('water_splash')?.id).toBe('dafeiyu-water_splash')
     expect(phaseImageUrl(library.byTag('idle'))).toBe(
       'http://qilingpet.localhost/dafeiyu/tracks/idle/idle.webp',
+    )
+    expect(phaseImageUrl(library.byTag('water_splash'))).toBe(
+      'http://qilingpet.localhost/dafeiyu/tracks/water_splash/water_splash.webp',
     )
   })
 

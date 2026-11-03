@@ -786,12 +786,14 @@ fn is_valid_action(action: &str) -> bool {
     if bytes.is_empty() || bytes.len() > 24 {
         return false;
     }
+    // 首字符必须是字母；后续允许小写字母、数字与下划线。
+    // 连字符不放开：它会让 `<characterId>-<action>` 的边界产生歧义。
     if !bytes[0].is_ascii_lowercase() {
         return false;
     }
     bytes
         .iter()
-        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
         && !RESERVED_ACTIONS.contains(&action)
 }
 
@@ -1651,13 +1653,30 @@ mod tests {
                 "explain",
                 "advantage",
                 "disadvantage",
-                "splash",
+                "water_splash",
             ],
         );
-        manifest["idleBeats"] = json!([{ "action": "splash", "line": "扑通" }]);
+        manifest["idleBeats"] = json!([{ "action": "water_splash", "line": "扑通" }]);
         let bytes = build_zip(&manifest, b"webp");
         let path = write_pack(&root, "demo.qilingpet", &bytes);
         assert!(registry.install(&path, false).is_ok());
+        let runtime = registry.load_runtime("demo").unwrap();
+        assert!(runtime
+            .tracks
+            .iter()
+            .any(|track| track.id == "demo-water_splash"));
+
+        let mut hyphen = manifest.clone();
+        hyphen["tracks"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "action": "tail-wag" }));
+        let hyphen_bytes = build_zip(&hyphen, b"webp");
+        let hyphen_path = write_pack(&root, "hyphen.qilingpet", &hyphen_bytes);
+        assert_eq!(
+            registry.install(&hyphen_path, false).unwrap_err(),
+            "pack_manifest_invalid"
+        );
 
         let mut bad = manifest.clone();
         bad["idleBeats"] = json!([{ "action": "idle", "line": "x" }]);
