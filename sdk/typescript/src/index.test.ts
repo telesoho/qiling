@@ -300,6 +300,143 @@ describe('SpiritClient', () => {
     expect(client.connectionState).toBe('disconnected')
   })
 
+  it('declares a generic client with voice metadata and dispatches by action id', async () => {
+    const credentials = new MemoryCredentials()
+    const sockets: MockSocket[] = []
+    const client = new SpiritClient({
+      identity: {
+        id: 'com.example.voice-demo',
+        name: '示例客户端',
+        version: '0.1.0',
+      },
+      credentials,
+      capabilities: {
+        actions: [
+          {
+            id: 'demo.say_hello',
+            risk: 'no_state_change',
+            description: '打个招呼',
+            voice: { examples: ['打个招呼', '说声你好'], locale: 'zh-CN' },
+          },
+        ],
+        events: { publishes: [] },
+      },
+      handlers: {
+        'demo.say_hello': async () => ({ text: '你好呀。', mood: 'up' }),
+      },
+      createWebSocket: () => {
+        const socket = new MockSocket((message) => {
+          if (message.method === 'client.pair') {
+            replyTo(socket, message, {
+              clientId: 'com.example.voice-demo',
+              accessToken: 'voice-demo-token-with-enough-length-1',
+            })
+          } else if (message.method === 'client.authenticate') {
+            replyTo(socket, message, {
+              authenticated: true,
+              clientId: 'com.example.voice-demo',
+            })
+          } else if (message.method === 'client.initialize') {
+            replyTo(socket, message, {
+              protocolVersion: '1',
+              grantedCapabilities: ['demo.say_hello'],
+            })
+          }
+        })
+        sockets.push(socket)
+        return socket
+      },
+    })
+
+    await client.pair('ABCDEFGH')
+    expect(sockets[0].sent[0]).toMatchObject({
+      method: 'client.pair',
+      params: {
+        client: { id: 'com.example.voice-demo' },
+        requestedCapabilities: {
+          actions: [
+            {
+              id: 'demo.say_hello',
+              risk: 'no_state_change',
+              description: '打个招呼',
+              supportsCancellation: false,
+              voice: { locale: 'zh-CN', examples: ['打个招呼', '说声你好'] },
+            },
+          ],
+          events: { publishes: [], subscribes: [] },
+        },
+      },
+    })
+
+    await client.connect()
+    expect(client.connectionState).toBe('connected')
+    expect(sockets[1].sent.map((message) => message.method)).toEqual([
+      'client.authenticate',
+      'client.initialize',
+    ])
+
+    sockets[1].notify({
+      jsonrpc: '2.0',
+      id: 'hello-1',
+      method: 'action.invoke',
+      params: { action: 'demo.say_hello', arguments: {}, timeoutMs: 1_000 },
+    })
+    await viWaitFor(() =>
+      expect(sockets[1].sent.at(-1)).toMatchObject({
+        id: 'hello-1',
+        result: { text: '你好呀。', mood: 'up' },
+      }),
+    )
+
+    sockets[1].notify({
+      jsonrpc: '2.0',
+      id: 'missing-1',
+      method: 'action.invoke',
+      params: { action: 'demo.missing', arguments: {}, timeoutMs: 1_000 },
+    })
+    await viWaitFor(() =>
+      expect(sockets[1].sent.at(-1)).toMatchObject({
+        id: 'missing-1',
+        error: { data: { code: 'action_not_found' } },
+      }),
+    )
+  })
+
+  it('rejects generic declarations that cannot be authorized or handled', () => {
+    expect(
+      () =>
+        new SpiritClient({
+          identity: { id: 'com.example.voice-demo', name: '示例', version: '0.1.0' },
+          capabilities: {
+            actions: [{ id: 'demo.say_hello', risk: 'no_state_change' }],
+            events: { publishes: [] },
+          },
+          credentials: new MemoryCredentials(),
+        }),
+    ).toThrowError('invalid_client_handler')
+
+    expect(
+      () =>
+        new SpiritClient({
+          identity: { id: 'com.example.voice-demo', name: '示例', version: '0.1.0' },
+          capabilities: {
+            actions: [
+              {
+                id: 'demo.write',
+                risk: 'state_change',
+                voice: { examples: ['写一下'] },
+              },
+            ],
+            events: { publishes: [] },
+          },
+          handlers: {
+            'demo.write': async () => ({ text: 'unused', mood: 'neutral' }),
+          },
+          credentials: new MemoryCredentials(),
+        }),
+    ).toThrowError('invalid_capabilities')
+  })
+
   it('reports server authorization errors and does not claim a connection', async () => {
     const credentials = new MemoryCredentials()
     credentials.token = 'example-token-with-enough-length-1234567890'

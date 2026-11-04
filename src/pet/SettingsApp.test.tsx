@@ -1,11 +1,16 @@
-﻿import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { saveQiLingSettings } from '../lib/settings'
 import SettingsApp, {
+  actionButtonLabel,
+  actionCanRunFromSettings,
+  actionDisplayName,
   capabilitySummary,
   modelOptions,
   normalizeModelName,
   settingsForProvider,
+  voiceExampleSummary,
+  voiceExamples,
 } from './SettingsApp'
 
 const memory = () => {
@@ -101,6 +106,35 @@ describe('器灵设定', () => {
         events: { publishes: ['vscode.editor.status'], subscribes: [] },
       }),
     ).toBe('VS Code：解释当前选区（读取所选文本）；发布事件：VS Code 编辑器状态')
+  })
+
+  it('describes a generic client from its declared metadata', () => {
+    const action = {
+      id: 'demo.say_hello',
+      risk: 'no_state_change',
+      description: '说一句问候',
+      voice: { examples: ['打个招呼', '说声你好'] },
+    }
+    expect(actionDisplayName(action)).toBe('说一句问候')
+    expect(capabilitySummary({
+      actions: [action],
+      events: { publishes: [], subscribes: [] },
+    })).toBe('说一句问候（no_state_change）')
+    expect(voiceExamples(action)).toEqual(['打个招呼', '说声你好'])
+    expect(voiceExampleSummary({
+      actions: [action, { id: 'demo.other', risk: 'no_state_change', voice: { examples: ['打个招呼'] } }],
+      events: { publishes: [], subscribes: [] },
+    })).toBe('“打个招呼”、“说声你好”')
+    expect(actionButtonLabel(action, '示例客户端')).toBe('说一句问候')
+    expect(actionCanRunFromSettings(action)).toBe(true)
+    expect(actionCanRunFromSettings({ id: 'demo.write', risk: 'state_change' })).toBe(false)
+  })
+
+  it('keeps one-off labels for known actions without changing the generic button label', () => {
+    expect(actionButtonLabel({ id: 'siju.narrate_current', risk: 'no_state_change' }, '识局'))
+      .toBe('请识局重新解说当前局面')
+    expect(actionButtonLabel({ id: 'vscode.explain_selection', risk: 'sensitive' }, 'VS Code'))
+      .toBe('解释当前选区')
   })
 
   it('offers an installed-model choice and a voice preview', () => {

@@ -1,4 +1,4 @@
-﻿import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import {
   isVoiceEnginePreference,
@@ -28,8 +28,20 @@ interface ClientInfo {
   version: string
 }
 
+export interface VoiceCommandMetadata {
+  examples: string[]
+  locale?: string
+}
+
+export interface ActionCapabilityView {
+  id: string
+  risk: string
+  description?: string
+  voice?: VoiceCommandMetadata
+}
+
 export interface CapabilityManifest {
-  actions: Array<{ id: string; risk: string }>
+  actions: ActionCapabilityView[]
   events: { publishes: string[]; subscribes: string[] }
 }
 
@@ -158,22 +170,79 @@ export function normalizeModelName(installed: readonly string[], current: string
   return installed.includes(latest) ? latest : model
 }
 
+const knownActionLabels: Record<string, string> = {
+  'siju.narrate_current': '识局：重新解说当前局面（只读）',
+  'vscode.explain_selection': 'VS Code：解释当前选区（读取所选文本）',
+}
+
+const knownEventLabels: Record<string, string> = {
+  'siju.analysis.status': '识局分析状态',
+  'vscode.editor.status': 'VS Code 编辑器状态',
+}
+
+export function actionDisplayName(action: ActionCapabilityView): string {
+  return knownActionLabels[action.id] ?? action.description?.trim() ?? action.id
+}
+
 export function capabilitySummary(capabilities: CapabilityManifest): string {
-  const actionLabels: Record<string, string> = {
-    'siju.narrate_current': '识局：重新解说当前局面（只读）',
-    'vscode.explain_selection': 'VS Code：解释当前选区（读取所选文本）',
-  }
-  const eventLabels: Record<string, string> = {
-    'siju.analysis.status': '识局分析状态',
-    'vscode.editor.status': 'VS Code 编辑器状态',
-  }
   const actions = capabilities.actions.map((action) =>
-    actionLabels[action.id] ?? `${action.id}（${action.risk}）`,
+    knownActionLabels[action.id] ??
+      `${action.description?.trim() || action.id}（${action.risk}）`,
   )
   const events = capabilities.events.publishes.map(
-    (event) => `发布事件：${eventLabels[event] ?? event}`,
+    (event) => `发布事件：${knownEventLabels[event] ?? event}`,
   )
   return [...actions, ...events].join('；') || '无'
+}
+
+export function voiceExamples(action: ActionCapabilityView): string[] {
+  return action.voice?.examples ?? []
+}
+
+/** All client-provided spoken phrases in a manifest, for display only. */
+export function voiceExampleSummary(capabilities: CapabilityManifest): string {
+  const phrases = capabilities.actions.flatMap((action) =>
+    voiceExamples(action).map((example) => `“${example}”`),
+  )
+  return Array.from(new Set(phrases)).join('、')
+}
+
+export function actionButtonLabel(
+  action: ActionCapabilityView,
+  clientName: string,
+): string {
+  if (action.id === 'siju.narrate_current') {
+    return `请${clientName}重新解说当前局面`
+  }
+  if (action.id === 'vscode.explain_selection') {
+    return '解释当前选区'
+  }
+  return action.description?.trim() || action.id
+}
+
+/** State-changing Actions still need a confirmation flow that V1 does not have. */
+export function actionCanRunFromSettings(action: ActionCapabilityView): boolean {
+  return action.risk !== 'state_change'
+}
+
+function actionErrorMessage(reason: unknown, clientName: string): string {
+  const code = String(reason)
+  const messages: Array<[string, string]> = [
+    ['client_unavailable', `${clientName}当前未连接。`],
+    ['not_authorized', `${clientName}尚未获准执行这个操作。`],
+    ['action_not_found', `${clientName}没有提供这个操作。`],
+    ['busy', `${clientName}正在处理另一条请求。`],
+    ['state_unavailable', `${clientName}当前没有可用的状态。`],
+    ['state_stale', `${clientName}的状态已经变化。`],
+    ['summarizer_unavailable', `${clientName}当前的服务不可用。`],
+    ['selection_unavailable', `${clientName}当前没有可解释的选区。`],
+    ['selection_too_large', '当前选区太长，请缩小选区后再试。'],
+    ['model_unavailable', `${clientName}当前没有可用且已授权的语言模型。`],
+    ['deadline_exceeded', `等待${clientName}执行超时。`],
+    ['cancelled', '已取消这次操作。'],
+    ['invalid_action_response', `${clientName}返回的结果格式不正确。`],
+  ]
+  return messages.find(([needle]) => code.includes(needle))?.[1] ?? `执行${clientName}的操作失败：${code}`
 }
 
 export default function SettingsApp(): JSX.Element {
@@ -419,7 +488,7 @@ export default function SettingsApp(): JSX.Element {
         else stop()
       })
       .catch((reason: unknown) => {
-        if (active) setError(`无法订阅识局状态事件：${String(reason)}`)
+        if (active) setError(`无法订阅客户端状态事件：${String(reason)}`)
       })
     return () => {
       active = false
@@ -705,59 +774,22 @@ export default function SettingsApp(): JSX.Element {
     }
   }
 
-  async function requestNarration() {
+  async function runClientAction(
+    clientId: string,
+    clientName: string,
+    action: ActionCapabilityView,
+  ) {
     setBusy(true)
     setError('')
     setActionStatus('')
     setActionError('')
     try {
-      await invoke('spirit_invoke_narrate_current')
-      setActionStatus('识局已返回新解说，器灵正在反馈。')
+      await invoke('spirit_invoke_action', { clientId, actionId: action.id })
+      setActionStatus(
+        `已请求${clientName}执行“${actionButtonLabel(action, clientName)}”，器灵正在反馈。`,
+      )
     } catch (reason) {
-      const code = String(reason)
-      const message = code.includes('client_unavailable')
-        ? '识局当前未连接。'
-        : code.includes('state_unavailable')
-          ? '识局当前没有可用的局面分析。'
-          : code.includes('state_stale')
-            ? '局面分析已过期，请等待更新后重试。'
-            : code.includes('summarizer_unavailable')
-              ? '识局当前的解说服务不可用。'
-              : code.includes('deadline_exceeded')
-                ? '重新解说超时。'
-                : code.includes('busy')
-                  ? '识局正在处理另一条解说请求。'
-                  : `请求解说失败：${code}`
-      setActionError(message)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function requestSelectionExplanation() {
-    setBusy(true)
-    setError('')
-    setActionStatus('')
-    setActionError('')
-    try {
-      await invoke('spirit_invoke_vscode_explain_selection')
-      setActionStatus('VS Code 已返回选区解释，器灵正在反馈。')
-    } catch (reason) {
-      const code = String(reason)
-      const message = code.includes('client_unavailable')
-        ? 'VS Code 当前未连接。'
-        : code.includes('selection_unavailable')
-          ? 'VS Code 当前没有可解释的选区。'
-          : code.includes('selection_too_large')
-            ? '当前选区太长，请缩小选区后再试。'
-          : code.includes('model_unavailable')
-            ? 'VS Code 当前没有可用且已授权的语言模型。'
-            : code.includes('deadline_exceeded')
-              ? '解释选区超时。'
-              : code.includes('busy')
-                ? 'VS Code 正在处理另一条解释请求。'
-                : `解释选区失败：${code}`
-      setActionError(message)
+      setActionError(actionErrorMessage(reason, clientName))
     } finally {
       setBusy(false)
     }
@@ -909,9 +941,9 @@ export default function SettingsApp(): JSX.Element {
         <p>器灵回答时可以直接插话打断；它会继续识别，但把与自己播报文稿高度重合的结果当作回声丢弃，说完后再静音约半秒才恢复对话。器灵还念别的程序送来的句子（例如 VS Code 选区解释），这些句子同样可以打断。</p>
         <p>念到含英文标识符或数字的句子（代码类解释）时，本机识别器会把器灵自己的读音听成别的话；这类句子只响应“停”“等一下”这类明确指令，避免它被自己的声音打断。</p>
         <p>最近几条播报只记在内存里，退出器灵就清空，不写日志。只有你问“刚才讲了什么”“再复述一遍”这类指向上一句的问题时，才会把最近几条正文随问题发给当前对话模型；使用云端模型时，这些正文也会离开本机。</p>
-        <p>唤醒后可以直接说“重新解说当前局面”或“再解说一次”，器灵会让已连接且获准该能力的识局重新解说；命中的口令不会交给对话模型。识局未连接、未授权或当前分析不可用时，器灵会明确说明，不会用旧解说冒充成功。</p>
+        <p>唤醒后可以说已连接客户端登记的语音口令；例如识局获准“重新解说当前局面”后，说“重新解说当前局面”“再解说一次”即可。命中的口令不会交给对话模型。客户端未连接、未授权或当前状态不可用时，器灵会明确说明，不会用旧内容冒充成功。</p>
         <p>说“解释当前选区”暂不会触发 VS Code；请使用下方已连接客户端中的“解释当前选区”按钮，或在 VS Code 中执行“器灵：解释当前选区”。</p>
-        <p>“请识局重新解说当前局面”按钮保留为语音不可用或手动重试时的备用入口。</p>
+        <p>“请识局重新解说当前局面”按钮保留为语音不可用或手动重试时的备用入口。语音口令只影响匹配，不会扩大客户端授权。</p>
         {settings.voiceAssistant && (
           <button type="button" onClick={() => void cancelVoiceAssistantTurn()}>
             取消本轮对话
@@ -1081,8 +1113,9 @@ export default function SettingsApp(): JSX.Element {
       <section className="settings-section" aria-labelledby="clients-title">
         <h2 id="clients-title">已连接客户端</h2>
         <p>配对只开放给本机客户端；每个客户端及其能力都需要你批准。</p>
-        <p>识局连接后，唤醒器灵并说“重新解说当前局面”或“再解说一次”即可请求重新解说；下方按钮是语音不可用或手动重试时的备用入口。</p>
-        <p>批准 VS Code 的选区解释能力后，点击按钮即可解释当前选区。VS Code 首次会让你选择模型并记住选择；可通过命令“器灵：选择解释模型”更换。只读取当前选区，不修改文件；可随时撤销授权。</p>
+        <p>唤醒器灵后，可以说已连接客户端自己登记的语音口令（例如识局的“重新解说当前局面”）；命中的口令不会交给对话模型。客户端未连接、未获授权或当前状态不可用时，器灵会明确说明。</p>
+        <p>语音口令由客户端提供，只用于匹配，不会扩大授权；客户端可在已批准的操作范围内更新口令，断线或撤销后立即失效。</p>
+        <p>下方按钮是语音不可用或手动重试时的备用入口。批准 VS Code 的选区解释能力后，点击按钮即可解释当前选区。VS Code 首次会让你选择模型并记住选择；可通过命令“器灵：选择解释模型”更换。只读取当前选区，不修改文件；可随时撤销授权。</p>
         <button type="button" disabled={busy} onClick={() => void startPairing()}>
           生成一次性配对码
         </button>
@@ -1095,21 +1128,27 @@ export default function SettingsApp(): JSX.Element {
         {pending.length > 0 && (
           <div className="settings-list">
             <h3>等待批准</h3>
-            {pending.map((request) => (
-              <article className="settings-card" key={request.requestId}>
-                <strong>{request.client.name}</strong>
-                <span>{request.client.id} · {request.client.version}</span>
-                <span>请求能力：{capabilitySummary(request.requestedCapabilities)}</span>
-                <div className="settings-actions">
-                  <button type="button" disabled={busy} onClick={() => void decidePairing(request.requestId, true)}>
-                    批准此客户端与能力
-                  </button>
-                  <button type="button" disabled={busy} onClick={() => void decidePairing(request.requestId, false)}>
-                    拒绝
-                  </button>
-                </div>
-              </article>
-            ))}
+            {pending.map((request) => {
+              const phrases = voiceExampleSummary(request.requestedCapabilities)
+              return (
+                <article className="settings-card" key={request.requestId}>
+                  <strong>{request.client.name}</strong>
+                  <span>{request.client.id} · {request.client.version}</span>
+                  <span>请求能力：{capabilitySummary(request.requestedCapabilities)}</span>
+                  {phrases && (
+                    <span>语音口令（客户端提供，仅用于匹配）：{phrases}</span>
+                  )}
+                  <div className="settings-actions">
+                    <button type="button" disabled={busy} onClick={() => void decidePairing(request.requestId, true)}>
+                      批准此客户端与能力
+                    </button>
+                    <button type="button" disabled={busy} onClick={() => void decidePairing(request.requestId, false)}>
+                      拒绝
+                    </button>
+                  </div>
+                </article>
+              )
+            })}
           </div>
         )}
 
@@ -1119,13 +1158,13 @@ export default function SettingsApp(): JSX.Element {
           {clients.map((client) => {
             const clientEvent = spiritEvents[client.client.id]
             const eventStatus =
-              client.client.id === 'com.qiling.vscode'
-                ? clientEvent?.payload.status === 'ready'
+              clientEvent?.payload.status === 'ready'
+                ? client.client.id === 'com.qiling.vscode'
                   ? '可解释选区'
-                  : '当前不可用'
-                : clientEvent?.payload.status === 'ready'
-                  ? '可解说'
-                  : '当前不可用'
+                  : '可用'
+                : clientEvent?.payload.status === 'unavailable'
+                  ? '当前不可用'
+                  : ''
             return (
               <article className="settings-card" key={client.clientKey}>
                 <strong>{client.client.name}</strong>
@@ -1133,26 +1172,44 @@ export default function SettingsApp(): JSX.Element {
                 <span>已授权：{capabilitySummary(client.capabilities)}</span>
                 <span>
                   连接状态：{client.connected ? '已连接' : '未连接'}
-                  {clientEvent && ` · ${eventStatus}`}
+                  {eventStatus && ` · ${eventStatus}`}
                 </span>
-                {client.capabilities.actions.some((action) => action.id === 'siju.narrate_current') && (
-                  <button
-                    type="button"
-                    disabled={busy || !client.connected || clientEvent?.payload.status === 'unavailable'}
-                    onClick={() => void requestNarration()}
-                  >
-                    {busy ? '正在请求…' : '请识局重新解说当前局面'}
-                  </button>
-                )}
-                {client.capabilities.actions.some((action) => action.id === 'vscode.explain_selection') && (
-                  <button
-                    type="button"
-                    disabled={busy || !client.connected || clientEvent?.payload.status !== 'ready'}
-                    onClick={() => void requestSelectionExplanation()}
-                  >
-                    解释当前选区
-                  </button>
-                )}
+                {client.capabilities.actions.map((action) => {
+                  const examples = voiceExamples(action)
+                  const blockedByStatus =
+                    (action.id === 'vscode.explain_selection' &&
+                      clientEvent?.payload.status !== 'ready') ||
+                    (action.id === 'siju.narrate_current' &&
+                      clientEvent?.payload.status === 'unavailable')
+                  return (
+                    <div className="settings-action" key={action.id}>
+                      {actionCanRunFromSettings(action) ? (
+                        <button
+                          type="button"
+                          disabled={busy || !client.connected || blockedByStatus}
+                          onClick={() =>
+                            void runClientAction(
+                              client.client.id,
+                              client.client.name,
+                              action,
+                            )
+                          }
+                        >
+                          {actionButtonLabel(action, client.client.name)}
+                        </button>
+                      ) : (
+                        <span>
+                          {actionButtonLabel(action, client.client.name)}：需要确认流程，暂不支持手动或语音触发。
+                        </span>
+                      )}
+                      {examples.length > 0 && (
+                        <span>
+                          语音口令：{examples.map((example) => `“${example}”`).join('、')}
+                        </span>
+                      )}
+                    </div>
+                  )
+                })}
                 <button
                   type="button"
                   disabled={busy}

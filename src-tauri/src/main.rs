@@ -513,12 +513,75 @@ fn begin_voice_turn(state: &AppState) -> Result<u64, String> {
     Ok(turn)
 }
 
-/// Ask the connected Siju client for a fresh narration.
+/// A client display name safe to speak: control characters removed and capped.
+fn display_client_name(name: &str) -> String {
+    let cleaned: String = name
+        .trim()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(24)
+        .collect();
+    if cleaned.trim().is_empty() {
+        "该客户端".into()
+    } else {
+        cleaned
+    }
+}
+
+/// Local Chinese feedback for a failed Action. The client's own error text is
+/// never spoken or displayed: only its stable error code is used.
+fn action_failure_message(client_name: &str, code: &str) -> String {
+    let name = display_client_name(client_name);
+    match code {
+        "client_unavailable" => format!("{name}当前未连接，暂时无法执行这个操作。"),
+        "not_authorized" | "action_not_found" => format!("{name}尚未获准执行这个操作。"),
+        "busy" => format!("{name}正在处理另一条请求，请稍后再试。"),
+        "state_unavailable" => format!("{name}当前没有可用的状态来执行这个操作。"),
+        "state_stale" => format!("{name}的状态已经变化，请稍后再试。"),
+        "summarizer_unavailable" => format!("{name}当前的服务不可用，请检查它的设置。"),
+        "selection_unavailable" => format!("{name}当前没有可解释的选区。"),
+        "selection_too_large" => "当前选区太长，请缩小选区后再试。".into(),
+        "model_unavailable" => format!("{name}当前没有可用且已授权的语言模型。"),
+        "deadline_exceeded" => format!("等待{name}执行超时，请稍后再试。"),
+        "cancelled" => "已取消这次操作。".into(),
+        "invalid_action_response" => format!("{name}返回的结果格式不正确。"),
+        _ => format!("执行{name}的操作失败，请检查它的状态后重试。"),
+    }
+}
+
+/// Speak a locally generated line and own the speakers for this turn.
+fn speak_text(app: &AppHandle, state: &AppState, text: &str) -> Result<(), String> {
+    begin_voice_turn(state)?;
+    app.emit(
+        "qiling-line",
+        serde_json::json!({ "phase": "say", "text": text, "mood": "neutral" }),
+    )
+    .map_err(|error| format!("voice_feedback_failed:{error}"))
+}
+
+/// Execute one approved client Action and feed its narration back to the pet.
 ///
-/// Both the settings fallback button and the spoken command end up here, so
+/// Both the generic settings button and the dynamic voice route end up here, so
 /// permission checks, timeout handling and stale-result protection stay in one
 /// place.
-async fn narrate_current(app: &AppHandle, state: &AppState) -> Result<(), String> {
+async fn invoke_client_action(
+    app: &AppHandle,
+    state: &AppState,
+    client_id: &str,
+    client_name: &str,
+    action_id: &str,
+    connected: bool,
+) -> Result<(), String> {
+    if !connected {
+        return speak_text(
+            app,
+            state,
+            &format!(
+                "{}当前未连接，暂时无法执行这个操作。",
+                display_client_name(client_name)
+            ),
+        );
+    }
     let turn = begin_voice_turn(state)?;
     app.emit(
         "qiling-line",
@@ -527,10 +590,12 @@ async fn narrate_current(app: &AppHandle, state: &AppState) -> Result<(), String
     .map_err(|error| format!("narration_feedback_unavailable:{error}"))?;
     let outcome = state
         .protocol
-        .invoke_narrate_current("com.siju.app", spirit::DEFAULT_ACTION_TIMEOUT)
+        .invoke_action(client_id, action_id, spirit::DEFAULT_ACTION_TIMEOUT)
         .await;
     if let Ok(result) = &outcome {
-        state.narrations.record("com.siju.app", &result.text);
+        // Remembered even when the user cut the line off: the part that was
+        // heard is exactly what a follow-up question may refer to.
+        state.narrations.record(client_id, &result.text);
     }
     if !state.turns.is_current(turn) {
         return Ok(());
@@ -547,41 +612,17 @@ async fn narrate_current(app: &AppHandle, state: &AppState) -> Result<(), String
             )
             .map_err(|error| format!("narration_display_failed:{error}")),
         Err(code) => {
-            let message = match code.as_str() {
-                "client_unavailable" => "识局当前未连接，暂时无法重新解说。",
-                "action_not_found" | "not_authorized" => "识局尚未获准提供重新解说能力。",
-                "busy" => "识局正在处理另一条解说请求，请稍后再试。",
-                "state_unavailable" => "识局当前没有可用的局面分析。",
-                "state_stale" => "局面已经变化，请等待识局更新分析后再试。",
-                "summarizer_unavailable" => "识局当前的解说服务不可用，请检查解说设置。",
-                "deadline_exceeded" => "重新解说超时，请确认识局状态后再试。",
-                _ => "重新解说失败，请检查识局状态后重试。",
-            };
             let _ = app.emit(
                 "qiling-line",
-                serde_json::json!({ "phase": "say", "text": message, "mood": "down" }),
+                serde_json::json!({
+                    "phase": "say",
+                    "text": action_failure_message(client_name, &code),
+                    "mood": "down"
+                }),
             );
             Err(code)
         }
     }
-}
-
-/// A voice command V1 does not expose gets a spoken explanation, not an Action.
-fn speak_unsupported_command(
-    app: &AppHandle,
-    state: &AppState,
-    command: voice_command::UnsupportedCommand,
-) -> Result<(), String> {
-    begin_voice_turn(state)?;
-    app.emit(
-        "qiling-line",
-        serde_json::json!({
-            "phase": "say",
-            "text": voice_command::guidance(command),
-            "mood": "neutral"
-        }),
-    )
-    .map_err(|error| format!("voice_feedback_failed:{error}"))
 }
 
 #[tauri::command]
@@ -597,17 +638,46 @@ async fn qiling_voice_assistant_respond(
     if transcript.is_empty() || transcript.chars().count() > 2_000 {
         return Err("invalid_voice_prompt".into());
     }
-    // A spoken command is a request to a desktop client, not a chat message.
-    // It must not reach the model: the model would answer over the line or try
-    // to plan an operation V1 does not expose.
-    match voice_command::classify(&transcript) {
-        voice_command::VoiceCommand::NarrateCurrent => {
-            return narrate_current(&app, &*state).await;
+    // A spoken command is a request to a paired desktop client, not a chat
+    // message. It must not reach the model: the model would answer over the
+    // line or try to plan an operation V1 does not expose. The catalog is read
+    // fresh for every final transcript, so disconnects and revocations take
+    // effect immediately.
+    let actions = match state.protocol.route_actions() {
+        Ok(actions) => actions,
+        Err(error) => {
+            eprintln!("[Voice Command] route snapshot failed: {error}");
+            Vec::new()
         }
-        voice_command::VoiceCommand::Unsupported(command) => {
-            return speak_unsupported_command(&app, &*state, command);
+    };
+    match voice_command::match_transcript(&actions, &transcript) {
+        voice_command::VoiceOutcome::Action(target) => {
+            eprintln!(
+                "[Voice Command] outcome=matched client={} action={} connected={}",
+                target.client_id, target.action_id, target.connected
+            );
+            return invoke_client_action(
+                &app,
+                &*state,
+                &target.client_id,
+                &target.client_name,
+                &target.action_id,
+                target.connected,
+            )
+            .await;
         }
-        voice_command::VoiceCommand::Conversation => {}
+        voice_command::VoiceOutcome::Ambiguous(candidates) => {
+            eprintln!(
+                "[Voice Command] outcome=ambiguous candidates={}",
+                candidates.len()
+            );
+            return speak_text(&app, &*state, &voice_command::ambiguity_text(&candidates));
+        }
+        voice_command::VoiceOutcome::Guidance(command) => {
+            eprintln!("[Voice Command] outcome=guidance");
+            return speak_text(&app, &*state, voice_command::guidance(command));
+        }
+        voice_command::VoiceOutcome::Conversation => {}
     }
     // A new question owns the speakers from here on. Anything the previous turn
     // is still generating is retired before this question reaches the model.
@@ -666,69 +736,6 @@ async fn qiling_voice_assistant_respond(
 }
 
 #[tauri::command]
-async fn spirit_invoke_vscode_explain_selection(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    // The narration owns the speakers until it is interrupted. A barge-in, a new
-    // question or another narration retires this turn, so a client answer that
-    // arrives after the user cut the line off is dropped instead of resuming.
-    let turn = state.turns.begin();
-    let turns = Arc::clone(&state.turns);
-    app.emit(
-        "qiling-line",
-        serde_json::json!({ "phase": "thinking", "text": "", "mood": "neutral" }),
-    )
-    .map_err(|error| format!("narration_feedback_unavailable:{error}"))?;
-    let outcome = state
-        .protocol
-        .invoke_action(
-            "com.qiling.vscode",
-            "vscode.explain_selection",
-            spirit::DEFAULT_ACTION_TIMEOUT,
-        )
-        .await;
-    // Remembered even when the user cut the line off: the part that was heard is
-    // exactly what a follow-up question may refer to.
-    if let Ok(result) = &outcome {
-        state.narrations.record("com.qiling.vscode", &result.text);
-    }
-    if !turns.is_current(turn) {
-        return Ok(());
-    }
-    match outcome {
-        Ok(result) => app
-            .emit(
-                "qiling-line",
-                serde_json::json!({
-                    "phase": "say",
-                    "text": result.text,
-                    "mood": result.mood
-                }),
-            )
-            .map_err(|error| format!("narration_display_failed:{error}")),
-        Err(code) => {
-            let message = match code.as_str() {
-                "client_unavailable" => "VS Code 当前未连接，暂时无法解释选区。",
-                "action_not_found" | "not_authorized" => "VS Code 尚未获准提供选区解释能力。",
-                "busy" => "VS Code 正在处理另一条解释请求，请稍后再试。",
-                "selection_unavailable" => "VS Code 当前没有可解释的选区。",
-                "selection_too_large" => "当前选区太长，请缩小选区后再试。",
-                "model_unavailable" => "VS Code 当前没有可用且已授权的语言模型。",
-                "cancelled" => "已取消本次选区解释。",
-                "deadline_exceeded" => "解释选区超时，请稍后重试。",
-                _ => "解释选区失败，请检查 VS Code 状态后重试。",
-            };
-            let _ = app.emit(
-                "qiling-line",
-                serde_json::json!({ "phase": "say", "text": message, "mood": "down" }),
-            );
-            Err(code)
-        }
-    }
-}
-
-#[tauri::command]
 fn spirit_start_pairing(state: State<AppState>) -> Result<spirit::PairingCode, String> {
     state.protocol.begin_pairing()
 }
@@ -763,11 +770,20 @@ fn spirit_revoke_client(state: State<AppState>, client_key: String) -> Result<()
 }
 
 #[tauri::command]
-async fn spirit_invoke_narrate_current(
+async fn spirit_invoke_action(
     app: AppHandle,
     state: State<'_, AppState>,
+    client_id: String,
+    action_id: String,
 ) -> Result<(), String> {
-    narrate_current(&app, &*state).await
+    if client_id.chars().count() > 128 || action_id.chars().count() > 128 {
+        return Err("invalid_params".into());
+    }
+    let client_name = state
+        .protocol
+        .client_name(&client_id)?
+        .ok_or_else(|| "not_authorized".to_string())?;
+    invoke_client_action(&app, &*state, &client_id, &client_name, &action_id, true).await
 }
 
 fn open_pet_packs(app: &AppHandle) -> Result<(), String> {
@@ -850,7 +866,11 @@ fn tray_menu(app: &AppHandle, visible: bool) -> tauri::Result<Menu<tauri::Wry>> 
     let toggle = MenuItem::with_id(
         app,
         "tray-toggle",
-        if visible { "隐藏器灵" } else { "显示器灵" },
+        if visible {
+            "隐藏器灵"
+        } else {
+            "显示器灵"
+        },
         true,
         None::<&str>,
     )?;
@@ -1054,8 +1074,7 @@ fn main() {
             spirit_reject_pairing,
             spirit_list_clients,
             spirit_revoke_client,
-            spirit_invoke_narrate_current,
-            spirit_invoke_vscode_explain_selection,
+            spirit_invoke_action,
             bubble_present,
             pet_menu
         ])
@@ -1074,7 +1093,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{bubble_origin, bubble_size};
+    use super::{action_failure_message, bubble_origin, bubble_size, display_client_name};
 
     #[test]
     fn bubble_sits_on_the_pet() {
@@ -1083,5 +1102,32 @@ mod tests {
         assert_eq!(bubble_size(210.0, 96.0), (210.0, 96.0));
         assert_eq!(bubble_origin(100, 400, 210, 210, 120, 16), (100, 264));
         assert_eq!(bubble_origin(100, 400, 210, 180, 80, 16), (115, 304));
+    }
+
+    #[test]
+    fn spoken_client_names_are_short_and_never_empty() {
+        assert_eq!(display_client_name("  识局  "), "识局");
+        assert_eq!(display_client_name(""), "该客户端");
+        assert_eq!(display_client_name("\u{7}"), "该客户端");
+        assert_eq!(display_client_name(&"长".repeat(40)).chars().count(), 24);
+    }
+
+    #[test]
+    fn failures_are_explained_locally_without_client_error_text() {
+        assert_eq!(
+            action_failure_message("识局", "client_unavailable"),
+            "识局当前未连接，暂时无法执行这个操作。"
+        );
+        assert_eq!(
+            action_failure_message("识局", "not_authorized"),
+            "识局尚未获准执行这个操作。"
+        );
+        assert_eq!(
+            action_failure_message("识局", "deadline_exceeded"),
+            "等待识局执行超时，请稍后再试。"
+        );
+        assert!(action_failure_message("识局", "state_unavailable").contains("没有可用的状态"));
+        assert!(action_failure_message("识局", "invalid_action_response").contains("格式不正确"));
+        assert!(action_failure_message("识局", "some_new_code").contains("操作失败"));
     }
 }
