@@ -12,12 +12,32 @@ import {
   voiceAssistantStateLabel,
   type VoiceAssistantEvent,
 } from '../lib/voice-assistant'
-import { loadAnimLibrary, phaseDurationMs, phaseImageUrl, preloadTrack, type AnimLibrary } from './anim'
+import { phaseDurationMs, phaseImageUrl, preloadTrack, resetAnimCaches, type AnimLibrary } from './anim'
 import { publishBubble } from './bubbleSync'
+import {
+  BUILTIN_CHARACTER,
+  CHARACTER_EVENT,
+  loadActiveCharacter,
+  loadCharacterAssets,
+  type ActiveCharacter,
+} from './packs'
 import { PetSpeechBubble } from './PetControls'
 import { PickupSprite } from './PickupSprite'
 import { pickupPhaseAfterPress, pickupPhaseAfterRelease, pickupSegments, type PickupPhase } from './pickup'
-import { IDLE_BEATS, PET_STATES, bubbleLine, petState, pickIdleBeat, playbackFor, poseForLine, type IdleBeat, type LinePhase, type PetStateId } from './states'
+import {
+  IDLE_BEATS,
+  PET_STATES,
+  bubbleLine,
+  builtinBeatOptions,
+  petState,
+  pickIdleBeat,
+  pickPackBeat,
+  playbackFor,
+  poseForLine,
+  type IdleBeatOption,
+  type LinePhase,
+  type PetStateId,
+} from './states'
 import { inTauri, petWindowIsOpen, publishPet, readPetState, setPetWindowOpen, subscribePet } from './sync'
 import { usePetDrag } from './usePetDrag'
 
@@ -36,7 +56,9 @@ export default function PetApp(): JSX.Element {
     }
     return readPetState()
   })
-  const [beat, setBeat] = useState<IdleBeat>('breath')
+  const [character, setCharacter] = useState<ActiveCharacter>(() => ({ ...BUILTIN_CHARACTER }))
+  const [beats, setBeats] = useState<IdleBeatOption[]>(() => builtinBeatOptions())
+  const [beat, setBeat] = useState('breath')
   const [pickup, setPickup] = useState<PickupPhase>('idle')
   const [library, setLibrary] = useState<AnimLibrary | null>(null)
   const [shown, setShown] = useState(() => !inTauri())
@@ -57,7 +79,12 @@ export default function PetApp(): JSX.Element {
   const stateRef = useRef(stateId)
   stateRef.current = stateId
   const state = petState(stateId)
-  const idle = stateId === 'idle' ? IDLE_BEATS[beat] : null
+  const idle =
+    stateId === 'idle'
+      ? beats.find((option) => option.key === beat) ??
+        beats.find((option) => option.key === 'breath') ??
+        null
+      : null
   const preview = !inTauri()
   const forcedId =
     preview && typeof window !== 'undefined'
@@ -67,7 +94,12 @@ export default function PetApp(): JSX.Element {
   const pickupTrack = forcedTrack ?? library?.byTag('pickup')
   const segments = useMemo(() => pickupSegments(pickupTrack), [pickupTrack])
   const activeTrack = forcedTrack ?? (idle ? library?.byTag(idle.track) : library?.byTag(state.track))
-  const fallbackSrc = `/pet/${idle?.file ?? state.file}`
+  const idleSrc = phaseImageUrl(library?.byTag('idle'), 'idle')
+  const builtinBeatFile =
+    idle && character.builtin && idle.key in IDLE_BEATS
+      ? IDLE_BEATS[idle.key as keyof typeof IDLE_BEATS].file
+      : state.file
+  const fallbackSrc = idleSrc ?? (character.builtin ? `/pet/${builtinBeatFile}` : '')
   const poseSrc = phaseImageUrl(activeTrack, 'idle') ?? fallbackSrc
   const speechPhaseNow = ready ? speakPhase(line.phase) : 'idle'
   const speechText = ready ? line.text : ''
@@ -95,15 +127,61 @@ export default function PetApp(): JSX.Element {
 
   useEffect(() => {
     let alive = true
-    loadAnimLibrary()
-      .then((next) => {
-        if (alive) setLibrary(next)
-      })
-      .catch((error) => {
-        console.warn('动画目录不可用', error)
-      })
+    let revision = 0
+    let stop: (() => void) | undefined
+
+    const load = async (next: ActiveCharacter) => {
+      const request = ++revision
+      try {
+        const assets = await loadCharacterAssets(next)
+        if (!alive || request !== revision) return
+        setCharacter(assets.character)
+        setLibrary(assets.library)
+        setBeats(assets.beats)
+        setBeat('breath')
+        setPickup('idle')
+      } catch (error) {
+        if (!alive || request !== revision) return
+        console.warn('角色动画不可用，回到内置诗琚', error)
+        try {
+          const assets = await loadCharacterAssets(BUILTIN_CHARACTER)
+          if (!alive || request !== revision) return
+          setCharacter(assets.character)
+          setLibrary(assets.library)
+          setBeats(assets.beats)
+          setBeat('breath')
+          setPickup('idle')
+        } catch (fallbackError) {
+          console.warn('内置动画目录也不可用', fallbackError)
+        }
+      }
+    }
+
+    void (async () => {
+      const active = await loadActiveCharacter().catch(() => ({ ...BUILTIN_CHARACTER }))
+      if (alive) await load(active)
+    })()
+
+    if (inTauri()) {
+      void import('@tauri-apps/api/event')
+        .then(({ listen }) =>
+          listen<ActiveCharacter>(CHARACTER_EVENT, ({ payload }) => {
+            resetAnimCaches()
+            void load(payload?.id ? payload : BUILTIN_CHARACTER)
+          }),
+        )
+        .then((unlisten) => {
+          if (alive) stop = unlisten
+          else unlisten()
+        })
+        .catch((error: unknown) => {
+          console.warn('无法订阅角色切换事件', String(error))
+        })
+    }
+
     return () => {
       alive = false
+      stop?.()
     }
   }, [])
 
@@ -308,8 +386,9 @@ export default function PetApp(): JSX.Element {
       voice,
       speaking: speech.speaking,
       open: bubbleOpen && shown && ready,
+      name: character.name,
     })
-  }, [bubbleText, voice, speech.speaking, bubbleOpen, shown, ready])
+  }, [bubbleText, voice, speech.speaking, bubbleOpen, shown, ready, character.name])
 
   // Tell the runtime which line the speakers are playing. It keeps recognizing so
   // the user can interrupt, but drops anything that sounds like this line.
@@ -345,28 +424,37 @@ export default function PetApp(): JSX.Element {
   }, [])
 
   useEffect(() => {
+    if (!beats.some((option) => option.key === beat)) setBeat('breath')
+  }, [beats, beat])
+
+  useEffect(() => {
     if (stateId !== 'idle' || forcedTrack) {
       setBeat('breath')
       return
     }
-    const beatMs = (name: IdleBeat) =>
-      phaseDurationMs(library?.byTag(IDLE_BEATS[name].track), 'idle') ?? IDLE_BEATS[name].ms
+    const breath = beats.find((option) => option.key === 'breath') ?? beats[0]
+    if (!breath) return
+    const beatMs = (option: IdleBeatOption) =>
+      phaseDurationMs(library?.byTag(option.track), 'idle') ?? option.ms ?? 3000
     let timer = 0
     const breathe = () => {
       setBeat('breath')
       timer = window.setTimeout(() => {
-        const next = pickIdleBeat(Math.random())
-        if (next === 'breath') {
+        const roll = Math.random()
+        const next = character.builtin
+          ? beats.find((option) => option.key === pickIdleBeat(roll)) ?? breath
+          : pickPackBeat(roll, beats)
+        if (next.key === 'breath') {
           breathe()
           return
         }
-        setBeat(next)
+        setBeat(next.key)
         timer = window.setTimeout(breathe, beatMs(next))
-      }, beatMs('breath'))
+      }, beatMs(breath))
     }
     breathe()
     return () => window.clearTimeout(timer)
-  }, [stateId, forcedTrack, library])
+  }, [stateId, forcedTrack, library, beats, character.builtin])
 
   useEffect(() => {
     if (!inTauri()) return
@@ -498,6 +586,7 @@ export default function PetApp(): JSX.Element {
       <div className="pet-figure">
         {preview && bubbleOpen && (
           <PetSpeechBubble
+            name={character.name}
             text={bubbleText}
             voiceOn={voice}
             speaking={speech.speaking}
@@ -537,7 +626,7 @@ export default function PetApp(): JSX.Element {
             <img
               key={state.id}
               src={poseSrc}
-              alt={forcedTrack?.displayName ?? `诗琚，${state.label}`}
+              alt={forcedTrack?.displayName ?? `${character.name}，${state.label}`}
               draggable={false}
               className="pet-arrive"
             />

@@ -1,4 +1,4 @@
-# 器灵
+﻿# 器灵
 
 器灵是一只本机桌宠：别的程序把一句话送到本机，器灵就会在桌面上念出来。识局是它的第一个客户端。
 
@@ -322,7 +322,25 @@ ollama list
 
 注意：关闭器灵窗口现在只是隐藏宠物；要真正退出，请使用托盘菜单中的“退出器灵”。
 
-## 9. 测试
+## 9. 多角色宠物与角色资源包
+
+器灵支持安装第三方角色资源包，并在内置诗琚与已安装角色之间切换。同一时间只有一个角色在场。
+
+入口：
+
+- 「设定 → 宠物角色 → 管理角色资源包…」
+- 右键器灵 →「角色资源包…」
+- 托盘菜单 →「角色资源包…」
+
+资源包是自包含 ZIP（推荐扩展名 `.qilingpet`），安装后会立即注册为可选角色。内置诗琚始终可用、不可卸载；卸载正在使用的资源包会自动回到诗琚。
+
+- 资源包只包含 WebP/PNG 图片与 JSON，器灵不会执行其中的代码，也不会上传包内容。
+- 安装位置：`%APPDATA%\com.qiling.pet\pet-packs\<characterId>\`
+- 动画轨 id／tags 遵循[多角色动画资产规范](docs/multi-character-animation-spec.md)：`<characterId>-<action>`、`tags` 含动作与角色 id（姿势轨加 `pose`）。
+- 必做动作：`idle`、`think`、`explain`、`advantage`、`disadvantage`；`pickup` 默认要求完整 lift/hover/drop，也可声明 `"pickup": "window-only"` 只保留移窗。
+- 制作格式、字段表、导出与打包步骤、错误码见[角色资源包：制作与安装](docs/pet-packs.md)。
+
+## 10. 测试
 
 ```bash
 npm test

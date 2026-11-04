@@ -4,6 +4,20 @@ description = "Size and show the speech bubble window"
 commands.allow = ["bubble_present"]
 
 [[permission]]
+identifier = "allow-pet-pack-commands"
+description = "Install, activate, and remove character resource packs"
+commands.allow = [
+  "pet_packs_open",
+  "pet_packs_list",
+  "pet_character_current",
+  "pet_pack_load",
+  "pet_pack_install",
+  "pet_pack_uninstall",
+  "pet_pack_set_active",
+  "pet_pack_pick_archive"
+]
+
+[[permission]]
 identifier = "allow-pet-commands"
 description = "Desktop pet voice"
 commands.allow = [

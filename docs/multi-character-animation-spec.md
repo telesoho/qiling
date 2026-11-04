@@ -90,7 +90,7 @@
 | `celebrate` | 庆祝 | 可选 | 尚无 | 可先映射 `advantage` |
 | `error` | 出错 | 可选 | 尚无 | 可先映射 `disadvantage` |
 
-> **性格点缀约定：** 每个角色 MVP 后「建议再做 1 条」个性 idle beat。诗琚已用 `butterfly` / `angry`；大肥鱼等可做语义不同的 beat，但须在 manifest tags 与 `IDLE_BEATS`（或后继配置）登记，**禁止**为同一语义起角色专属状态名（如 `dafeiyu-happy-idle` 当作全局 stateId）。
+> **性格点缀约定：** 每个角色 MVP 后「建议再做 1 条」个性 idle beat。诗琚已用 `butterfly` / `angry`；大肥鱼等可做语义不同的 beat，但须在 manifest tags 与 `IDLE_BEATS`（或后继配置）登记，**禁止**为同一语义起角色专属状态名（如 `dafeiyu-happy-idle` 当作全局 stateId）。安装态资源包用 `pet.json.idleBeats` 作为该「后继配置」（见 §7.3）。
 
 ---
 
@@ -158,6 +158,8 @@
 
 `ms` 仅为回退时长；运行时优先轨烘焙的 `durationMs`（见 `design/anim/spec/folder.md`）。
 
+内置角色仍使用上表；**安装态资源包**可在 `pet.json.idleBeats` 里登记自定义 beat，运行时以声明为准；未声明时若存在 `butterfly`/`angry` 轨则自动沿用，缺 beat 回退呼吸（见 §7.3）。
+
 ### 5.3 pickup（`src/pet/pickup.ts`）
 
 - 相位：`idle` → `lift` → `hover` → `drop`（再回 idle）。  
@@ -221,7 +223,7 @@ public/pet/anim/                   # bake 生成物（gitignore），勿手改
 | 项 | 现行约定 | 示例 |
 | --- | --- | --- |
 | 角色目录 | 稳定英文 id | `shiju`、`dafeiyu` |
-| 动作目录 | 英文 action = 状态／轨语义 | `idle`、`pickup`、`butterfly` |
+| 动作目录 | 英文 action = 状态／轨语义；小写字母开头，允许数字与下划线，不用连字符 | `idle`、`pickup`、`water_splash` |
 | Manifest 轨 id | `<characterId>-<action>`；pickup 诗琚为历史名 `shiju-pickup-hover` | `shiju-idle`、`dafeiyu-think` |
 | tags | 动作 tag + 角色 id；姿势轨另加 `pose` | `["pose","explain","shiju"]` |
 | path | 相对 `design/anim/` | `../characters/shiju/anim/idle/track_struct.json` |
@@ -235,9 +237,19 @@ public/pet/anim/                   # bake 生成物（gitignore），勿手改
 ### 7.2 建议（仓库尚无统一处，新角色按此执行并标「建议」）
 
 1. **新 pickup 轨 id** 建议用 `<characterId>-pickup`（与 `shiju-idle` 对称）。诗琚保留 `shiju-pickup-hover` 作为历史 id，**不必强行改名**以免破坏 bake／测试；新角色不要再发明第三种命名。  
-2. **性格 beat 目录名** 用稳定英文语义（`butterfly`、`angry`、或新角色的 `splash` 等），并在本文 §3 与 manifest tags 登记；禁止只用中文目录名。  
+2. **性格 beat 目录名** 用稳定英文语义（`butterfly`、`angry`、或新角色的 `water_splash`、`tail_wag` 等），并在本文 §3 与 manifest tags 登记；action 允许小写字母、数字与下划线，不使用连字符；禁止只用中文目录名。  
 3. **角色专属 public 源 WebP**（若不用 tracks 逐帧）建议：`public/pet/<characterId>/<action>.webp`，由该角色 `track_struct` 的 `animatedWebp.src` 相对引用。现行诗琚多姿势仍指向 `public/pet/*.webp` 根下文件——迁移时可逐步收拢，**非阻塞 MVP**。  
 4. **多角色默认轨**：`tracks.manifest.json` 的 `defaultTrack` 可为当前默认角色的 pickup 或 idle；切换角色时由运行时按角色 tag 重选，不靠改 action 名。
+
+### 7.3 安装态资源包（`.qilingpet`）
+
+内置角色走 `design/` + `npm run bake:anim`；安装态角色走自包含资源包，两者在运行时遵守同一套 stateId／tag／轨 id 约定。包格式、校验与制作步骤见 **[角色资源包：制作与安装](pet-packs.md)**。
+
+- **编译而非手写**：`pet.json.tracks[].action` 在安装时编译为 §7.1 的条目：`id = <characterId>-<action>`，`tags = [action, characterId]`（姿势动作加 `pose`），`path = tracks/<action>/track_struct.json`。作者不写 id/tags/path。`action` 允许小写字母、数字与下划线，不使用连字符。
+- **必做动作**：`idle`、`think`、`explain`、`advantage`、`disadvantage`；`pickup` 默认必须为 animated（lift/hover/drop 三段逐帧）。允许 `"pickup": "window-only"` 声明「暂无吊起、仅移窗」的例外。
+- **性格 beat**：`pet.json.idleBeats` 是 §3 所说的「后继配置」；未声明时自动沿用 `butterfly`/`angry`，缺 beat 回退呼吸。自定义动作必须先出现在 `tracks` 中。
+- **运行时消费**：与 §5.4 完全一致；`walk`/`wave`/`work`/`sleep`/`celebrate`/`error` 等额外动作可注册，但当前版本不消费，不得宣称已实现（§9.6）。
+- **路径**：包内 `path` 相对包根（不是 `design/anim/`）；`asset.src`、`frameSequence.dir` 仍相对该轨 `track_struct.json`。
 
 ---
 
@@ -262,6 +274,15 @@ public/pet/anim/                   # bake 生成物（gitignore），勿手改
 - [ ] 新 action 若升为全局 stateId，先更新本文与 `PET_STATES`／配置，再加资产。  
 - [ ] 帧级变更走 `design/anim/spec/`，不在本文复制过期 schema。
 
+### 8.4 安装态资源包
+
+- [ ] 安装后编译出的轨 id 为 `<characterId>-<action>`，tags 含 action + 角色 id（姿势含 `pose`），不同角色不共用 id。
+- [ ] 切换角色后，同一 stateId 只播当前角色轨；资源包不得回退使用诗琚的 idle／姿势／beat 文件。
+- [ ] 缺建议／可选轨不阻断；缺姿势回退该角色 idle；缺 pickup 且声明 `window-only` 时仅移窗；缺 beat 回退呼吸。
+- [ ] 卸载当前角色回内置诗琚；内置角色不可卸载；替换同 id 包需明确确认。
+- [ ] 非法规格（缺 MVP、路径穿越、超限、pickup 不符）被拒绝且无半安装。
+- [ ] `walk`／`wave`／`work` 等未消费动作只注册，不在 UI／文档冒充已实现。
+
 ---
 
 ## 9. 不要做清单
@@ -285,6 +306,9 @@ public/pet/anim/                   # bake 生成物（gitignore），勿手改
 | 设计清单 | `design/anim/tracks.manifest.json` |
 | 目录约定 | `design/AGENTS.md` |
 | 帧／bake 契约 | `design/anim/spec/folder.md` |
+| 角色资源包格式与安装 | `docs/pet-packs.md` |
+| 资源包注册表与协议 | `src-tauri/src/pet_pack.rs` |
+| 运行时角色加载 | `src/pet/packs.ts` |
 | 开发计划（提及 OpenPets 等为调研线索） | `docs/development-plan.md` |
 
 ---
@@ -294,3 +318,4 @@ public/pet/anim/                   # bake 生成物（gitignore），勿手改
 | 日期 | 说明 |
 | --- | --- |
 | 2026-11-03 | 初版：多角色共享 stateId、三层清单、与 PET_STATES／IDLE_BEATS／pickup／OpenPets 映射、目录约定与验收。 |
+| 2026-11-03 | 增补 §7.3 安装态资源包（编译映射、pickup 例外、idleBeats）与 §8.4 资源包验收；§5.2 补 beat 后继配置。 |

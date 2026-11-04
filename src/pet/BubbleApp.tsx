@@ -58,6 +58,7 @@ export default function BubbleApp(): JSX.Element {
     <div className="pet-bubble-window" ref={frame}>
       <PetSpeechBubble
         windowed
+        name={snap.name}
         text={snap.text}
         voiceOn={snap.voice}
         speaking={snap.speaking}

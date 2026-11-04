@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "packs",
+  "description": "器灵角色资源包：安装、启用和卸载角色资源包。",
+  "windows": ["packs"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "allow-pet-pack-commands"
+  ]
+}

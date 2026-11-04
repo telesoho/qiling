@@ -74,16 +74,29 @@ interface RawPhase extends Omit<AnimPhase, 'asset'> {
   asset?: AnimAnimatedWebp | RawFrameSequence
 }
 
+export const BUILTIN_CHARACTER_ID = 'shiju'
+
 const MANIFEST_URL = '/pet/anim/manifest.json'
 const DEFAULT_SIZE = { width: 180, height: 240 }
 
-export function createLibrary(manifest: AnimManifest, tracks: AnimTrack[]): AnimLibrary {
+export function createLibrary(
+  manifest: AnimManifest,
+  tracks: AnimTrack[],
+  characterId?: string,
+): AnimLibrary {
   const byId = new Map(tracks.map((track) => [track.id, track]))
   return {
     manifest,
     tracks,
     byId,
-    byTag: (tag) => tracks.find((track) => track.tags.includes(tag)),
+    // 多角色取轨 = 当前角色 ∩ 动作。内置角色也必须带自己的 tag；
+    // 不传 characterId 时保持旧的“只按动作”行为，便于单轨演示与测试。
+    byTag: (tag) =>
+      tracks.find(
+        (track) =>
+          track.tags.includes(tag) &&
+          (!characterId || track.tags.includes(characterId)),
+      ),
   }
 }
 
@@ -158,9 +171,20 @@ export function loadAnimLibrary(): Promise<AnimLibrary> {
         console.warn('轨道读取失败', manifest.tracks[index]?.id, result.reason)
       }
     })
-    return createLibrary(manifest, tracks)
+    return createLibrary(manifest, tracks, BUILTIN_CHARACTER_ID)
   })()
   return cached
+}
+
+/**
+ * 角色切换或资源包覆盖安装后调用：内置 manifest、已解码图片、预载任务
+ * 全部失效。资源包图片 URL 复用同一路径，不清缓存会继续显示旧帧。
+ */
+export function resetAnimCaches(): void {
+  cached = null
+  images.clear()
+  loading.clear()
+  preloading.clear()
 }
 
 /** track 的 idle 相位若是 animatedWebP，直接给出图片 URL。 */
