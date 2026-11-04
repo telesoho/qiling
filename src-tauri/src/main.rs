@@ -9,6 +9,7 @@ mod pet_pack;
 mod spirit;
 mod voice;
 mod voice_assistant;
+mod voice_command;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -502,6 +503,87 @@ fn qiling_voice_assistant_stop(app: AppHandle, state: State<AppState>) -> Result
     .map_err(|error| format!("voice_status_feedback_failed:{error}"))
 }
 
+/// A new turn owns the speakers: any old model answer or synthesized audio is
+/// retired before the next line can be published.
+fn begin_voice_turn(state: &AppState) -> Result<u64, String> {
+    let turn = state.turns.begin();
+    state.local_llm.cancel();
+    state.voice.cancel();
+    state.edge_voice.cancel_all()?;
+    Ok(turn)
+}
+
+/// Ask the connected Siju client for a fresh narration.
+///
+/// Both the settings fallback button and the spoken command end up here, so
+/// permission checks, timeout handling and stale-result protection stay in one
+/// place.
+async fn narrate_current(app: &AppHandle, state: &AppState) -> Result<(), String> {
+    let turn = begin_voice_turn(state)?;
+    app.emit(
+        "qiling-line",
+        serde_json::json!({ "phase": "thinking", "text": "", "mood": "neutral" }),
+    )
+    .map_err(|error| format!("narration_feedback_unavailable:{error}"))?;
+    let outcome = state
+        .protocol
+        .invoke_narrate_current("com.siju.app", spirit::DEFAULT_ACTION_TIMEOUT)
+        .await;
+    if let Ok(result) = &outcome {
+        state.narrations.record("com.siju.app", &result.text);
+    }
+    if !state.turns.is_current(turn) {
+        return Ok(());
+    }
+    match outcome {
+        Ok(result) => app
+            .emit(
+                "qiling-line",
+                serde_json::json!({
+                    "phase": "say",
+                    "text": result.text,
+                    "mood": result.mood
+                }),
+            )
+            .map_err(|error| format!("narration_display_failed:{error}")),
+        Err(code) => {
+            let message = match code.as_str() {
+                "client_unavailable" => "识局当前未连接，暂时无法重新解说。",
+                "action_not_found" | "not_authorized" => "识局尚未获准提供重新解说能力。",
+                "busy" => "识局正在处理另一条解说请求，请稍后再试。",
+                "state_unavailable" => "识局当前没有可用的局面分析。",
+                "state_stale" => "局面已经变化，请等待识局更新分析后再试。",
+                "summarizer_unavailable" => "识局当前的解说服务不可用，请检查解说设置。",
+                "deadline_exceeded" => "重新解说超时，请确认识局状态后再试。",
+                _ => "重新解说失败，请检查识局状态后重试。",
+            };
+            let _ = app.emit(
+                "qiling-line",
+                serde_json::json!({ "phase": "say", "text": message, "mood": "down" }),
+            );
+            Err(code)
+        }
+    }
+}
+
+/// A voice command V1 does not expose gets a spoken explanation, not an Action.
+fn speak_unsupported_command(
+    app: &AppHandle,
+    state: &AppState,
+    command: voice_command::UnsupportedCommand,
+) -> Result<(), String> {
+    begin_voice_turn(state)?;
+    app.emit(
+        "qiling-line",
+        serde_json::json!({
+            "phase": "say",
+            "text": voice_command::guidance(command),
+            "mood": "neutral"
+        }),
+    )
+    .map_err(|error| format!("voice_feedback_failed:{error}"))
+}
+
 #[tauri::command]
 async fn qiling_voice_assistant_respond(
     app: AppHandle,
@@ -515,18 +597,27 @@ async fn qiling_voice_assistant_respond(
     if transcript.is_empty() || transcript.chars().count() > 2_000 {
         return Err("invalid_voice_prompt".into());
     }
+    // A spoken command is a request to a desktop client, not a chat message.
+    // It must not reach the model: the model would answer over the line or try
+    // to plan an operation V1 does not expose.
+    match voice_command::classify(&transcript) {
+        voice_command::VoiceCommand::NarrateCurrent => {
+            return narrate_current(&app, &*state).await;
+        }
+        voice_command::VoiceCommand::Unsupported(command) => {
+            return speak_unsupported_command(&app, &*state, command);
+        }
+        voice_command::VoiceCommand::Conversation => {}
+    }
     // A new question owns the speakers from here on. Anything the previous turn
     // is still generating is retired before this question reaches the model.
-    let turn = state.turns.begin();
+    let turn = begin_voice_turn(&*state)?;
     let turns = Arc::clone(&state.turns);
     app.emit(
         "qiling-line",
         serde_json::json!({ "phase": "thinking", "text": "", "mood": "neutral" }),
     )
     .map_err(|error| format!("voice_feedback_failed:{error}"))?;
-    // Synthesis that was already streaming belongs to the cancelled turn.
-    state.voice.cancel();
-    state.edge_voice.cancel_all()?;
     // "刚才讲了什么" style questions get the recent narrated lines, and only
     // those questions: an ordinary question never carries them.
     let context = state.narrations.context_for(&transcript);
@@ -676,54 +767,7 @@ async fn spirit_invoke_narrate_current(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    // Same ownership rule as the VS Code narration: an interrupted request must
-    // not speak its answer later.
-    let turn = state.turns.begin();
-    let turns = Arc::clone(&state.turns);
-    app.emit(
-        "qiling-line",
-        serde_json::json!({ "phase": "thinking", "text": "", "mood": "neutral" }),
-    )
-    .map_err(|error| format!("narration_feedback_unavailable:{error}"))?;
-    let outcome = state
-        .protocol
-        .invoke_narrate_current("com.siju.app", spirit::DEFAULT_ACTION_TIMEOUT)
-        .await;
-    if let Ok(result) = &outcome {
-        state.narrations.record("com.siju.app", &result.text);
-    }
-    if !turns.is_current(turn) {
-        return Ok(());
-    }
-    match outcome {
-        Ok(result) => app
-            .emit(
-                "qiling-line",
-                serde_json::json!({
-                    "phase": "say",
-                    "text": result.text,
-                    "mood": result.mood
-                }),
-            )
-            .map_err(|error| format!("narration_display_failed:{error}")),
-        Err(code) => {
-            let message = match code.as_str() {
-                "client_unavailable" => "识局当前未连接，暂时无法重新解说。",
-                "not_authorized" => "识局尚未获准提供重新解说能力。",
-                "busy" => "识局正在处理另一条解说请求，请稍后再试。",
-                "state_unavailable" => "识局当前没有可用的局面分析。",
-                "state_stale" => "局面已经变化，请等待识局更新分析后再试。",
-                "summarizer_unavailable" => "识局当前的解说服务不可用，请检查解说设置。",
-                "deadline_exceeded" => "重新解说超时，请确认识局状态后再试。",
-                _ => "重新解说失败，请检查识局状态后重试。",
-            };
-            let _ = app.emit(
-                "qiling-line",
-                serde_json::json!({ "phase": "say", "text": message, "mood": "down" }),
-            );
-            Err(code)
-        }
-    }
+    narrate_current(&app, &*state).await
 }
 
 fn open_pet_packs(app: &AppHandle) -> Result<(), String> {

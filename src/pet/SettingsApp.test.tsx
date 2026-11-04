@@ -68,6 +68,15 @@ describe('器灵设定', () => {
     expect(page).not.toContain('id="llm-api-key"')
   })
 
+  it('explains the spoken re-narration command and keeps the manual fallback', () => {
+    const page = renderToStaticMarkup(<SettingsApp />)
+    expect(page).toContain('重新解说当前局面')
+    expect(page).toContain('命中的口令不会交给对话模型')
+    expect(page).toContain('说“解释当前选区”暂不会触发 VS Code')
+    expect(page).toContain('语音不可用或手动重试时的备用入口')
+    expect(page).toContain('请识局重新解说当前局面')
+  })
+
   it('shows the current character and the pack management entry', () => {
     const page = renderToStaticMarkup(<SettingsApp />)
     expect(page).toContain('宠物角色')
