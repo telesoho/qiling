@@ -21,6 +21,11 @@ design/
     icons/                  # 器灵图标源稿（1024 等）
     chrome/                 # 语言泡泡等壳层 UI 定稿
   characters/
+    lingpao/                # 灵泡（默认桌宠，SVG 骨架）
+      sheets/               # 定稿、状态样张、音乐律动样张
+      docs/                 # 角色设计提案、决策记录
+      anim/                 # 仅说明：无位图轨，动画在 src/pet/SvgSprite.tsx
+      _workshop/            # 源图、CDP 截图、测试音频
     shiju/                  # 诗琚（棋灵／桌宠）
       sheets/               # 定妆、探索稿、否决稿
       ui/                   # 角色相关 UI 稿（若有）
@@ -53,10 +58,11 @@ design/
 
 | 对外称呼 | 目录 id | 备注 |
 | --- | --- | --- |
+| 灵泡（默认） | `characters/lingpao/` | 纯色小团子；SVG 骨架，由运行时直接绘制，**不交付位图轨** |
 | 诗琚 | `characters/shiju/` | 红唐装圆扇定妆；桌宠五态 + 吊起 |
 | 大肥鱼／小鲸娘／鲸鱼娘 | `characters/dafeiyu/` | Q 版鲸尾女孩；画风独立，不强求与诗琚统一 |
 
-新建角色：复制 `characters/_template/`（若尚无则按上表建齐 `sheets|docs|anim|_workshop`），再在 `anim/tracks.manifest.json` 登记轨。
+新建位图角色：复制 `characters/_template/`（若尚无则按上表建齐 `sheets|docs|anim|_workshop`），再在 `anim/tracks.manifest.json` 登记轨。SVG 角色（如灵泡）只保留 `sheets|docs|_workshop`，动画在 `src/pet/SvgSprite.tsx`。
 
 ## 动画轨交付清单（每个 `anim/<action>/`）
 
@@ -110,15 +116,17 @@ design/
 - `track_struct` **v0.5.0**：方案1，诗琚吊起 `frameSize` 180×260，`scale`≈0.408，帧内上升保留；`phases.*.asset` = `animatedWebp` \| `frameSequence`。
 - 多轨：`tracks.manifest` + `demo-tracks.html`。
 
-## 现状（迁移完成，2026-10-30）
+## 现状（迁移完成，2026-10-30；灵泡接入 2026-11-07）
 
 已按目标树迁完：
 
 - `_brand/icons/`、`_brand/chrome/`：器灵图标与语言泡泡定稿
 - `characters/shiju/sheets|docs|anim/{pickup,idle,butterfly,angry,explain,think,advantage,disadvantage}|_workshop/pickup/`
+- `characters/lingpao/{sheets,docs,anim,_workshop}`：状态样张、音乐律动原型、角色设计提案；`anim/` 只有说明文件，运行时渲染在 `src/pet/SvgSprite.tsx`
 - `characters/dafeiyu/sheets|docs|anim(.gitkeep)|_workshop/`（绿幕源 mp4）
 - `anim/spec/` 未动；`anim/tracks.manifest.json` 与 `demo-tracks.html` 路径已更新
 - 运行时多轨：`npm run bake:anim` 从 `anim/tracks.manifest.json` 生成 `public/pet/anim/manifest.json` + 8 条轨（含 pickup 逐帧、7 条姿势 WebP 轨）；桌宠由 `src/pet/anim.ts` 在运行时 fetch，`?track=<id>` 可在浏览器预览锁定任一轨
+- 默认角色已切到灵泡；诗琚保留为第二内置角色。灵泡的 SVG 骨架、眼神跟随与听音乐三档（阈值与运动参数取自 `lingpao-groove.html`）由 `src/pet/` 与 `src-tauri/src/music.rs` 实现
 
 已知残留：
 

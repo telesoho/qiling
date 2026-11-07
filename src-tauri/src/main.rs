@@ -4,6 +4,7 @@ mod cosyvoice;
 mod edge_tts;
 mod http;
 mod local_llm;
+mod music;
 mod narration;
 mod pet_pack;
 mod spirit;
@@ -41,6 +42,8 @@ pub struct AppState {
     narrations: Arc<narration::NarrationLog>,
     /// Installed character resource packs and the active character.
     packs: Arc<pet_pack::PetPackRegistry>,
+    /// System audio loopback for the music-following state.
+    music: Arc<music::MusicSense>,
 }
 
 fn place_pet(pet: &WebviewWindow) {
@@ -138,6 +141,8 @@ fn set_pet_open(app: &AppHandle, open: bool) -> Result<bool, String> {
         state.local_llm.cancel();
         state.voice.cancel();
         state.edge_voice.cancel_all()?;
+        // Hidden pet must not keep reading the system output.
+        state.music.stop()?;
         let stopped = state.voice_assistant.stop();
         let _ = app.emit("qiling-interrupt", ());
         let _ = app.emit(
@@ -176,6 +181,24 @@ fn pet_character_current(state: State<AppState>) -> pet_pack::ActiveCharacter {
 }
 
 #[tauri::command]
+fn qiling_music_sense_start(
+    app: AppHandle,
+    state: State<AppState>,
+) -> Result<bool, String> {
+    state.music.start(app)
+}
+
+#[tauri::command]
+fn qiling_music_sense_stop(state: State<AppState>) -> Result<(), String> {
+    state.music.stop()
+}
+
+#[tauri::command]
+fn qiling_music_sense_status(state: State<AppState>) -> music::MusicSenseStatus {
+    state.music.status()
+}
+
+#[tauri::command]
 async fn pet_pack_load(
     state: State<'_, AppState>,
     pack_id: String,
@@ -208,6 +231,7 @@ async fn pet_pack_install(
                 id: summary.id.clone(),
                 name: summary.name.clone(),
                 builtin: false,
+                renderer: pet_pack::CharacterRenderer::Webp,
             },
         );
     }
@@ -988,6 +1012,7 @@ fn main() {
                 turns: Arc::new(voice_assistant::TurnGate::default()),
                 narrations: Arc::clone(&narrations),
                 packs,
+                music: Arc::new(music::MusicSense::new()),
             });
             if let Some(pet) = app.get_webview_window("pet") {
                 place_pet(&pet);
@@ -1049,6 +1074,9 @@ fn main() {
             pet_pack_uninstall,
             pet_pack_set_active,
             pet_pack_pick_archive,
+            qiling_music_sense_start,
+            qiling_music_sense_stop,
+            qiling_music_sense_status,
             qiling_voice_status,
             qiling_voice_synthesize,
             qiling_voice_cancel,
@@ -1086,6 +1114,7 @@ fn main() {
                 state.voice.shutdown();
                 state.voice_assistant.shutdown();
                 state.local_llm.cancel();
+                state.music.shutdown();
             }
         }
     });

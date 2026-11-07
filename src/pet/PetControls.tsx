@@ -29,12 +29,12 @@ export function PetSpeechBubble(props: {
   speaking: boolean
   onToggleVoice: () => void
   onCollapse: () => void
-  /** 当前角色显示名；内置诗琚是默认值。 */
+  /** 当前角色显示名；默认角色是灵泡。 */
   name?: string
   /** Standalone window. No drag region; layout fills that window. */
   windowed?: boolean
 }): JSX.Element {
-  const name = props.name?.trim() || '诗琚'
+  const name = props.name?.trim() || '灵泡'
   const voiceLabel = props.speaking && props.voiceOn ? '停止' : props.voiceOn ? '静音' : '开声'
   const voiceTitle =
     voiceLabel === '停止' ? '停止当前播报' : voiceLabel === '静音' ? '关闭语音' : '打开语音'

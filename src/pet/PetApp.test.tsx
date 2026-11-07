@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { publishLine } from '../lib/line'
-import { saveQiLingSettings, loadQiLingSettings } from '../lib/settings'
+import { loadQiLingSettings, saveQiLingSettings } from '../lib/settings'
 import type { AnimTrack } from './anim'
 import PetApp from './PetApp'
+import { loadActiveCharacter, rendererOf } from './packs'
 import { PickupSprite } from './PickupSprite'
 
 const memory = () => {
@@ -26,7 +27,7 @@ describe('器灵桌宠', () => {
   it('waits in the thinking pose until a voiced line is audible', () => {
     publishLine({ phase: 'say', text: '这步不错。', mood: 'up' })
     const pet = renderToStaticMarkup(<PetApp />)
-    expect(pet).toContain('/pet/think.webp')
+    expect(pet).toContain('data-pose-eye="lookup"')
     expect(pet).toContain('让我想想')
     expect(pet).not.toContain('这步不错')
   })
@@ -35,22 +36,15 @@ describe('器灵桌宠', () => {
     saveQiLingSettings({ ...loadQiLingSettings(), voice: false })
     publishLine({ phase: 'say', text: '先看这一步。', mood: 'neutral' })
     const pet = renderToStaticMarkup(<PetApp />)
-    expect(pet).toContain('/pet/explain.webp')
+    expect(pet).toContain('data-pose-eye="open"')
     expect(pet).toContain('先看这一步。')
   })
 
   it('hides the bubble without hiding the sprite', () => {
-    saveQiLingSettings({
-      voice: true,
-      bubble: false,
-      voiceAssistant: false,
-      wakeWord: '器灵',
-      voiceEngine: 'auto',
-      edgeVoice: 'zh-CN-XiaoxiaoNeural',
-    })
+    saveQiLingSettings({ ...loadQiLingSettings(), voice: true, bubble: false })
     publishLine({ phase: 'say', text: '这步不错。', mood: 'up' })
     const pet = renderToStaticMarkup(<PetApp />)
-    expect(pet).toContain('/pet/think.webp')
+    expect(pet).toContain('data-part="root"')
     expect(pet).not.toContain('pet-bubble')
   })
 
@@ -85,5 +79,23 @@ describe('器灵桌宠', () => {
     expect(html).toContain('class="pet-pickup"')
     expect(html).toContain('width="180"')
     expect(html).toContain('height="260"')
+  })
+
+  it('uses the bitmap character when the preview URL asks for shiju', async () => {
+    const scope = globalThis as unknown as { window?: unknown }
+    scope.window = { location: { search: '?character=shiju' } }
+    try {
+      const character = await loadActiveCharacter()
+      expect(character.id).toBe('shiju')
+      expect(rendererOf(character)).toBe('webp')
+    } finally {
+      delete scope.window
+    }
+  })
+
+  it('defaults the preview to the svg character', async () => {
+    const character = await loadActiveCharacter()
+    expect(character.id).toBe('lingpao')
+    expect(rendererOf(character)).toBe('svg')
   })
 })

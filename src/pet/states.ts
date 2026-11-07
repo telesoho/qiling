@@ -62,6 +62,12 @@ export function builtinBeatOptions(
   return options
 }
 
+/** 灵泡没有位图性格节拍，只有呼吸。 */
+export function breathBeatOption(): IdleBeatOption {
+  const beat = IDLE_BEATS.breath
+  return { key: 'breath', track: beat.track, line: beat.line, ms: beat.ms }
+}
+
 export interface PackBeatDecl {
   action: string
   line: string

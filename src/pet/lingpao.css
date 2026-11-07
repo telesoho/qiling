@@ -1,0 +1,207 @@
+/*
+ * 灵泡的 SVG 动画。
+ *
+ * 待机/说话/拎起用 CSS；听音乐时由 `SvgSprite` 的 rAF 直接写 transform，
+ * 因此 `.is-dancing` 下必须关掉同一元素上的 CSS 动画，否则会互相覆盖。
+ * 参数与 `lingpao-groove.html` 的原型一致。
+ */
+
+.lingpao {
+  display: block;
+  overflow: visible;
+  pointer-events: none;
+  -webkit-user-drag: none;
+}
+
+.lingpao .lp-dance {
+  transform-box: view-box;
+  animation: lp-float 4.2s ease-in-out infinite alternate;
+}
+
+.lingpao .lp-breathe {
+  transform-box: view-box;
+  transform-origin: 90px 209px;
+  animation: lp-breathe 3.8s ease-in-out infinite;
+}
+
+.lingpao .lp-tilt {
+  transform-box: view-box;
+  transform-origin: 90px 160px;
+}
+
+.lingpao .lp-ground {
+  fill: #000;
+  opacity: 0.14;
+  transform-box: view-box;
+  transform-origin: 90px 216px;
+}
+
+.lingpao .lp-body {
+  fill: var(--lp-body, #ff6b4a);
+}
+
+.lingpao .lp-cheeks ellipse {
+  fill: #bd3d2a;
+  opacity: 0;
+  transition: opacity 0.25s;
+}
+
+.lingpao .lp-cheeks.on ellipse {
+  opacity: 0.23;
+}
+
+.lingpao .lp-phones {
+  opacity: 0;
+  transform: scale(0.82);
+  transform-box: view-box;
+  transform-origin: 90px 128px;
+  transition: opacity 0.2s ease, transform 0.28s cubic-bezier(0.2, 1.5, 0.4, 1);
+}
+
+.lingpao .lp-phones.on {
+  opacity: 1;
+  transform: none;
+}
+
+.lingpao .lp-notes {
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+
+.lingpao .lp-notes.on {
+  opacity: 1;
+}
+
+.lingpao .lp-note-a {
+  animation: lp-note-rise 2.8s ease-out infinite;
+}
+
+.lingpao .lp-note-b {
+  animation: lp-note-rise 2.8s ease-out infinite 1.4s;
+}
+
+.lingpao .lp-eye {
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: transform 0.07s linear;
+}
+
+.lingpao .lp-eyes.blink .lp-eye {
+  transform: scaleY(0.08);
+}
+
+.lingpao .lp-mouth-talk {
+  animation: lp-flap 0.15s steps(2, end) infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.lingpao .lp-gaze {
+  transition: transform 0.12s ease-out;
+}
+
+.lingpao .lp-spark {
+  animation: lp-twinkle 2.1s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.lingpao .lp-dot {
+  animation: lp-rise 2.6s ease-out infinite;
+}
+
+.lingpao .lp-steam {
+  animation: lp-steam 2.2s ease-in-out infinite;
+}
+
+.lingpao .lp-drop {
+  animation: lp-drip 2.8s ease-in infinite;
+}
+
+.lingpao .lp-ripple {
+  animation: lp-ripple 2.4s ease-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+/* 听音乐：由 rAF 接管 transform，关掉 CSS 动画与平滑，避免双重位移。 */
+.lingpao.is-dancing .lp-dance,
+.lingpao.is-dancing .lp-breathe {
+  animation: none;
+}
+
+.lingpao.is-dancing .lp-gaze {
+  transition: none;
+}
+
+/* 被拎起：整体轻轻晃，不伪造逐帧吊起动画。 */
+.lingpao.is-holding .lp-dance {
+  animation: lp-dangle 1.7s ease-in-out infinite;
+}
+
+@keyframes lp-float {
+  from { transform: translateY(0); }
+  to { transform: translateY(-5px); }
+}
+
+@keyframes lp-breathe {
+  0%, 100% { transform: scale(1, 1); }
+  50% { transform: scale(1.018, 0.972); }
+}
+
+@keyframes lp-dangle {
+  0%, 100% { transform: rotate(-3deg) translateY(3px); }
+  50% { transform: rotate(3deg) translateY(-2px); }
+}
+
+@keyframes lp-note-rise {
+  0% { transform: translate(0, 6px); opacity: 0; }
+  10%, 82% { opacity: 0.95; }
+  100% { transform: translate(9px, -26px); opacity: 0; }
+}
+
+@keyframes lp-flap {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(0.3); }
+}
+
+@keyframes lp-twinkle {
+  0%, 100% { transform: scale(0.5) rotate(0); opacity: 0.2; }
+  50% { transform: scale(1.1) rotate(15deg); opacity: 1; }
+}
+
+@keyframes lp-rise {
+  0% { transform: translate(0, 6px); opacity: 0; }
+  25% { opacity: 1; }
+  100% { transform: translate(9px, -24px); opacity: 0; }
+}
+
+@keyframes lp-steam {
+  0%, 100% { transform: translateY(2px); opacity: 0.15; }
+  50% { transform: translateY(-8px); opacity: 0.8; }
+}
+
+@keyframes lp-drip {
+  0% { transform: translateY(0); opacity: 0; }
+  18% { opacity: 1; }
+  82% { transform: translateY(13px); opacity: 0.85; }
+  100% { transform: translateY(16px); opacity: 0; }
+}
+
+@keyframes lp-ripple {
+  0% { transform: scale(0.7); opacity: 0; }
+  35% { opacity: 0.5; }
+  100% { transform: scale(1.2); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lingpao,
+  .lingpao * {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+.pet-sprite .lingpao {
+  pointer-events: none;
+}

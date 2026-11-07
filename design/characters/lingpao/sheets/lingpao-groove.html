@@ -29,6 +29,7 @@
     }
 
     * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
     html { min-width: 320px; background: var(--bg); }
     body {
       margin: 0;
@@ -159,6 +160,30 @@
     .upload-copy { min-width: 0; }
     .upload strong { display: block; color: #f4e8df; font-size: 12px; font-weight: 700; }
     .upload small { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+    .source-switch {
+      display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px;
+      margin-bottom: 13px; padding: 5px; border: 1px solid var(--line); border-radius: 14px;
+      background: rgba(12, 10, 9, .32);
+    }
+    .source-option {
+      display: flex; align-items: center; justify-content: center; gap: 6px;
+      padding: 8px 10px; border: 0; border-radius: 10px; background: transparent;
+      color: #a2958b; font-size: 11px; cursor: pointer; transition: .18s ease;
+    }
+    .source-option:hover:not(.is-on) { color: var(--text); }
+    .source-option.is-on {
+      background: rgba(255, 112, 79, .16); color: #ffe9df; font-weight: 750;
+      box-shadow: inset 0 0 0 1px rgba(255, 112, 79, .34);
+    }
+    .system-card.is-listening { border-style: solid; border-color: rgba(142, 224, 189, .5); background: rgba(142, 224, 189, .07); }
+    .system-card.is-listening .upload-icon { background: rgba(142, 224, 189, .14); color: var(--mint); }
+    .live-dot {
+      display: block; width: 7px; height: 7px; border-radius: 50%; background: var(--mint);
+      box-shadow: 0 0 0 4px rgba(142, 224, 189, .1), 0 0 10px rgba(142, 224, 189, .6);
+      animation: dotPulse 1.4s ease-in-out infinite;
+    }
+    .system-note { margin: 12px 2px 0; color: #9b8e84; font-size: 10px; line-height: 1.75; }
+    .system-note strong { color: #b3a59a; font-weight: 650; }
     input[type="file"] { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; clip-path: inset(50%); border: 0; }
     .track-row { display: flex; align-items: center; gap: 10px; min-width: 0; margin-top: 15px; }
     .track-art { display: grid; place-items: center; flex: 0 0 38px; width: 38px; height: 38px; border: 1px solid rgba(255,209,138,.16); border-radius: 12px; background: linear-gradient(145deg, rgba(255,112,79,.17), rgba(255,209,138,.08)); color: var(--gold); font-size: 16px; }
@@ -371,6 +396,11 @@
             <span class="section-index">02 / AUDIO</span>
           </div>
 
+          <div class="source-switch" role="group" aria-label="音乐来源">
+            <button class="source-option is-on" id="sourceFile" type="button" data-source="file" aria-pressed="true">本地音乐</button>
+            <button class="source-option" id="sourceSystem" type="button" data-source="system" aria-pressed="false">系统声音</button>
+          </div>
+
           <label class="upload" id="dropZone" for="fileInput" tabindex="0">
             <input id="fileInput" type="file" accept="audio/*,.mp3,.wav,.flac,.ogg,.m4a,.aac" />
             <span class="upload-icon" aria-hidden="true">♫</span>
@@ -380,6 +410,18 @@
             </span>
           </label>
 
+          <!-- 系统声音：浏览器只能借「分享屏幕 / 标签页」的音频回环拿到；桌面版器灵走 WASAPI（src-tauri/src/music.rs），不需要分享屏幕。 -->
+          <button class="upload system-card" id="listenButton" type="button" hidden aria-pressed="false">
+            <span class="upload-icon" id="listenIcon" aria-hidden="true">♫</span>
+            <span class="upload-copy">
+              <strong id="listenTitle">开始聆听系统声音</strong>
+              <small id="listenSub">分享一次屏幕或正在放歌的标签页；灵泡只在本机分析，不录音、不上传。</small>
+            </span>
+          </button>
+          <p class="system-note" id="systemNote" hidden>
+            <strong>浏览器限制：</strong>需 Windows 上的 Chrome / Edge；分享时选「整个屏幕」并勾选“分享系统音频”，或直接分享正在放歌的标签页。窗口分享通常没有声音；音量由系统控制，这里不接管播放。桌面版器灵用系统回环（WASAPI），不需要这些步骤。
+          </p>
+
           <div class="track-row">
             <div class="track-art" aria-hidden="true">♫</div>
             <div class="track-meta">
@@ -388,7 +430,7 @@
             </div>
           </div>
 
-          <div class="player">
+          <div class="player" id="player">
             <div class="player-top">
               <button class="play-button" id="playButton" type="button" disabled aria-label="播放音乐" title="播放">▶</button>
               <div class="seek-wrap">
@@ -407,7 +449,7 @@
 
           <div class="stats">
             <div class="stat"><div class="stat-label">Animation tempo</div><div class="stat-value" id="bpmValue">—<span class="stat-unit">BPM</span></div></div>
-            <div class="stat"><div class="stat-label">Beat points</div><div class="stat-value" id="beatValue">—</div></div>
+            <div class="stat"><div class="stat-label" id="beatLabel">Beat points</div><div class="stat-value" id="beatValue">—</div></div>
           </div>
 
           <div class="tempo-panel" aria-labelledby="tempoTitle">
@@ -458,7 +500,7 @@
           <div class="sense-list">
             <div class="sense-item"><span class="sense-label"><i class="sense-dot" style="background:#ffd18a"></i>低频能量 Bass</span><span class="sense-value" id="bassValue">0%</span></div>
             <div class="sense-item"><span class="sense-label"><i class="sense-dot" style="background:#ff704f"></i>整体能量</span><span class="sense-value" id="energyValue">0%</span></div>
-            <div class="sense-item"><span class="sense-label"><i class="sense-dot" style="background:#ff704f"></i>播放位置</span><span class="sense-value" id="timeValue">00:00</span></div>
+            <div class="sense-item"><span class="sense-label"><i class="sense-dot" style="background:#ff704f"></i><span id="timeLabel">播放位置</span></span><span class="sense-value" id="timeValue">00:00</span></div>
             <div class="sense-item"><span class="sense-label"><i class="sense-dot" style="background:#fff3e6"></i>节拍状态</span><span class="sense-value" id="beatState">等待输入</span></div>
           </div>
           <div class="mood-card">
@@ -501,6 +543,11 @@
     const progress = $('progress');
     const currentTimeEl = $('currentTime');
     const durationEl = $('duration');
+    const listenButton = $('listenButton');
+    const systemNote = $('systemNote');
+    const trackArt = document.querySelector('.track-art');
+    const timeLabel = $('timeLabel');
+    const sourceButtons = { file: $('sourceFile'), system: $('sourceSystem') };
     const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
     const INK = '#2B1618';
@@ -551,6 +598,46 @@
     let raf = 0;
     let isSeeking = false;
     let audioReady = false;
+
+    // ---------------------------------------------------------------------
+    // 系统声音（浏览器原型路径）
+    // 桌面版器灵在 src-tauri/src/music.rs 里用 WASAPI 回环直接读默认播放设备；
+    // 浏览器没有这条权限，只能借 getDisplayMedia 分享「整个屏幕 / 标签页」时
+    // 拿到的音频轨做同样的实时分析。只在本机内存里算，不录音、不上传。
+    // 存在/静音判定与鼓点估速对齐 music.rs，方便原型和真机对得上。
+    // ---------------------------------------------------------------------
+    const LOUD_RMS = 0.0005;
+    const QUIET_RMS = 0.00015;
+    const START_SECONDS = 1.2;
+    const STOP_SECONDS = 3.5;
+    const ONSET_RISE = 0.07;
+    const ONSET_COOLDOWN = 0.18;
+    const ONSET_ENV = 0.12;
+    const ONSET_INTERVAL_MIN = 0.24;
+    const ONSET_INTERVAL_MAX = 1.2;
+    const BPM_MIN = 70;
+    const BPM_MAX = 160;
+    const MAX_ONSETS = 16;
+
+    let sourceMode = 'file';
+    let systemStream = null;
+    let systemNode = null;
+    let systemAttempt = 0;
+    let systemStarting = false;
+    let systemListening = false;
+    let systemActive = false;
+    let systemLoudSeconds = 0;
+    let systemQuietSeconds = 0;
+    let listenStartAt = 0;
+    let liveBpm = 0;
+    let liveBeatCount = 0;
+    let onsetTimes = [];
+    let bassEnvelope = 0;
+    let lastOnsetAt = -1;
+    let loadedFileName = '';
+    let loadedTrackSub = '';
+    /** 切到系统声音前暂存本地音乐的整曲分析，切回来时恢复，不必重新解码。 */
+    let fileTempoSnapshot = null;
 
     function readCandidateBpm(candidate) {
       const value = Number(candidate?.value ?? candidate?.bpm ?? candidate?.tempo);
@@ -616,20 +703,26 @@
       $('tempoHalfValue').textContent = formatTempo(tempoValues.half);
       $('tempoPrimaryValue').textContent = formatTempo(tempoValues.primary);
       $('tempoDoubleValue').textContent = formatTempo(tempoValues.double);
-      $('tempoConfidence').textContent = bpmConfidence > 0
-        ? `节奏证据 ${(bpmConfidence * 100).toFixed(0)}%`
-        : (primaryBpm > 0 ? '候选速度' : '等待分析');
+      $('tempoConfidence').textContent = sourceMode === 'system'
+        ? (liveBpm > 0 ? '实时估速' : '等待鼓点')
+        : (bpmConfidence > 0
+          ? `节奏证据 ${(bpmConfidence * 100).toFixed(0)}%`
+          : (primaryBpm > 0 ? '候选速度' : '等待分析'));
 
       document.querySelectorAll('.tempo-option').forEach((button) => {
         const mode = button.dataset.tempoMode;
-        const disabled = primaryBpm <= 0 || (mode === 'half' && tempoValues.half <= 0) || (mode === 'double' && tempoValues.double <= 0) || (mode === 'primary' && tempoValues.primary <= 0);
+        const disabled = primaryBpm <= 0 || (mode === 'primary' && sourceMode === 'system') || (mode === 'half' && tempoValues.half <= 0) || (mode === 'double' && tempoValues.double <= 0) || (mode === 'primary' && tempoValues.primary <= 0);
         button.disabled = disabled;
         button.classList.toggle('active', tempoMode === mode);
         button.setAttribute('aria-pressed', String(tempoMode === mode));
       });
 
       const primaryText = primaryBpm > 0 ? `${primaryBpm.toFixed(1)} BPM` : '尚未识别';
-      if (tempoMode === 'auto' && suggestedTempoMode !== 'primary') {
+      if (sourceMode === 'system') {
+        $('tempoHint').textContent = liveBpm > 0
+          ? `系统声音模式按实时鼓点估速：${liveBpm.toFixed(1)} BPM（最近几次鼓点间隔取中位数）。这里没有整曲分析，所以不提供半拍 / 双拍候选；切回本地音乐可做整曲节拍分析。`
+          : '系统声音模式正在用实时鼓点估速；鼓点还不够时按 96 BPM 的备用节拍摇摆。切回本地音乐可做整曲节拍分析。';
+      } else if (tempoMode === 'auto' && suggestedTempoMode !== 'primary') {
         const label = suggestedTempoMode === 'half' ? '半拍' : '双拍';
         $('tempoHint').textContent = `检测主拍为 ${primaryText}，自动建议采用${label} ${bpm.toFixed(1)} BPM。也可以切回检测主拍；这只改变灵泡跟拍速度，不会改变音乐播放速度。情绪仍由实时能量判断。`;
       } else if (tempoMode === 'half') {
@@ -688,6 +781,111 @@
       const m = Math.floor(seconds / 60).toString().padStart(2, '0');
       const s = Math.floor(seconds % 60).toString().padStart(2, '0');
       return `${m}:${s}`;
+    }
+    /** 文件模式看 audio.currentTime；系统声音没有播放进度，用聆听时长。 */
+    function playbackSeconds() {
+      if (sourceMode === 'system') {
+        return systemListening ? Math.max(0, performance.now() / 1000 - listenStartAt) : 0;
+      }
+      return Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+    }
+    /** 当前是否真的有声音在驱动灵泡（文件在播 / 系统声音已判定为存在）。 */
+    function isLiveNow() {
+      if (sourceMode === 'system') return systemActive;
+      return !audio.paused && !audio.ended;
+    }
+    function effectiveBpmValue() {
+      return bpm > 0 ? bpm : FALLBACK_BPM;
+    }
+    /** 保留节拍相位地换速度，避免系统声音估速变化时灵泡跳一下。 */
+    function applyLiveBpm(value) {
+      if (value === liveBpm) return;
+      const now = performance.now() / 1000;
+      const position = Math.max(0, (now - beatStart) * effectiveBpmValue() / 60);
+      liveBpm = value;
+      primaryBpm = value;
+      tempoValues = { half: 0, primary: value, double: 0 };
+      bpm = value;
+      updateTempoUI();
+      beatStart = now - position * 60 / effectiveBpmValue();
+      clockBeatIdx = -1;
+    }
+    function updateLiveBpm() {
+      if (onsetTimes.length < 5) return;
+      const intervals = [];
+      for (let i = 1; i < onsetTimes.length; i++) {
+        const interval = onsetTimes[i] - onsetTimes[i - 1];
+        if (interval >= ONSET_INTERVAL_MIN && interval <= ONSET_INTERVAL_MAX) intervals.push(interval);
+      }
+      if (intervals.length < 4) return;
+      intervals.sort((a, b) => a - b);
+      const candidate = 60 / intervals[Math.floor(intervals.length / 2)];
+      if (candidate < BPM_MIN || candidate > BPM_MAX) return;
+      if (Math.abs(candidate - liveBpm) < 2) return;
+      applyLiveBpm(candidate);
+    }
+    /** 鼓点落点接近预测拍点时小幅拨钟，最多 40ms，和运行时 music.ts 的 lockBeatPhase 一致。 */
+    function lockLivePhase() {
+      const duration = 60 / effectiveBpmValue();
+      const now = performance.now() / 1000;
+      const position = (now - beatStart) / duration;
+      const phase = position - Math.floor(position);
+      if (Math.min(phase, 1 - phase) > .35) return;
+      const error = (phase <= .5 ? phase : phase - 1) * duration;
+      beatStart += clamp(error * .25, -.04, .04);
+    }
+    /** 起音检测用 analyser 的原始 bass（约 40ms 平滑）；bassSmooth 是给能量条看的慢平滑（约 250ms），拿它找鼓点会漏掉大半。 */
+    function detectLiveOnset(bassLevel) {
+      const rise = bassLevel - bassEnvelope;
+      bassEnvelope += rise * ONSET_ENV;
+      const now = performance.now() / 1000;
+      if (rise <= ONSET_RISE) return;
+      if (lastOnsetAt >= 0 && now - lastOnsetAt < ONSET_COOLDOWN) return;
+      lastOnsetAt = now;
+      onsetTimes.push(now);
+      while (onsetTimes.length > MAX_ONSETS) onsetTimes.shift();
+      updateLiveBpm();
+      lockLivePhase();
+      $('beatState').textContent = '跟拍中';
+    }
+    /** 对齐 music.rs 的存在判定：连续 1.2s 有声音才开始跟，连续 3.5s 安静就停。 */
+    function updateSystemPresence(dt, rms) {
+      if (rms > LOUD_RMS) {
+        systemLoudSeconds += dt;
+        systemQuietSeconds = 0;
+      } else if (rms < QUIET_RMS) {
+        systemQuietSeconds += dt;
+        systemLoudSeconds = 0;
+      }
+      if (!systemActive && systemLoudSeconds >= START_SECONDS) {
+        systemActive = true;
+        liveBeatCount = 0;
+        $('beatValue').textContent = '0';
+        beatStart = performance.now() / 1000;
+        clockBeatIdx = -1;
+        lastOnsetAt = -1;
+        bassEnvelope = 0;
+        onsetTimes = [];
+        $('waveCaption').textContent = '系统声音 · 实时';
+        setStatus('系统声音 · 跟随中', 'ready');
+      }
+      if (systemActive && systemQuietSeconds >= STOP_SECONDS) {
+        systemActive = false;
+        liveBeatCount = 0;
+        onsetTimes = [];
+        bassEnvelope = 0;
+        lastOnsetAt = -1;
+        applyLiveBpm(0);
+        forced = null;
+        setPreviewUI('auto');
+        setMood('idle');
+        $('beatValue').textContent = '—';
+        $('stageState').textContent = '系统声音 · 安静';
+        $('stageHint').textContent = '没有听到声音。播放音乐或视频，灵泡就会继续跟上。';
+        $('beatState').textContent = '等待声音';
+        $('waveCaption').textContent = '系统声音 · 安静';
+        setStatus('系统声音 · 聆听中', 'ready');
+      }
     }
     function lowerBound(arr, value) {
       let lo = 0, hi = arr.length;
@@ -753,7 +951,7 @@
       currentMood = mood;
       paintFace();
       const info = MOODS[mood];
-      $('stageState').textContent = info.stage + (forced ? ' · 预览' : '');
+      $('stageState').textContent = info.stage + (forced ? ' · 预览' : '') + (sourceMode === 'system' ? ' · 系统声音' : '');
       $('stageHint').textContent = info.hint;
       $('beatState').textContent = info.beat;
       $('moodValue').textContent = info.label;
@@ -858,6 +1056,10 @@
       pulse = 0;
       bassSmooth = 0;
       energySmooth = 0;
+      liveBpm = 0;
+      onsetTimes = [];
+      bassEnvelope = 0;
+      lastOnsetAt = -1;
       $('beatValue').textContent = '—';
       updateTempoUI();
       $('bassValue').textContent = '0%';
@@ -865,7 +1067,7 @@
       $('energyFill').style.width = '0%';
     }
     async function analyzeFile(file) {
-      if (!file) return;
+      if (!file || sourceMode !== 'file') return;
       const accepted = file.type.startsWith('audio/') || /\.(mp3|wav|flac|ogg|m4a|aac)$/i.test(file.name);
       if (!accepted) {
         setAnalyzeMessage('这个文件看起来不是音频格式，请选择 MP3、WAV、FLAC、OGG、M4A 或 AAC。', true);
@@ -883,8 +1085,10 @@
       progress.disabled = true;
       $('stageState').textContent = '正在准备音乐';
       $('beatState').textContent = '分析中';
-      $('trackName').textContent = file.name;
-      $('trackSub').textContent = `${(file.size / (1024 * 1024)).toFixed(1)} MB · 本地音频`;
+      loadedFileName = file.name;
+      loadedTrackSub = `${(file.size / (1024 * 1024)).toFixed(1)} MB · 本地音频`;
+      $('trackName').textContent = loadedFileName;
+      $('trackSub').textContent = loadedTrackSub;
       $('waveCaption').textContent = '正在分析';
       setAnalyzeMessage('正在准备音频并载入节拍分析引擎…');
       setStatus('正在分析音乐…', 'loading');
@@ -903,6 +1107,13 @@
       })().then((value) => ({ ok: true, value })).catch((error) => ({ ok: false, error }));
       const [engineResult, decodeResult] = await Promise.all([engineTask, decodeTask]);
       if (sequence !== analysisSequence) return; // 忽略较早文件的迟到结果
+      if (sourceMode !== 'file') {
+        // 分析途中切到了系统声音：结果作废，但文件仍可播放；切回本地后重新选一次可再做整曲分析。
+        audioReady = true;
+        playButton.disabled = false;
+        progress.disabled = false;
+        return;
+      }
 
       let analysisNote = '';
       let analysisSucceeded = false;
@@ -967,7 +1178,7 @@
     }
 
     function resetBeatTracking() {
-      const t = audio.currentTime || 0;
+      const t = playbackSeconds();
       beatCursor = lowerBound(beatTimes, t);
       lastBeatIndex = Math.max(0, beatCursor - 1);
       lastBeatTime = beatTimes[lastBeatIndex] ?? 0;
@@ -987,9 +1198,289 @@
         $('energyFill').style.width = `${Math.round(energySmooth * 100)}%`;
         $('waveCaption').textContent = '动作预览模式';
       } else {
-        setMood(audio.paused ? 'idle' : 'groove');
-        $('waveCaption').textContent = audio.paused ? '等待声音输入' : '实时音频';
+        setMood(isLiveNow() ? 'groove' : 'idle');
+        $('waveCaption').textContent = sourceMode === 'system'
+          ? (systemActive ? '系统声音 · 实时' : '系统声音 · 安静')
+          : (audio.paused ? '等待声音输入' : '实时音频');
       }
+    }
+
+    // 来源切换：本地文件 / 系统声音
+    function updateSourceButtons() {
+      ['file', 'system'].forEach((mode) => {
+        const button = sourceButtons[mode];
+        const active = sourceMode === mode;
+        button.classList.toggle('is-on', active);
+        button.setAttribute('aria-pressed', String(active));
+      });
+    }
+    function updateListenUI() {
+      listenButton.classList.toggle('is-listening', systemListening);
+      listenButton.setAttribute('aria-pressed', String(systemListening));
+      $('listenIcon').innerHTML = systemListening ? '<span class="live-dot"></span>' : '♫';
+      $('listenTitle').textContent = systemListening ? '正在聆听系统声音' : '开始聆听系统声音';
+      $('listenSub').textContent = systemListening
+        ? '再次点击停止聆听 · 只在本机实时分析，不录音、不上传'
+        : '分享一次屏幕或正在放歌的标签页；灵泡只在本机分析，不录音、不上传。';
+    }
+    function applySourceUI() {
+      const system = sourceMode === 'system';
+      $('dropZone').hidden = system;
+      listenButton.hidden = !system;
+      systemNote.hidden = !system;
+      trackArt.textContent = system ? '◉' : '♫';
+      timeLabel.textContent = system ? '聆听时长' : '播放位置';
+      $('player').hidden = system;
+      if (system) {
+        playButton.disabled = true;
+        progress.disabled = true;
+        $('volume').disabled = true;
+        $('beatLabel').textContent = 'Live beats';
+        $('trackName').textContent = systemListening ? '系统声音 · 实时' : '系统声音 · 未开始';
+        $('trackSub').textContent = '浏览器回环捕获 · 只在本机分析';
+        currentTimeEl.textContent = '00:00';
+        durationEl.textContent = '00:00';
+        progress.value = '0';
+      } else {
+        playButton.disabled = !audioReady;
+        progress.disabled = !audioReady;
+        $('volume').disabled = false;
+        $('beatLabel').textContent = 'Beat points';
+        $('beatValue').textContent = sourceBeatTimes.length ? sourceBeatTimes.length.toLocaleString() : '—';
+        $('trackName').textContent = loadedFileName || '尚未选择音乐';
+        $('trackSub').textContent = loadedTrackSub || '你的音乐只在本地浏览器中处理';
+      }
+    }
+    function stopSystemCapture({ silent = false } = {}) {
+      const wasListening = systemListening;
+      systemAttempt += 1;
+      systemListening = false;
+      systemActive = false;
+      systemStarting = false;
+      liveBeatCount = 0;
+      systemLoudSeconds = 0;
+      systemQuietSeconds = 0;
+      liveBpm = 0;
+      onsetTimes = [];
+      bassEnvelope = 0;
+      lastOnsetAt = -1;
+      if (systemStream) {
+        systemStream.getTracks().forEach((track) => { try { track.stop(); } catch {} });
+        systemStream = null;
+      }
+      if (systemNode) {
+        try { systemNode.disconnect(); } catch {}
+        systemNode = null;
+      }
+      if (wasListening && !silent) {
+        forced = null;
+        setPreviewUI('auto');
+        setMood('idle');
+        primaryBpm = 0;
+        tempoValues = { half: 0, primary: 0, double: 0 };
+        bpm = 0;
+        energySmooth = 0;
+        bassSmooth = 0;
+        updateTempoUI();
+        $('bpmValue').innerHTML = '—<span class="stat-unit">BPM</span>';
+        $('beatValue').textContent = '—';
+        $('bassValue').textContent = '0%';
+        $('energyValue').textContent = '0%';
+        $('energyFill').style.width = '0%';
+        $('stageState').textContent = '系统声音 · 已停止';
+        $('stageHint').textContent = '已停止聆听。再点一次「开始聆听系统声音」可以继续。';
+        $('beatState').textContent = '已停止';
+        $('waveCaption').textContent = '系统声音 · 已停止';
+        setStatus('系统声音 · 已停止', 'idle');
+        setAnalyzeMessage('已停止聆听系统声音。');
+        if (sourceMode === 'system') {
+          $('trackName').textContent = '系统声音 · 未开始';
+          $('trackSub').textContent = '浏览器回环捕获 · 只在本机分析';
+        }
+      }
+      listenButton.disabled = false;
+      updateListenUI();
+    }
+    async function startSystemListening() {
+      if (sourceMode !== 'system' || systemListening || systemStarting) return;
+      const media = navigator.mediaDevices;
+      if (!media?.getDisplayMedia) {
+        setAnalyzeMessage('这个浏览器没有开放屏幕 / 系统声音捕获接口。请用 Windows 上的 Chrome 或 Edge 打开本页（直接打开文件或走 localhost 都可以）。', true);
+        return;
+      }
+      const attempt = ++systemAttempt;
+      systemStarting = true;
+      listenButton.disabled = true;
+      setStatus('系统声音 · 等待分享', 'loading');
+      setAnalyzeMessage('浏览器会弹出分享窗口：选「整个屏幕」并勾选“分享系统音频”，或者直接分享正在放歌的标签页。');
+      let stream = null;
+      try {
+        stream = await media.getDisplayMedia({
+          video: true,
+          audio: true,
+          selfBrowserSurface: 'exclude',
+          surfaceSwitching: 'exclude',
+          systemAudio: 'include'
+        });
+        if (attempt !== systemAttempt || sourceMode !== 'system') {
+          stream.getTracks().forEach((track) => { try { track.stop(); } catch {} });
+          return;
+        }
+        const audioTracks = stream.getAudioTracks();
+        if (!audioTracks.length) {
+          stream.getTracks().forEach((track) => { try { track.stop(); } catch {} });
+          throw Object.assign(new Error('no-audio-track'), { code: 'no-audio-track' });
+        }
+        const context = await ensureAudioGraph(true);
+        if (context.state === 'suspended') await context.resume();
+        if (attempt !== systemAttempt || sourceMode !== 'system') {
+          stream.getTracks().forEach((track) => { try { track.stop(); } catch {} });
+          return;
+        }
+        // 系统声音不再送回扬声器（否则会和原声叠在一起）；切回本地音乐时恢复播放链路。
+        if (mediaSource) { try { mediaSource.disconnect(); } catch {} }
+        try { analyser.disconnect(); } catch {}
+        systemStream = stream;
+        systemNode = context.createMediaStreamSource(stream);
+        systemNode.connect(analyser);
+        audioTracks.forEach((track) => track.addEventListener('ended', () => stopSystemCapture()));
+        systemListening = true;
+        systemStarting = false;
+        listenStartAt = performance.now() / 1000;
+        systemActive = false;
+        liveBeatCount = 0;
+        systemLoudSeconds = 0;
+        systemQuietSeconds = 0;
+        energySmooth = 0;
+        bassSmooth = 0;
+        liveBpm = 0;
+        onsetTimes = [];
+        bassEnvelope = 0;
+        lastOnsetAt = -1;
+        primaryBpm = 0;
+        tempoValues = { half: 0, primary: 0, double: 0 };
+        bpm = 0;
+        beatStart = listenStartAt;
+        clockBeatIdx = -1;
+        forced = null;
+        setPreviewUI('auto');
+        setMood('idle');
+        updateTempoUI();
+        $('trackName').textContent = '系统声音 · 实时';
+        $('trackSub').textContent = '浏览器回环捕获 · 只在本机分析';
+        $('stageState').textContent = '系统声音 · 聆听中';
+        $('stageHint').textContent = '灵泡正在听电脑上播放的声音，听到音乐就会跟着摇。';
+        $('beatState').textContent = '等待声音';
+        $('waveCaption').textContent = '系统声音 · 安静';
+        $('bpmValue').innerHTML = '—<span class="stat-unit">BPM</span>';
+        $('beatLabel').textContent = 'Live beats';
+        $('beatValue').textContent = '—';
+        setStatus('系统声音 · 聆听中', 'ready');
+        setAnalyzeMessage('正在聆听系统声音 · 只在本机实时分析，不录音、不上传。');
+        updatePlayerTime();
+      } catch (error) {
+        if (stream) { stream.getTracks().forEach((track) => { try { track.stop(); } catch {} }); }
+        systemStream = null;
+        if (attempt !== systemAttempt) return;
+        systemListening = false;
+        systemStarting = false;
+        const name = error?.name || '';
+        const code = error?.code || '';
+        if (name === 'NotAllowedError') {
+          setAnalyzeMessage('没有开始聆听：分享被取消或浏览器拒绝了权限。再点一次「开始聆听系统声音」可以重试。');
+          setStatus('系统声音 · 未开始', 'idle');
+        } else if (name === 'NotSupportedError' || code === 'no-audio-track') {
+          setAnalyzeMessage('这次分享没有带上声音。请重新选择「整个屏幕」并勾选“分享系统音频”，或直接分享正在放歌的标签页；只分享窗口通常没有声音。', true);
+          setStatus('系统声音 · 未开始', 'idle');
+        } else {
+          setAnalyzeMessage(`无法获取系统声音：${error?.message || error}。请在 Windows 的 Chrome / Edge 中选「整个屏幕」并勾选“分享系统音频”。`, true);
+          setStatus('系统声音 · 未开始', 'idle');
+        }
+        $('stageState').textContent = '系统声音 · 待聆听';
+        $('waveCaption').textContent = '系统声音 · 未开始';
+      } finally {
+        if (attempt === systemAttempt) {
+          systemStarting = false;
+          listenButton.disabled = false;
+        }
+        updateListenUI();
+      }
+    }
+    function setSourceMode(mode) {
+      if (mode === sourceMode || !sourceButtons[mode]) return;
+      if (mode === 'system') {
+        if (!audio.paused) audio.pause();
+        // 保住本地音乐的整曲分析结果，切回来时不用重新解码分析。
+        fileTempoSnapshot = {
+          sourceBeatTimes: sourceBeatTimes.slice(),
+          primaryBpm,
+          bpmHypotheses: bpmHypotheses.slice(),
+          bpmConfidence,
+          tempoMode,
+          suggestedTempoMode,
+          tempoValues: { ...tempoValues }
+        };
+        sourceMode = 'system';
+        forced = null;
+        setPreviewUI('auto');
+        resetAnalysisValues();
+        systemActive = false;
+        liveBeatCount = 0;
+        systemLoudSeconds = 0;
+        systemQuietSeconds = 0;
+        setMood('idle');
+        setStatus('系统声音 · 未开始', 'idle');
+        setAnalyzeMessage('点「开始聆听系统声音」，灵泡就会听你电脑上正在播放的音乐。浏览器会先请你分享屏幕或标签页。');
+        $('stageHint').textContent = '切到系统声音后点「开始聆听」，灵泡就能跟着电脑上正在播的音乐摇。';
+        $('stageState').textContent = '系统声音 · 待聆听';
+        $('beatState').textContent = '等待声音';
+        $('waveCaption').textContent = '系统声音 · 未开始';
+        $('bpmValue').innerHTML = '—<span class="stat-unit">BPM</span>';
+        $('beatValue').textContent = '—';
+        applySourceUI();
+        updateListenUI();
+        updateTempoUI();
+        updatePlayerTime();
+      } else {
+        stopSystemCapture({ silent: true });
+        sourceMode = 'file';
+        // 恢复本地文件的播放链路：mediaElement → analyser → 扬声器。
+        if (audioContext && analyser) {
+          try { analyser.disconnect(); } catch {}
+          try { analyser.connect(audioContext.destination); } catch {}
+          if (mediaSource) { try { mediaSource.connect(analyser); } catch {} }
+        }
+        const snapshot = fileTempoSnapshot;
+        fileTempoSnapshot = null;
+        if (snapshot) {
+          sourceBeatTimes = snapshot.sourceBeatTimes.slice();
+          primaryBpm = snapshot.primaryBpm;
+          bpmHypotheses = snapshot.bpmHypotheses.slice();
+          bpmConfidence = snapshot.bpmConfidence;
+          tempoValues = { ...snapshot.tempoValues };
+          suggestedTempoMode = snapshot.suggestedTempoMode;
+          tempoMode = snapshot.tempoMode;
+          beatTimes = buildBeatGrid(effectiveTempoMode());
+          applyTempoMode(tempoMode);
+        } else {
+          resetAnalysisValues();
+        }
+        forced = null;
+        setPreviewUI('auto');
+        setMood('idle');
+        applySourceUI();
+        updateTempoUI();
+        setStatus(audioReady ? '本地音乐 · 已就绪' : '等待音乐 · 本地分析', audioReady ? 'ready' : 'idle');
+        setAnalyzeMessage(audioReady ? '播放本地音乐，灵泡会在本机分析节拍与能量。' : '选择音乐后，灵泡会在本地分析节奏与能量。');
+        $('stageState').textContent = '待机 · 呼吸中';
+        $('stageHint').textContent = audioReady
+          ? `已准备好：${loadedFileName} · 点击播放，让灵泡跟上节拍。`
+          : '把鼠标移进画面，灵泡会看着你；选一首歌，它就会跟着节拍摇摆。';
+        $('waveCaption').textContent = '等待声音输入';
+        $('beatState').textContent = audioReady ? (beatTimes.length ? '节拍已就绪' : '备用节拍') : '等待输入';
+        updatePlayerTime();
+      }
+      updateSourceButtons();
     }
 
     // 文件输入、拖放
@@ -1014,6 +1505,7 @@
 
     // 播放器
     playButton.addEventListener('click', async () => {
+      if (sourceMode !== 'file') return;
       if (!audioReady) return;
       if (audio.paused) {
         try {
@@ -1032,6 +1524,10 @@
       playButton.title = playing ? '暂停' : '播放';
     }
     function updatePlayerTime() {
+      if (sourceMode === 'system') {
+        $('timeValue').textContent = formatTime(playbackSeconds());
+        return;
+      }
       const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
       const current = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
       currentTimeEl.textContent = formatTime(current);
@@ -1043,6 +1539,7 @@
     audio.addEventListener('timeupdate', updatePlayerTime);
     audio.addEventListener('durationchange', updatePlayerTime);
     audio.addEventListener('play', async () => {
+      if (sourceMode === 'system') return;
       try { await ensureAudioGraph(true); }
       catch (error) { console.warn('Audio analysis graph unavailable:', error); }
       forced = null;
@@ -1057,6 +1554,7 @@
       updatePlayButton();
     });
     audio.addEventListener('pause', () => {
+      if (sourceMode === 'system') return;
       if (audio.ended) return;
       forced = null;
       setPreviewUI('auto');
@@ -1069,6 +1567,7 @@
       updatePlayButton();
     });
     audio.addEventListener('ended', () => {
+      if (sourceMode === 'system') return;
       forced = null;
       setPreviewUI('auto');
       pulse = 0;
@@ -1129,6 +1628,15 @@
       button.addEventListener('click', () => applyForced(button.dataset.mood));
     });
 
+    // 音乐来源：本地文件 / 系统声音
+    Object.values(sourceButtons).forEach((button) => {
+      button.addEventListener('click', () => setSourceMode(button.dataset.source));
+    });
+    listenButton.addEventListener('click', () => {
+      if (systemListening) stopSystemCapture();
+      else startSystemListening();
+    });
+
     // 视线跟随
     const stage = $('stage');
     stage.addEventListener('pointermove', (event) => {
@@ -1162,7 +1670,7 @@
       const count = Math.max(36, Math.min(96, Math.floor(w / (8 * dpr))));
       const gap = Math.max(2, Math.floor(4 * dpr));
       const bw = Math.max(2, (w - gap * (count - 1)) / count);
-      if (!analyser || !playing || audio.paused) {
+      if (!analyser || !playing) {
         const t = performance.now() * .001;
         for (let i = 0; i < count; i++) {
           const wave = (Math.sin(t * 1.35 + i * .27) + 1) * .5;
@@ -1213,13 +1721,13 @@
       const dt = Math.min(.05, Math.max(.001, (now - lastFrame) / 1000));
       lastFrame = now;
       const pageTime = now / 1000;
-      const playing = !audio.paused && !audio.ended;
+      const playing = isLiveNow();
       const effectiveBpm = bpm > 0 ? bpm : FALLBACK_BPM;
 
       let beatFired = false;
       let wave = 0;
       if (playing && beatTimes.length) {
-        const t = audio.currentTime;
+        const t = playbackSeconds();
         while (beatCursor < beatTimes.length && beatTimes[beatCursor] <= t + .012) {
           if (beatTimes[beatCursor] >= lastAudioTime - .03) {
             pulse = 1;
@@ -1243,6 +1751,10 @@
           pulse = 1;
           beatFired = true;
           lastBeatIndex = index;
+          if (sourceMode === 'system' && systemActive) {
+            liveBeatCount += 1;
+            $('beatValue').textContent = String(liveBeatCount);
+          }
         }
         const phase = position - index;
         wave = (index % 2 === 0 ? 1 : -1) * Math.cos(phase * Math.PI);
@@ -1251,7 +1763,21 @@
       }
       pulse *= Math.exp(-dt * 4.2);
 
-      if (playing && analyser && !forced && audioContext?.state === 'running') {
+      const analysisReady = analyser && !forced && audioContext?.state === 'running';
+      if (sourceMode === 'system' && systemListening && analysisReady) {
+        const features = readMusicFeatures();
+        const target = clamp(features.bass * 1.32 + features.mid * .28 + features.rms * .4);
+        energySmooth += (target - energySmooth) * (1 - Math.exp(-dt * (target > energySmooth ? 5 : 1.4)));
+        bassSmooth += (features.bass - bassSmooth) * (1 - Math.exp(-dt * 4));
+        // 系统声音是被动收听：先用存在判定确认「真的有人在放歌」，再由能量决定档位。
+        updateSystemPresence(dt, features.rms);
+        if (systemActive) {
+          detectLiveOnset(features.bass);
+          // 不再给持续能量设置人为下限，安静段落才可以正确切回 calm。
+          const nextMood = chooseMood(energySmooth);
+          if (nextMood !== currentMood) setMood(nextMood);
+        }
+      } else if (sourceMode === 'file' && playing && analysisReady) {
         const features = readMusicFeatures();
         const target = clamp(features.bass * 1.32 + features.mid * .28 + features.rms * .4);
         energySmooth += (target - energySmooth) * (1 - Math.exp(-dt * (target > energySmooth ? 5 : 1.4)));
@@ -1323,7 +1849,7 @@
       drawBars(playing);
       $('bassValue').textContent = `${Math.round(clamp(bassSmooth) * 100)}%`;
       $('energyValue').textContent = `${Math.round(clamp(energySmooth) * 100)}%`;
-      $('timeValue').textContent = formatTime(audio.currentTime || 0);
+      $('timeValue').textContent = formatTime(playbackSeconds());
       $('energyFill').style.width = `${Math.round(clamp(energySmooth) * 100)}%`;
       raf = requestAnimationFrame(frame);
     }
@@ -1341,16 +1867,21 @@
     // 初始化
     setMood('idle');
     setPreviewUI('auto');
+    applySourceUI();
+    updateListenUI();
     updateTempoUI();
     updatePlayButton();
     drawBars(false);
     startLoop();
 
+    const sourceParam = new URLSearchParams(location.search).get('source');
+    if (sourceParam === 'system') setSourceMode('system');
     const moodParam = new URLSearchParams(location.search).get('mood');
     if (['calm', 'groove', 'intense'].includes(moodParam)) applyForced(moodParam);
 
     window.addEventListener('beforeunload', () => {
       cancelAnimationFrame(raf);
+      if (systemStream) systemStream.getTracks().forEach((track) => { try { track.stop(); } catch {} });
       if (objectUrl) URL.revokeObjectURL(objectUrl);
       if (audioContext && audioContext.state !== 'closed') audioContext.close();
     });

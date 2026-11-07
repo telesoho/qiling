@@ -4,7 +4,10 @@
 //! 安装时按 `docs/multi-character-animation-spec.md` 的约定编译运行时条目：
 //!   id   = `<characterId>-<action>`
 //!   tags = [action, characterId]（姿势动作再加 "pose"）
-//! 运行时按“当前角色 ∩ 动作”取轨；内置诗琚仍走 bake 产物。
+//! 运行时按“当前角色 ∩ 动作”取轨。
+//!
+//! 内置角色有两位：灵泡（`lingpao`，SVG 骨架，默认）与诗琚（`shiju`，位图轨，
+//! 走 bake 产物）。资源包可以安装第二、第三位角色，但不能占用内置 id。
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -19,10 +22,44 @@ use tauri::http::{header, Request, Response, StatusCode};
 use uuid::Uuid;
 use zip::ZipArchive;
 
-pub const BUILTIN_ID: &str = "shiju";
-pub const BUILTIN_NAME: &str = "诗琚";
+pub const DEFAULT_BUILTIN_ID: &str = "lingpao";
+pub const SHIJU_ID: &str = "shiju";
 const STATE_FILE: &str = "state.json";
 const SCHEMA_VERSION: u32 = 1;
+/// 内置角色默认值的版本。旧版本只有诗琚，`lingpao` 上线后迁移一次。
+const DEFAULTS_VERSION: u32 = 2;
+
+/// 角色用哪种渲染器。资源包与诗琚都是烘焙好的 WebP 轨；灵泡是内联 SVG。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CharacterRenderer {
+    Svg,
+    Webp,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BuiltinCharacter {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub renderer: CharacterRenderer,
+    pub thumbnail: &'static str,
+}
+
+/// 内置角色表。顺序即资源包页的排列顺序，第一位是默认角色。
+pub const BUILTINS: [BuiltinCharacter; 2] = [
+    BuiltinCharacter {
+        id: DEFAULT_BUILTIN_ID,
+        name: "灵泡",
+        renderer: CharacterRenderer::Svg,
+        thumbnail: "/pet/lingpao/thumb.svg",
+    },
+    BuiltinCharacter {
+        id: SHIJU_ID,
+        name: "诗琚",
+        renderer: CharacterRenderer::Webp,
+        thumbnail: "/pet/idle.webp",
+    },
+];
 const MAX_ARCHIVE_BYTES: u64 = 96 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_ENTRIES: usize = 10_000;
@@ -107,8 +144,11 @@ struct InstalledPack {
 struct PackState {
     #[serde(default = "state_schema_version")]
     schema_version: u32,
-    #[serde(default = "builtin_id_string")]
+    #[serde(default = "default_active_id")]
     active: String,
+    /// 内置角色默认值的迁移标记；缺失时为 0，按旧版本处理一次。
+    #[serde(default)]
+    defaults_version: u32,
     #[serde(default)]
     installed_at: BTreeMap<String, u64>,
 }
@@ -117,7 +157,8 @@ impl Default for PackState {
     fn default() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
-            active: BUILTIN_ID.to_string(),
+            active: DEFAULT_BUILTIN_ID.to_string(),
+            defaults_version: DEFAULTS_VERSION,
             installed_at: BTreeMap::new(),
         }
     }
@@ -127,8 +168,31 @@ fn state_schema_version() -> u32 {
     SCHEMA_VERSION
 }
 
-fn builtin_id_string() -> String {
-    BUILTIN_ID.to_string()
+fn default_active_id() -> String {
+    DEFAULT_BUILTIN_ID.to_string()
+}
+
+fn builtin_character(id: &str) -> &'static BuiltinCharacter {
+    BUILTINS
+        .iter()
+        .find(|item| item.id == id)
+        .unwrap_or(&BUILTINS[0])
+}
+
+fn is_builtin_id(id: &str) -> bool {
+    BUILTINS.iter().any(|item| item.id == id)
+}
+
+/// 旧版本只有诗琚一位内置角色。升级时把默认选择迁到灵泡一次；
+/// 迁移标记落盘后，用户显式选回诗琚就不会再被覆盖。
+fn migrate_defaults(state: &mut PackState) {
+    if state.defaults_version >= DEFAULTS_VERSION {
+        return;
+    }
+    if state.active == SHIJU_ID {
+        state.active = DEFAULT_BUILTIN_ID.to_string();
+    }
+    state.defaults_version = DEFAULTS_VERSION;
 }
 
 struct Inner {
@@ -148,6 +212,7 @@ pub struct ActiveCharacter {
     pub id: String,
     pub name: String,
     pub builtin: bool,
+    pub renderer: CharacterRenderer,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -157,6 +222,7 @@ pub struct CharacterSummary {
     pub name: String,
     pub builtin: bool,
     pub active: bool,
+    pub renderer: CharacterRenderer,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -239,8 +305,8 @@ impl PetPackRegistry {
                 );
             }
         }
-        if state.active != BUILTIN_ID && !packs.contains_key(&state.active) {
-            state.active = BUILTIN_ID.to_string();
+        if !is_builtin_id(&state.active) && !packs.contains_key(&state.active) {
+            state.active = DEFAULT_BUILTIN_ID.to_string();
         }
         state.installed_at.retain(|id, _| packs.contains_key(id));
         let registry = Self {
@@ -255,7 +321,7 @@ impl PetPackRegistry {
     pub fn active_character(&self) -> ActiveCharacter {
         let inner = match self.inner.read() {
             Ok(inner) => inner,
-            Err(_) => return builtin_active(),
+            Err(_) => return builtin_active(DEFAULT_BUILTIN_ID),
         };
         active_from_inner(&inner)
     }
@@ -265,13 +331,19 @@ impl PetPackRegistry {
             Ok(inner) => inner,
             Err(_) => {
                 return PacksView {
-                    active_id: BUILTIN_ID.to_string(),
+                    active_id: DEFAULT_BUILTIN_ID.to_string(),
                     storage_dir: self.root.to_string_lossy().to_string(),
-                    characters: vec![builtin_summary(false)],
+                    characters: BUILTINS
+                        .iter()
+                        .map(|builtin| builtin_summary(builtin, builtin.id == DEFAULT_BUILTIN_ID))
+                        .collect(),
                 }
             }
         };
-        let mut characters = vec![builtin_summary(inner.state.active == BUILTIN_ID)];
+        let mut characters: Vec<CharacterSummary> = BUILTINS
+            .iter()
+            .map(|builtin| builtin_summary(builtin, inner.state.active == builtin.id))
+            .collect();
         for pack in inner.packs.values() {
             characters.push(summary_for(pack, &inner.state));
         }
@@ -365,7 +437,7 @@ impl PetPackRegistry {
     }
 
     pub fn uninstall(&self, pack_id: &str) -> Result<ActiveCharacter, String> {
-        if pack_id == BUILTIN_ID {
+        if is_builtin_id(pack_id) {
             return Err("pack_builtin_protected".into());
         }
         let _guard = self
@@ -391,7 +463,7 @@ impl PetPackRegistry {
         inner.packs.remove(pack_id);
         inner.state.installed_at.remove(pack_id);
         if inner.state.active == pack_id {
-            inner.state.active = BUILTIN_ID.to_string();
+            inner.state.active = DEFAULT_BUILTIN_ID.to_string();
         }
         let active = active_from_inner(&inner);
         let persisted = persist_state(&self.root, &inner.state);
@@ -403,14 +475,14 @@ impl PetPackRegistry {
 
     pub fn set_active(&self, pack_id: &str) -> Result<ActiveCharacter, String> {
         // 先按运行时读取一遍，避免把一个图片被删/改坏的包设为当前角色。
-        if pack_id != BUILTIN_ID {
+        if !is_builtin_id(pack_id) {
             self.load_runtime(pack_id)?;
         }
         let mut inner = self
             .inner
             .write()
             .map_err(|_| "pack_io_failed".to_string())?;
-        if pack_id != BUILTIN_ID && !inner.packs.contains_key(pack_id) {
+        if !is_builtin_id(pack_id) && !inner.packs.contains_key(pack_id) {
             return Err("pack_not_found".into());
         }
         inner.state.active = pack_id.to_string();
@@ -420,7 +492,7 @@ impl PetPackRegistry {
     }
 
     pub fn load_runtime(&self, pack_id: &str) -> Result<PackRuntime, String> {
-        if pack_id == BUILTIN_ID {
+        if is_builtin_id(pack_id) {
             return Err("pack_not_found".into());
         }
         let pack = {
@@ -462,6 +534,7 @@ impl PetPackRegistry {
                 id: pack.manifest.id.clone(),
                 name: pack.manifest.name.clone(),
                 builtin: false,
+                renderer: CharacterRenderer::Webp,
             },
             asset_base: asset_base(pack_id),
             tracks,
@@ -477,7 +550,7 @@ impl PetPackRegistry {
         let Some(pack_id) = segments.next() else {
             return not_found();
         };
-        if !is_valid_pack_id(pack_id) || pack_id == BUILTIN_ID {
+        if !is_valid_pack_id(pack_id) || is_builtin_id(pack_id) {
             return not_found();
         }
         let dir = {
@@ -542,38 +615,42 @@ impl PetPackRegistry {
     }
 }
 
-fn builtin_active() -> ActiveCharacter {
+fn builtin_active(id: &str) -> ActiveCharacter {
+    let builtin = builtin_character(id);
     ActiveCharacter {
-        id: BUILTIN_ID.to_string(),
-        name: BUILTIN_NAME.to_string(),
+        id: builtin.id.to_string(),
+        name: builtin.name.to_string(),
         builtin: true,
+        renderer: builtin.renderer,
     }
 }
 
 fn active_from_inner(inner: &Inner) -> ActiveCharacter {
-    if inner.state.active == BUILTIN_ID {
-        return builtin_active();
+    if is_builtin_id(&inner.state.active) {
+        return builtin_active(&inner.state.active);
     }
     match inner.packs.get(&inner.state.active) {
         Some(pack) => ActiveCharacter {
             id: pack.manifest.id.clone(),
             name: pack.manifest.name.clone(),
             builtin: false,
+            renderer: CharacterRenderer::Webp,
         },
-        None => builtin_active(),
+        None => builtin_active(DEFAULT_BUILTIN_ID),
     }
 }
 
-fn builtin_summary(active: bool) -> CharacterSummary {
+fn builtin_summary(builtin: &BuiltinCharacter, active: bool) -> CharacterSummary {
     CharacterSummary {
-        id: BUILTIN_ID.to_string(),
-        name: BUILTIN_NAME.to_string(),
+        id: builtin.id.to_string(),
+        name: builtin.name.to_string(),
         builtin: true,
         active,
+        renderer: builtin.renderer,
         version: None,
         author: None,
         description: None,
-        thumbnail_url: Some("/pet/idle.webp".into()),
+        thumbnail_url: Some(builtin.thumbnail.to_string()),
         track_count: None,
         pickup_mode: None,
         installed_at: None,
@@ -587,6 +664,7 @@ fn summary_for(pack: &InstalledPack, state: &PackState) -> CharacterSummary {
         name: manifest.name.clone(),
         builtin: false,
         active: state.active == manifest.id,
+        renderer: CharacterRenderer::Webp,
         version: Some(manifest.version.clone()),
         author: manifest.author.clone(),
         description: manifest.description.clone(),
@@ -616,8 +694,9 @@ fn read_state(root: &Path) -> PackState {
         return PackState::default();
     }
     if state.active.is_empty() {
-        state.active = BUILTIN_ID.to_string();
+        state.active = DEFAULT_BUILTIN_ID.to_string();
     }
+    migrate_defaults(&mut state);
     state
 }
 
@@ -810,7 +889,7 @@ fn validate_manifest(manifest: &PetPackManifest) -> Result<(), String> {
     if manifest.schema_version != SCHEMA_VERSION {
         return Err("pack_schema_unsupported".into());
     }
-    if !is_valid_pack_id(&manifest.id) || manifest.id == BUILTIN_ID {
+    if !is_valid_pack_id(&manifest.id) || is_builtin_id(&manifest.id) {
         return Err("pack_id_invalid".into());
     }
     let name = manifest.name.trim();
@@ -1379,7 +1458,18 @@ mod tests {
         let registry = PetPackRegistry::load(root.join("pets")).unwrap();
         install_demo(&registry, &root, "demo");
         let view = registry.packs_view();
-        assert_eq!(view.active_id, "shiju");
+        assert_eq!(view.active_id, "lingpao");
+        assert_eq!(
+            view.characters
+                .iter()
+                .filter(|item| item.builtin)
+                .map(|item| (item.id.as_str(), item.renderer))
+                .collect::<Vec<_>>(),
+            vec![
+                ("lingpao", CharacterRenderer::Svg),
+                ("shiju", CharacterRenderer::Webp)
+            ]
+        );
         assert!(view.characters.iter().any(|item| item.id == "demo"));
 
         let runtime = registry.load_runtime("demo").unwrap();
@@ -1519,16 +1609,19 @@ mod tests {
         registry.set_active("demo").unwrap();
         let active = registry.uninstall("demo").unwrap();
         assert!(active.builtin);
-        assert_eq!(active.id, "shiju");
+        assert_eq!(active.id, "lingpao");
+        assert_eq!(active.renderer, CharacterRenderer::Svg);
         assert!(!registry
             .packs_view()
             .characters
             .iter()
             .any(|item| item.id == "demo"));
-        assert_eq!(
-            registry.uninstall("shiju").unwrap_err(),
-            "pack_builtin_protected"
-        );
+        for builtin in ["lingpao", "shiju"] {
+            assert_eq!(
+                registry.uninstall(builtin).unwrap_err(),
+                "pack_builtin_protected"
+            );
+        }
     }
 
     #[test]
@@ -1687,16 +1780,86 @@ mod tests {
             "pack_idle_beats_invalid"
         );
 
-        let reserved = manifest_value(
-            "shiju",
-            "window-only",
-            &["idle", "think", "explain", "advantage", "disadvantage"],
-        );
-        let reserved_bytes = build_zip(&reserved, b"webp");
-        let reserved_path = write_pack(&root, "reserved.qilingpet", &reserved_bytes);
-        assert_eq!(
-            registry.install(&reserved_path, false).unwrap_err(),
-            "pack_id_invalid"
-        );
+        for (index, reserved_id) in ["shiju", "lingpao"].iter().enumerate() {
+            let reserved = manifest_value(
+                reserved_id,
+                "window-only",
+                &["idle", "think", "explain", "advantage", "disadvantage"],
+            );
+            let reserved_bytes = build_zip(&reserved, b"webp");
+            let reserved_path = write_pack(
+                &root,
+                &format!("reserved-{index}.qilingpet"),
+                &reserved_bytes,
+            );
+            assert_eq!(
+                registry.install(&reserved_path, false).unwrap_err(),
+                "pack_id_invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn switches_between_builtin_characters() {
+        let root = temp_dir("builtin-switch");
+        let registry = PetPackRegistry::load(root.join("pets")).unwrap();
+        assert_eq!(registry.active_character().id, "lingpao");
+
+        let shiju = registry.set_active("shiju").unwrap();
+        assert!(shiju.builtin);
+        assert_eq!(shiju.id, "shiju");
+        assert_eq!(shiju.renderer, CharacterRenderer::Webp);
+        let view = registry.packs_view();
+        assert_eq!(view.active_id, "shiju");
+        assert!(view
+            .characters
+            .iter()
+            .find(|item| item.id == "lingpao")
+            .map(|item| !item.active)
+            .unwrap_or(false));
+
+        let lingpao = registry.set_active("lingpao").unwrap();
+        assert_eq!(lingpao.id, "lingpao");
+        assert_eq!(lingpao.renderer, CharacterRenderer::Svg);
+    }
+
+    #[test]
+    fn migrates_the_old_default_once_without_overriding_a_choice() {
+        let root = temp_dir("migrate");
+        let pets = root.join("pets");
+        fs::create_dir_all(&pets).unwrap();
+        fs::write(
+            pets.join(STATE_FILE),
+            serde_json::to_vec(&json!({
+                "schemaVersion": 1,
+                "active": "shiju",
+                "installedAt": {}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let registry = PetPackRegistry::load(pets.clone()).unwrap();
+        assert_eq!(registry.active_character().id, "lingpao");
+        let migrated: Value =
+            serde_json::from_slice(&fs::read(pets.join(STATE_FILE)).unwrap()).unwrap();
+        assert_eq!(migrated["defaultsVersion"], json!(DEFAULTS_VERSION));
+
+        // 用户之后显式选择诗琚：重启后保持，不会被再次迁移。
+        registry.set_active("shiju").unwrap();
+        drop(registry);
+        let reloaded = PetPackRegistry::load(pets).unwrap();
+        assert_eq!(reloaded.active_character().id, "shiju");
+    }
+
+    #[test]
+    fn builtin_runtime_is_not_a_pack() {
+        let root = temp_dir("builtin-runtime");
+        let registry = PetPackRegistry::load(root.join("pets")).unwrap();
+        for builtin in ["lingpao", "shiju"] {
+            assert_eq!(
+                registry.load_runtime(builtin).unwrap_err(),
+                "pack_not_found"
+            );
+        }
     }
 }

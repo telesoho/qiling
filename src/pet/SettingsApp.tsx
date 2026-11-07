@@ -20,6 +20,8 @@ import {
   packErrorMessage,
   type PacksView,
 } from './packs'
+import { musicErrorMessage, type MusicSenseStatus } from './music'
+import { loadMusicSenseStatus } from './useMusicSense'
 import { inTauri } from './sync'
 
 interface ClientInfo {
@@ -285,6 +287,8 @@ export default function SettingsApp(): JSX.Element {
   const [edgeVoiceError, setEdgeVoiceError] = useState('')
   const [characterView, setCharacterView] = useState<PacksView | null>(null)
   const [characterError, setCharacterError] = useState('')
+  const [musicStatus, setMusicStatus] = useState<MusicSenseStatus | null>(null)
+  const [musicStatusError, setMusicStatusError] = useState('')
 
   useEffect(() => watchQiLingSettings(setSettings), [])
   useEffect(() => setWakeWordDraft(settings.wakeWord), [settings.wakeWord])
@@ -321,6 +325,35 @@ export default function SettingsApp(): JSX.Element {
       window.removeEventListener('focus', onFocus)
     }
   }, [native])
+
+  useEffect(() => {
+    if (!native || !settings.music) {
+      setMusicStatus(null)
+      setMusicStatusError('')
+      return
+    }
+    let active = true
+    const refresh = () => {
+      void loadMusicSenseStatus()
+        .then((status) => {
+          if (!active) return
+          setMusicStatus(status)
+          setMusicStatusError(status.lastError ? musicErrorMessage(status.lastError) : '')
+        })
+        .catch((reason: unknown) => {
+          if (active) setMusicStatusError(musicErrorMessage(reason))
+        })
+    }
+    refresh()
+    const timer = window.setInterval(refresh, 2000)
+    const onFocus = () => refresh()
+    window.addEventListener('focus', onFocus)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [native, settings.music])
 
   useEffect(() => {
     if (!('__TAURI_INTERNALS__' in window || '__TAURI__' in window)) return
@@ -797,6 +830,25 @@ export default function SettingsApp(): JSX.Element {
 
   const activeCharacter = characterView?.characters.find((character) => character.active)
   const packCount = characterView?.characters.filter((character) => !character.builtin).length ?? 0
+  const musicIsForCurrentCharacter =
+    !characterView || activeCharacter?.id === 'lingpao' || activeCharacter === undefined
+  const musicStatusText = !native
+    ? '仅应用内可用'
+    : !settings.music
+      ? '已关闭'
+      : musicStatusError
+        ? musicStatusError
+        : !musicIsForCurrentCharacter
+          ? '当前角色不是灵泡，音乐效果只在灵泡上出现'
+          : musicStatus?.running
+            ? musicStatus.music
+              ? `正在跟随音乐${musicStatus.bpm && musicStatus.bpm > 0 ? ` · ${Math.round(musicStatus.bpm)} BPM` : ''}`
+              : musicStatus.active
+                ? '听到声音，但不是音乐（人声/噪声不跟拍）'
+                : '正在监听，等待音乐'
+            : musicStatus?.supported === false
+              ? '当前系统不支持读取系统声音'
+              : '已开启，灵泡显示时会开始跟随'
 
   return (
     <main className="pet-settings" aria-label="设定">
@@ -808,9 +860,9 @@ export default function SettingsApp(): JSX.Element {
       <section className="settings-section" aria-labelledby="character-title">
         <h2 id="character-title">宠物角色</h2>
         <p>
-          当前角色：{activeCharacter?.name ?? '诗琚'}。
+          当前角色：{activeCharacter?.name ?? '灵泡'}。
           {characterView
-            ? `已安装 ${packCount} 个第三方角色资源包；内置诗琚始终可用。`
+            ? `已安装 ${packCount} 个第三方角色资源包；内置灵泡与诗琚始终可用。`
             : '正在读取角色资源包…'}
         </p>
         <p>安装资源包后会立即注册为可选角色；同一时间只有一个角色在场，切换在资源包页面完成。</p>
@@ -818,6 +870,29 @@ export default function SettingsApp(): JSX.Element {
           管理角色资源包…
         </button>
         {characterError && <p className="settings-error" role="alert">{characterError}</p>}
+      </section>
+
+      <section className="settings-section" aria-labelledby="music-title">
+        <h2 id="music-title">听音乐</h2>
+        <label>
+          <input
+            type="checkbox"
+            checked={settings.music}
+            onChange={(event) => patch({ music: event.target.checked })}
+          />
+          听音乐时自动切换状态
+        </label>
+        <p>
+          灵泡会读取系统正在播放的声音，在本机实时分析音量与节拍，自动在“舒缓 / 轻快 /
+          激烈”之间切换并跟着摇摆。只分析声音特征，不录音、不保存、不上传。
+        </p>
+        <p>
+          会先区分音乐与人声：视频里的说话、播客和零散提示音不会让灵泡进入摇摆状态。
+        </p>
+        <p>
+          关闭开关或隐藏器灵后立即停止采集。只读取默认播放设备；独占模式、受版权保护的音频或非默认设备可能听不到。目前只有灵泡支持这个效果。
+        </p>
+        <p role="status" aria-live="polite">监听状态：{musicStatusText}</p>
       </section>
 
       <section className="settings-section" aria-labelledby="voice-title">

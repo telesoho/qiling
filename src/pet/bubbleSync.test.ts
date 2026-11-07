@@ -4,7 +4,7 @@ import { defaultBubbleSnap, sanitizeBubble } from './bubbleSync'
 describe('气泡同步', () => {
   it('defaults the character name to the built-in one', () => {
     expect(sanitizeBubble(null)).toEqual({ ...defaultBubbleSnap })
-    expect(sanitizeBubble({ name: '   ' }).name).toBe('诗琚')
+    expect(sanitizeBubble({ name: '   ' }).name).toBe('灵泡')
   })
 
   it('keeps a pack character name and caps its length', () => {

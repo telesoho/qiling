@@ -1,4 +1,4 @@
-# 角色资源包：制作与安装
+﻿# 角色资源包：制作与安装
 
 > 面向角色作者。器灵通过角色资源包安装、注册并切换多个桌面角色；本文件规定包格式、动画轨要求和校验规则。
 > 动画命名与状态约定以《[多角色动画资产规范](multi-character-animation-spec.md)》为准；本文件只描述**运行时安装态**的资源包。
@@ -7,9 +7,9 @@
 
 - 角色资源包是一个自包含 ZIP 文件，推荐扩展名 `.qilingpet`，也接受 `.zip`。
 - 安装后立即注册为可选角色：出现在「设定 → 宠物角色 → 管理角色资源包…」中；同一时间只有一个角色在场。
-- 内置角色诗琚始终可用、不可卸载；卸载正在使用的资源包会自动回到诗琚。
+- 内置角色灵泡（默认）与诗琚始终可用、不可卸载；卸载正在使用的资源包会自动回到灵泡。
 - 资源包只包含 WebP/PNG 图片与 JSON。器灵不会执行其中的脚本或程序，也不会把包内容上传到网络。
-- 资源包是**运行时交付**：它不经过 `npm run bake:anim`。内置诗琚仍由 `design/` + bake 生成，两条路径并存。
+- 资源包是**运行时交付**：它不经过 `npm run bake:anim`。内置诗琚仍由 `design/` + bake 生成；灵泡由 `src/pet/SvgSprite.tsx` 直接绘制，两条路径并存。
 
 安装位置：
 
@@ -115,7 +115,7 @@ dafeiyu.qilingpet (ZIP)
 | 字段 | 必填 | 规则 |
 | --- | --- | --- |
 | `schemaVersion` | 是 | 必须为 `1`；更高版本会被拒绝 |
-| `id` | 是 | `^[a-z0-9][a-z0-9-]{1,31}$`；不能是 `shiju`；即角色目录名与 track id 前缀 |
+| `id` | 是 | `^[a-z0-9][a-z0-9-]{1,31}$`；不能是 `lingpao` 或 `shiju`；即角色目录名与 track id 前缀 |
 | `name` | 是 | 1–40 字符；显示在资源包列表与气泡标题 |
 | `version` | 是 | 1–32 字符，只含字母数字与 `. + -`，首字符为字母数字 |
 | `author` | 否 | ≤80 字符 |
@@ -228,7 +228,7 @@ dafeiyu.qilingpet (ZIP)
    - 逐帧轨保留 `frames/`（或 `tracks/`）与 `from`/`to`，确认文件编号连续。
    - 不要直接拿 `public/pet/anim/` 下的运行时文件当包源：那些是 bake 产物，含 `/pet/...` 绝对路径；从 `design/characters/<id>/anim/` 的源 `track_struct.json` 导出。
    - 不要在包内保留源 mp4、绿幕/白底序列、rembg 中间图；这些属于 `_workshop/`。
-5. 在包根写 `pet.json`（§4）。`id` 必须等于 `design/characters/` 下的角色 id；不要用 `shiju`。
+5. 在包根写 `pet.json`（§4）。`id` 必须等于 `design/characters/` 下的角色 id；不要用内置的 `lingpao` / `shiju`。
 6. （可选）放 `thumbnail.webp`。
 7. 压缩为 `.qilingpet`：
 
@@ -274,7 +274,7 @@ Move-Item "C:\work\dafeiyu.zip" "C:\work\dafeiyu.qilingpet"
 - pickup 声明与轨道不符 → `pack_pickup_invalid`。
 - 动画轨 JSON 不合法、引用图片缺失、姿势轨没有 `animatedWebp` idle → `pack_track_invalid` / `pack_asset_missing`。
 - 同 id 已安装：先返回 `pack_exists`；在页面确认「替换」后才会覆盖。
-- 卸载内置诗琚 → `pack_builtin_protected`。
+- 卸载内置灵泡或诗琚 → `pack_builtin_protected`。
 - 文件被占用 → `pack_in_use`；资源包目录会先移到 `.trash`，下次启动清理。
 
 ## 8. 错误码速查
@@ -289,7 +289,7 @@ Move-Item "C:\work\dafeiyu.zip" "C:\work\dafeiyu.qilingpet"
 | `pack_manifest_missing` | 根目录没有 `pet.json` |
 | `pack_manifest_invalid` | `pet.json` 字段非法 |
 | `pack_schema_unsupported` | `schemaVersion` 不是 1 |
-| `pack_id_invalid` | `id` 不合法或与 `shiju` 冲突 |
+| `pack_id_invalid` | `id` 不合法，或与内置 `lingpao` / `shiju` 冲突 |
 | `pack_mvp_tracks_missing` | 缺 `idle/think/explain/advantage/disadvantage`（或 animated pickup） |
 | `pack_pickup_invalid` | pickup 轨缺少 lift/hover/drop 或类型/播放方式不对 |
 | `pack_idle_beats_invalid` | `idleBeats` 引用了不存在的动作、重复或文案为空 |
@@ -297,7 +297,7 @@ Move-Item "C:\work\dafeiyu.zip" "C:\work\dafeiyu.qilingpet"
 | `pack_asset_missing` | 引用的图片不存在或越出包根 |
 | `pack_exists` | 同 id 已安装，需要确认替换 |
 | `pack_not_found` | 找不到该资源包 |
-| `pack_builtin_protected` | 尝试卸载内置诗琚 |
+| `pack_builtin_protected` | 尝试卸载内置灵泡或诗琚 |
 | `pack_in_use` | 文件被占用，稍后重试或重启器灵 |
 | `pack_busy` | 另一个资源包操作正在进行 |
 | `pack_io_failed` | 读写应用数据目录失败 |
@@ -312,7 +312,7 @@ Move-Item "C:\work\dafeiyu.zip" "C:\work\dafeiyu.qilingpet"
 
 **气泡名字不对？** 改 `pet.json.name`；重新安装（同 id 需确认替换）后生效。
 
-**安装提示 id 冲突？** 不能使用内置 id `shiju`；换一个稳定英文 id（建议与 `design/characters/<id>/` 同名）。
+**安装提示 id 冲突？** 不能使用内置 id `lingpao` / `shiju`；换一个稳定英文 id（建议与 `design/characters/<id>/` 同名）。
 
 **安装提示路径非法？** 包内文件/引用必须是 ASCII 相对路径，不能有 `..`、反斜杠、盘符或 URL。用 `Compress-Archive` 重新打包。
 

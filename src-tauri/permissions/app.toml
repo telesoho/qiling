@@ -23,6 +23,9 @@ description = "Desktop pet voice"
 commands.allow = [
   "pet_set_open",
   "pet_is_open",
+  "qiling_music_sense_start",
+  "qiling_music_sense_stop",
+  "qiling_music_sense_status",
   "qiling_voice_status",
   "qiling_voice_synthesize",
   "qiling_voice_cancel",

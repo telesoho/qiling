@@ -4,14 +4,23 @@ import PacksApp, { PackHero, PackList } from './PacksApp'
 import type { PacksView } from './packs'
 
 const view: PacksView = {
-  activeId: 'shiju',
+  activeId: 'lingpao',
   storageDir: 'C:\\Users\\tester\\AppData\\Roaming\\com.qiling.pet\\pet-packs',
   characters: [
+    {
+      id: 'lingpao',
+      name: '灵泡',
+      builtin: true,
+      active: true,
+      renderer: 'svg',
+      thumbnailUrl: '/pet/lingpao/thumb.svg',
+    },
     {
       id: 'shiju',
       name: '诗琚',
       builtin: true,
-      active: true,
+      active: false,
+      renderer: 'webp',
       thumbnailUrl: '/pet/idle.webp',
     },
     {
@@ -19,6 +28,7 @@ const view: PacksView = {
       name: '大肥鱼',
       builtin: false,
       active: false,
+      renderer: 'webp',
       version: '1.0.0',
       author: '测试作者',
       description: 'Q 版鲸尾女孩',
@@ -54,19 +64,24 @@ describe('角色资源包页面', () => {
     const builtin = renderToStaticMarkup(<PackHero character={view.characters[0]} />)
     expect(builtin).toContain('启用中')
     expect(builtin).toContain('内置')
-    expect(builtin).toContain('红唐装圆扇棋灵')
+    expect(builtin).toContain('纯色小团子')
+    expect(builtin).toContain('听音乐')
     expect(builtin).toContain('不可卸载')
 
-    const pack = renderToStaticMarkup(<PackHero character={view.characters[1]} />)
+    const shiju = renderToStaticMarkup(<PackHero character={view.characters[1]} />)
+    expect(shiju).toContain('红唐装圆扇棋灵')
+
+    const pack = renderToStaticMarkup(<PackHero character={view.characters[2]} />)
     expect(pack).toContain('大肥鱼')
     expect(pack).toContain('Q 版鲸尾女孩')
-    expect(pack).toContain('回到内置诗琚')
+    expect(pack).toContain('回到默认的灵泡')
   })
 
-  it('lists the built-in character and installed packs', () => {
+  it('lists the built-in characters and installed packs', () => {
     const page = renderToStaticMarkup(
       <PackList view={view} busy="" onActivate={() => {}} onUninstall={() => {}} />,
     )
+    expect(page).toContain('灵泡')
     expect(page).toContain('诗琚')
     expect(page).toContain('内置')
     expect(page).toContain('启用中')
@@ -81,11 +96,11 @@ describe('角色资源包页面', () => {
     expect(page).toContain('卸载')
   })
 
-  it('does not offer an uninstall button for the built-in character', () => {
+  it('does not offer an uninstall button for built-in characters', () => {
     const page = renderToStaticMarkup(
       <PackList view={view} busy="" onActivate={() => {}} onUninstall={() => {}} />,
     )
-    const builtinCard = page.slice(page.indexOf('诗琚'), page.indexOf('大肥鱼'))
-    expect(builtinCard).not.toContain('卸载</button>')
+    const builtinCards = page.slice(0, page.indexOf('大肥鱼'))
+    expect(builtinCards).not.toContain('卸载</button>')
   })
 })

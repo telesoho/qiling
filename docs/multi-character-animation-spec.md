@@ -24,6 +24,7 @@
 
 | 对外称呼 | 目录 id | 现行动画交付 |
 | --- | --- | --- |
+| 灵泡（默认） | `characters/lingpao/` | SVG 骨架，由 `src/pet/SvgSprite.tsx` 直接绘制；无位图轨、不进 manifest/bake |
 | 诗琚 | `characters/shiju/` | 已有 8 轨：`pickup`、`idle`、`butterfly`、`angry`、`explain`、`think`、`advantage`、`disadvantage` |
 | 大肥鱼／小鲸娘／鲸鱼娘 | `characters/dafeiyu/` | `anim/` 尚空（仅占位）；需按本文 MVP 补齐 |
 
@@ -251,6 +252,17 @@ public/pet/anim/                   # bake 生成物（gitignore），勿手改
 - **运行时消费**：与 §5.4 完全一致；`walk`/`wave`/`work`/`sleep`/`celebrate`/`error` 等额外动作可注册，但当前版本不消费，不得宣称已实现（§9.6）。
 - **路径**：包内 `path` 相对包根（不是 `design/anim/`）；`asset.src`、`frameSequence.dir` 仍相对该轨 `track_struct.json`。
 
+### 7.4 内置 SVG 角色（灵泡）
+
+灵泡是默认内置角色，用参数化 SVG 骨架渲染，不属于位图轨模型：
+
+- `ActiveCharacter.renderer` 为 `"svg"` 或 `"webp"`；旧数据缺省按 `"webp"`。
+- SVG 角色**不进** `design/anim/tracks.manifest.json`、不参与 `npm run bake:anim`、也不进资源包格式；`?track=` 预览只对位图角色生效。
+- 姿态由 `src/pet/lingpao.ts` 的 `poseForRuntime` 从五态、说话、拎起、音乐档位映射；渲染与动画在 `src/pet/SvgSprite.tsx` 与 `src/pet/lingpao.css`。
+- 听音乐的三档（舒缓／轻快／激烈）是**运行期视觉状态**，沿用 §3 的 `idle` stateId，不新增协议 stateId，也不改变对外 `state`／`phase`／`mood`。
+- 音乐阈值、节拍时钟与运动参数以 `design/characters/lingpao/sheets/lingpao-groove.html` 为准，运行时实现见 `src/pet/music.ts` 与 `src-tauri/src/music.rs`。
+- 灵泡没有吊起逐帧轨：拖拽时用 SVG 形变（拉长 + 摆动）表达，窗口本身仍跟手移动。
+
 ---
 
 ## 8. 验收标准
@@ -279,7 +291,7 @@ public/pet/anim/                   # bake 生成物（gitignore），勿手改
 - [ ] 安装后编译出的轨 id 为 `<characterId>-<action>`，tags 含 action + 角色 id（姿势含 `pose`），不同角色不共用 id。
 - [ ] 切换角色后，同一 stateId 只播当前角色轨；资源包不得回退使用诗琚的 idle／姿势／beat 文件。
 - [ ] 缺建议／可选轨不阻断；缺姿势回退该角色 idle；缺 pickup 且声明 `window-only` 时仅移窗；缺 beat 回退呼吸。
-- [ ] 卸载当前角色回内置诗琚；内置角色不可卸载；替换同 id 包需明确确认。
+- [ ] 卸载当前角色回默认灵泡；内置角色（灵泡、诗琚）不可卸载；替换同 id 包需明确确认。
 - [ ] 非法规格（缺 MVP、路径穿越、超限、pickup 不符）被拒绝且无半安装。
 - [ ] `walk`／`wave`／`work` 等未消费动作只注册，不在 UI／文档冒充已实现。
 

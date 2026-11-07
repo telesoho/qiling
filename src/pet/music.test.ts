@@ -1,0 +1,150 @@
+import { describe, expect, it } from 'vitest'
+import {
+  MUSIC_TUNING,
+  beatAt,
+  beatDurationMs,
+  chooseMusicMood,
+  createBeatClock,
+  forcedMusicMood,
+  groundFor,
+  lockBeatPhase,
+  motionFor,
+  musicErrorMessage,
+  musicThresholds,
+  retuneBeatClock,
+  visibleMusicMood,
+} from './music'
+
+describe('听音乐阈值', () => {
+  it('keeps the tuned prototype slider defaults', () => {
+    expect(MUSIC_TUNING.swayThreshold).toBe(0.6)
+    expect(MUSIC_TUNING.calmThreshold).toBe(0.3)
+    expect(musicThresholds()).toEqual({
+      enterGroove: 0.6,
+      exitGroove: 0.3,
+      enterIntense: 0.88,
+      exitIntense: 0.78,
+    })
+  })
+
+  it('does not flicker at either hysteresis boundary', () => {
+    // 舒缓 ↔ 轻快：进 0.60 / 回 0.30
+    expect(chooseMusicMood('calm', 0.59, true)).toBe('calm')
+    expect(chooseMusicMood('calm', 0.61, true)).toBe('groove')
+    expect(chooseMusicMood('groove', 0.59, true)).toBe('groove')
+    expect(chooseMusicMood('groove', 0.29, true)).toBe('calm')
+    // 轻快 ↔ 激烈：进 0.88 / 回 0.78
+    expect(chooseMusicMood('groove', 0.87, true)).toBe('groove')
+    expect(chooseMusicMood('groove', 0.89, true)).toBe('intense')
+    expect(chooseMusicMood('intense', 0.79, true)).toBe('intense')
+    expect(chooseMusicMood('intense', 0.77, true)).toBe('groove')
+  })
+
+  it('uses the same entry rule on the first activation', () => {
+    expect(chooseMusicMood(null, 0.2, true)).toBe('calm')
+    expect(chooseMusicMood(null, 0.7, true)).toBe('groove')
+    expect(chooseMusicMood(null, 0.9, true)).toBe('intense')
+  })
+
+  it('reports no music once playback stops', () => {
+    expect(chooseMusicMood('intense', 0.95, false)).toBeNull()
+    expect(chooseMusicMood(null, 0.95, false)).toBeNull()
+  })
+})
+
+describe('节拍时钟', () => {
+  it('falls back to 96 BPM when no estimate exists', () => {
+    expect(beatDurationMs(0)).toBeCloseTo(60_000 / 96)
+    expect(beatDurationMs(120)).toBeCloseTo(500)
+  })
+
+  it('swings from one side to the other every beat', () => {
+    const clock = createBeatClock(0, 120)
+    expect(beatAt(clock, 0).wave).toBeCloseTo(1)
+    expect(beatAt(clock, 250).wave).toBeCloseTo(0)
+    const next = beatAt(clock, 500)
+    expect(next.index).toBe(1)
+    expect(next.wave).toBeCloseTo(-1)
+    expect(beatAt(clock, 1000).wave).toBeCloseTo(1)
+  })
+
+  it('retunes to a new BPM without jumping phase', () => {
+    const clock = createBeatClock(0, 120)
+    const before = beatAt(clock, 250)
+    const retuned = retuneBeatClock(clock, 250, 240)
+    const after = beatAt(retuned, 250)
+    expect(after.phase).toBeCloseTo(before.phase, 5)
+    expect(after.wave).toBeCloseTo(before.wave, 5)
+  })
+
+  it('nudges toward a drum hit by at most 40ms and ignores far hits', () => {
+    const clock = createBeatClock(0, 120)
+    expect(lockBeatPhase(clock, 60, 120).startMs).toBeCloseTo(15)
+    expect(lockBeatPhase(clock, 170, 120).startMs).toBeCloseTo(40)
+    expect(lockBeatPhase(clock, 250, 120).startMs).toBe(0)
+  })
+})
+
+describe('三档运动', () => {
+  it('lets calm ignore wave and pulse', () => {
+    expect(motionFor('calm', 1, 1, 1.2)).toEqual(motionFor('calm', -1, 0, 1.2))
+    const calm = motionFor('calm', 1, 1, 1.2)
+    expect(Math.abs(calm.y)).toBeLessThanOrEqual(3.2)
+  })
+
+  it('never moves groove vertically', () => {
+    const scale = MUSIC_TUNING.motionScale
+    for (const [wave, pulse] of [
+      [1, 0],
+      [-1, 1],
+      [0.3, 0.8],
+    ]) {
+      const motion = motionFor('groove', wave, pulse, 1)
+      expect(motion.y).toBe(0)
+      expect(motion.x).toBeCloseTo(wave * 10 * scale)
+      expect(motion.rotation).toBeCloseTo(wave * 5.5 * scale)
+    }
+  })
+
+  it('only hops on the beat when intense', () => {
+    const scale = MUSIC_TUNING.motionScale
+    const onBeat = motionFor('intense', 1, 1, 1)
+    expect(onBeat.y).toBeCloseTo(-5.5 * scale)
+    expect(onBeat.sx).toBeCloseTo(1 + 0.025 * scale)
+    expect(onBeat.sy).toBeCloseTo(1 - 0.032 * scale)
+    const offBeat = motionFor('intense', 1, 0, 1)
+    expect(offBeat.y).toBe(0)
+  })
+
+  it('fades the ground shadow as the pet lifts', () => {
+    expect(groundFor({ x: 0, y: 0, rotation: 0, sx: 1, sy: 1 })).toEqual({
+      opacity: 0.19,
+      scale: 1,
+    })
+    const lifted = groundFor({ x: 0, y: -5.5, rotation: 0, sx: 1, sy: 1 })
+    expect(lifted.opacity).toBeLessThan(0.19)
+    expect(lifted.scale).toBeLessThan(1)
+  })
+})
+
+describe('预览与错误文案', () => {
+  it('reads the forced preview mood from the query string', () => {
+    expect(forcedMusicMood('?music=calm')).toBe('calm')
+    expect(forcedMusicMood('?music=groove')).toBe('groove')
+    expect(forcedMusicMood('?music=intense')).toBe('intense')
+    expect(forcedMusicMood('?music=loud')).toBeNull()
+    expect(forcedMusicMood('')).toBeNull()
+  })
+
+  it('turns native error codes into Chinese explanations', () => {
+    expect(musicErrorMessage('music_unavailable')).toContain('播放设备')
+    expect(musicErrorMessage('music_format_unsupported')).toContain('格式')
+    expect(musicErrorMessage('something_new')).toContain('something_new')
+  })
+
+  it('hides the music pose while the pet is speaking', () => {
+    expect(visibleMusicMood(true, false, 'groove')).toBe('groove')
+    expect(visibleMusicMood(true, true, 'groove')).toBeNull()
+    expect(visibleMusicMood(false, false, 'groove')).toBeNull()
+  })
+})

@@ -15,20 +15,24 @@ import {
 import { phaseDurationMs, phaseImageUrl, preloadTrack, resetAnimCaches, type AnimLibrary } from './anim'
 import { publishBubble } from './bubbleSync'
 import {
-  BUILTIN_CHARACTER,
   CHARACTER_EVENT,
+  DEFAULT_CHARACTER,
+  SHIJU_CHARACTER,
   loadActiveCharacter,
   loadCharacterAssets,
+  rendererOf,
   type ActiveCharacter,
+  type CharacterAssets,
 } from './packs'
 import { PetSpeechBubble } from './PetControls'
 import { PickupSprite } from './PickupSprite'
 import { pickupPhaseAfterPress, pickupPhaseAfterRelease, pickupSegments, type PickupPhase } from './pickup'
+import SvgSprite from './SvgSprite'
 import {
   IDLE_BEATS,
   PET_STATES,
+  breathBeatOption,
   bubbleLine,
-  builtinBeatOptions,
   petState,
   pickIdleBeat,
   pickPackBeat,
@@ -50,14 +54,15 @@ function speakPhase(phase: LinePhase): QiLingPhase {
 export default function PetApp(): JSX.Element {
   const [line, setLine] = useState<PetLine>(() => initialPetLine(inTauri()))
   const [voice, setVoiceOn] = useState(() => loadQiLingSettings().voice)
+  const [musicOn, setMusicOn] = useState(() => loadQiLingSettings().music)
   const [stateId, setStateId] = useState<PetStateId>(() => {
     if (line.phase !== 'idle') {
       return poseForLine({ ...line, voice: loadQiLingSettings().voice, playback: 'waiting' })
     }
     return readPetState()
   })
-  const [character, setCharacter] = useState<ActiveCharacter>(() => ({ ...BUILTIN_CHARACTER }))
-  const [beats, setBeats] = useState<IdleBeatOption[]>(() => builtinBeatOptions())
+  const [character, setCharacter] = useState<ActiveCharacter>(() => ({ ...DEFAULT_CHARACTER }))
+  const [beats, setBeats] = useState<IdleBeatOption[]>(() => [breathBeatOption()])
   const [beat, setBeat] = useState('breath')
   const [pickup, setPickup] = useState<PickupPhase>('idle')
   const [library, setLibrary] = useState<AnimLibrary | null>(null)
@@ -79,6 +84,7 @@ export default function PetApp(): JSX.Element {
   const stateRef = useRef(stateId)
   stateRef.current = stateId
   const state = petState(stateId)
+  const renderer = rendererOf(character)
   const idle =
     stateId === 'idle'
       ? beats.find((option) => option.key === beat) ??
@@ -99,7 +105,10 @@ export default function PetApp(): JSX.Element {
     idle && character.builtin && idle.key in IDLE_BEATS
       ? IDLE_BEATS[idle.key as keyof typeof IDLE_BEATS].file
       : state.file
-  const fallbackSrc = idleSrc ?? (character.builtin ? `/pet/${builtinBeatFile}` : '')
+  const fallbackSrc =
+    renderer === 'svg'
+      ? ''
+      : idleSrc ?? (character.builtin ? `/pet/${builtinBeatFile}` : '')
   const poseSrc = phaseImageUrl(activeTrack, 'idle') ?? fallbackSrc
   const speechPhaseNow = ready ? speakPhase(line.phase) : 'idle'
   const speechText = ready ? line.text : ''
@@ -130,35 +139,36 @@ export default function PetApp(): JSX.Element {
     let revision = 0
     let stop: (() => void) | undefined
 
+    const applyAssets = (assets: CharacterAssets) => {
+      setCharacter(assets.character)
+      setLibrary(assets.library)
+      setBeats(assets.beats)
+      setBeat('breath')
+      setPickup('idle')
+    }
+
     const load = async (next: ActiveCharacter) => {
       const request = ++revision
-      try {
-        const assets = await loadCharacterAssets(next)
-        if (!alive || request !== revision) return
-        setCharacter(assets.character)
-        setLibrary(assets.library)
-        setBeats(assets.beats)
-        setBeat('breath')
-        setPickup('idle')
-      } catch (error) {
-        if (!alive || request !== revision) return
-        console.warn('角色动画不可用，回到内置诗琚', error)
+      // 角色资源损坏时依次退回默认灵泡、再退回诗琚，避免桌宠空着。
+      const candidates = [next, DEFAULT_CHARACTER, SHIJU_CHARACTER].filter(
+        (candidate, index, list) =>
+          list.findIndex((item) => item.id === candidate.id) === index,
+      )
+      for (const candidate of candidates) {
         try {
-          const assets = await loadCharacterAssets(BUILTIN_CHARACTER)
+          const assets = await loadCharacterAssets(candidate)
           if (!alive || request !== revision) return
-          setCharacter(assets.character)
-          setLibrary(assets.library)
-          setBeats(assets.beats)
-          setBeat('breath')
-          setPickup('idle')
-        } catch (fallbackError) {
-          console.warn('内置动画目录也不可用', fallbackError)
+          applyAssets(assets)
+          return
+        } catch (error) {
+          if (!alive || request !== revision) return
+          console.warn('角色动画不可用', candidate.id, error)
         }
       }
     }
 
     void (async () => {
-      const active = await loadActiveCharacter().catch(() => ({ ...BUILTIN_CHARACTER }))
+      const active = await loadActiveCharacter().catch(() => ({ ...DEFAULT_CHARACTER }))
       if (alive) await load(active)
     })()
 
@@ -167,7 +177,7 @@ export default function PetApp(): JSX.Element {
         .then(({ listen }) =>
           listen<ActiveCharacter>(CHARACTER_EVENT, ({ payload }) => {
             resetAnimCaches()
-            void load(payload?.id ? payload : BUILTIN_CHARACTER)
+            void load(payload?.id ? payload : DEFAULT_CHARACTER)
           }),
         )
         .then((unlisten) => {
@@ -264,6 +274,7 @@ export default function PetApp(): JSX.Element {
   useEffect(() => watchQiLingSettings((next) => {
     setVoiceOn(next.voice)
     setBubbleOpen(next.bubble)
+    setMusicOn(next.music)
   }), [])
 
   useEffect(() => {
@@ -621,6 +632,14 @@ export default function PetApp(): JSX.Element {
               holding={drag.holding}
               fallbackSrc={poseSrc}
               onAdvance={setPickup}
+            />
+          ) : renderer === 'svg' ? (
+            <SvgSprite
+              stateId={stateId}
+              speaking={speech.speaking}
+              holding={drag.holding}
+              musicEnabled={musicOn && shown && ready}
+              gazeEnabled={shown && ready}
             />
           ) : (
             <img

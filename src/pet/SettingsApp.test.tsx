@@ -43,6 +43,7 @@ describe('器灵设定', () => {
       wakeWord: '器灵',
       voiceEngine: 'auto',
       edgeVoice: 'zh-CN-XiaoxiaoNeural',
+      music: true,
     })
     const page = renderToStaticMarkup(<SettingsApp />)
     expect(beforeLabel(page, '语音')).not.toContain('checked')
@@ -85,9 +86,18 @@ describe('器灵设定', () => {
   it('shows the current character and the pack management entry', () => {
     const page = renderToStaticMarkup(<SettingsApp />)
     expect(page).toContain('宠物角色')
-    expect(page).toContain('当前角色：诗琚')
+    expect(page).toContain('当前角色：灵泡')
     expect(page).toContain('管理角色资源包…')
     expect(page).toContain('正在读取角色资源包…')
+  })
+
+  it('offers the music following switch with a local-only privacy note', () => {
+    const page = renderToStaticMarkup(<SettingsApp />)
+    expect(page).toContain('听音乐')
+    expect(page).toContain('听音乐时自动切换状态')
+    expect(page).toContain('不录音、不保存、不上传')
+    expect(page).toContain('只有灵泡支持这个效果')
+    expect(page).toContain('监听状态：仅应用内可用')
   })
 
   it('shows client pairing controls and the empty state', () => {

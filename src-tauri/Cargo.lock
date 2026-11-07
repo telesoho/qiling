@@ -2803,6 +2803,7 @@ dependencies = [
  "ureq",
  "url",
  "uuid",
+ "windows",
  "zip",
 ]
 

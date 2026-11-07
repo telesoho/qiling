@@ -47,6 +47,23 @@ describe('wake word settings', () => {
     expect(loadQiLingSettings().edgeVoice).toBe(defaultPetSettings.edgeVoice)
   })
 
+  it('listens to music by default and remembers turning it off', () => {
+    expect(defaultPetSettings.music).toBe(true)
+    localStorage.setItem('qiling.settings', JSON.stringify({ voice: true }))
+    expect(loadQiLingSettings().music).toBe(true)
+
+    saveQiLingSettings({ ...defaultPetSettings, music: false })
+    expect(loadQiLingSettings().music).toBe(false)
+  })
+
+  it('keeps music on for settings written before the switch existed', () => {
+    localStorage.setItem(
+      'qiling.settings',
+      JSON.stringify({ voice: true, bubble: false, edgeVoice: 'zh-CN-XiaoyiNeural' }),
+    )
+    expect(loadQiLingSettings().music).toBe(true)
+  })
+
   it('rejects invalid Edge voice identifiers', () => {
     expect(isValidEdgeVoice('zh-CN-XiaoxiaoNeural')).toBe(true)
     expect(isValidEdgeVoice('../voice')).toBe(false)
