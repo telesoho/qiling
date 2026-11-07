@@ -198,6 +198,12 @@ fn qiling_music_sense_status(state: State<AppState>) -> music::MusicSenseStatus 
     state.music.status()
 }
 
+/// 设定页调整识别阈值；监听中也能立即生效，不需要重启采集。
+#[tauri::command]
+fn qiling_music_sense_configure(state: State<AppState>, tuning: music::MusicTuning) {
+    state.music.configure(tuning);
+}
+
 #[tauri::command]
 async fn pet_pack_load(
     state: State<'_, AppState>,
@@ -1077,6 +1083,7 @@ fn main() {
             qiling_music_sense_start,
             qiling_music_sense_stop,
             qiling_music_sense_status,
+            qiling_music_sense_configure,
             qiling_voice_status,
             qiling_voice_synthesize,
             qiling_voice_cancel,

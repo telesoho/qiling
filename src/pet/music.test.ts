@@ -1,17 +1,28 @@
 import { describe, expect, it } from 'vitest'
 import {
+  DEFAULT_MUSIC_TUNING,
+  IDLE_GROUND,
+  MOOD_DWELL_MS,
+  MOOD_MIN_HOLD_MS,
   MUSIC_TUNING,
   beatAt,
   beatDurationMs,
+  beginMoodGate,
+  blendGround,
+  blendMotion,
   chooseMusicMood,
   createBeatClock,
   forcedMusicMood,
+  gateMusicMood,
   groundFor,
   lockBeatPhase,
   motionFor,
   musicErrorMessage,
+  musicFollowLabel,
   musicThresholds,
+  normalizeMusicTuning,
   retuneBeatClock,
+  smoothstep,
   visibleMusicMood,
 } from './music'
 
@@ -44,6 +55,45 @@ describe('听音乐阈值', () => {
     expect(chooseMusicMood(null, 0.2, true)).toBe('calm')
     expect(chooseMusicMood(null, 0.7, true)).toBe('groove')
     expect(chooseMusicMood(null, 0.9, true)).toBe('intense')
+  })
+
+  it('follows the thresholds the user adjusted', () => {
+    const tuning = normalizeMusicTuning({
+      ...DEFAULT_MUSIC_TUNING,
+      enterGroove: 0.2,
+      exitGroove: 0.1,
+      enterIntense: 0.4,
+      exitIntense: 0.3,
+    })
+    expect(chooseMusicMood(null, 0.15, true, tuning)).toBe('calm')
+    expect(chooseMusicMood(null, 0.25, true, tuning)).toBe('groove')
+    expect(chooseMusicMood(null, 0.45, true, tuning)).toBe('intense')
+    expect(chooseMusicMood('groove', 0.35, true, tuning)).toBe('groove')
+    expect(chooseMusicMood('groove', 0.41, true, tuning)).toBe('intense')
+    expect(chooseMusicMood('intense', 0.31, true, tuning)).toBe('intense')
+    expect(chooseMusicMood('intense', 0.29, true, tuning)).toBe('groove')
+  })
+
+  it('repairs out-of-order thresholds instead of rejecting them', () => {
+    const tuning = normalizeMusicTuning({
+      enterScore: 0.1,
+      exitScore: 0.9,
+      enterGroove: 0.8,
+      exitGroove: 0.2,
+      enterIntense: 0.1,
+      exitIntense: 0.95,
+    })
+    expect(tuning.enterScore).toBe(0.1)
+    expect(tuning.exitScore).toBeLessThan(tuning.enterScore)
+    expect(tuning.exitGroove).toBeLessThan(tuning.enterGroove)
+    expect(tuning.enterIntense).toBeGreaterThan(tuning.enterGroove)
+    expect(tuning.exitIntense).toBeLessThan(tuning.enterIntense)
+
+    // 手改 localStorage / 旧版本设置里的非法值回落到默认值。
+    expect(normalizeMusicTuning(null)).toEqual(DEFAULT_MUSIC_TUNING)
+    expect(normalizeMusicTuning({ enterScore: Number.NaN, exitScore: 'loud' })).toEqual(
+      DEFAULT_MUSIC_TUNING,
+    )
   })
 
   it('reports no music once playback stops', () => {
@@ -127,6 +177,79 @@ describe('三档运动', () => {
   })
 })
 
+describe('换档过渡', () => {
+  it('eases between motions with zero velocity at both ends', () => {
+    const from = { x: -5, y: 2, rotation: 3, sx: 1.02, sy: 0.98 }
+    const to = { x: 5, y: -2, rotation: -3, sx: 0.98, sy: 1.02 }
+    expect(blendMotion(from, to, 0)).toEqual(from)
+    const end = blendMotion(from, to, 1)
+    expect(end.x).toBeCloseTo(to.x)
+    expect(end.y).toBeCloseTo(to.y)
+    expect(end.rotation).toBeCloseTo(to.rotation)
+    expect(end.sx).toBeCloseTo(to.sx)
+    expect(end.sy).toBeCloseTo(to.sy)
+    expect(blendMotion(from, to, 0.5).x).toBeCloseTo(0)
+    // smoothstep：20% 的时间只走约 10.4% 的路程，起手不抢拍。
+    expect(smoothstep(0.2)).toBeCloseTo(0.104)
+    expect(smoothstep(-1)).toBe(0)
+    expect(smoothstep(2)).toBe(1)
+    expect(blendMotion(from, to, 0.2).x).toBeGreaterThan(-5)
+  })
+
+  it('hands the ground shadow back to the CSS idle value without a step', () => {
+    expect(blendGround(IDLE_GROUND, { opacity: 0.19, scale: 1 }, 0)).toEqual(IDLE_GROUND)
+    expect(blendGround(IDLE_GROUND, { opacity: 0.19, scale: 1 }, 1)).toEqual({
+      opacity: 0.19,
+      scale: 1,
+    })
+    expect(blendGround(IDLE_GROUND, { opacity: 0.19, scale: 1 }, 0.5).opacity).toBeCloseTo(0.165)
+    // 收尾必须回到 CSS 里的 0.14，否则交还 CSS 时影子会亮一下。
+    expect(IDLE_GROUND.opacity).toBe(0.14)
+  })
+})
+
+describe('换档防抖', () => {
+  it('enters and leaves music immediately, but dwells between moods', () => {
+    let gate = beginMoodGate(0)
+    gate = gateMusicMood(gate, 'calm', 1000)
+    expect(gate.mood).toBe('calm')
+
+    gate = gateMusicMood(gate, 'groove', 2000)
+    expect(gate.mood).toBe('calm')
+    expect(gate.candidate).toBe('groove')
+    gate = gateMusicMood(gate, 'groove', 2000 + MOOD_DWELL_MS - 1)
+    expect(gate.mood).toBe('calm')
+    gate = gateMusicMood(gate, 'groove', 2000 + MOOD_DWELL_MS)
+    expect(gate.mood).toBe('groove')
+
+    // 音乐消失是明确事件，不需要等防抖。
+    expect(gateMusicMood(gate, null, 2100).mood).toBeNull()
+  })
+
+  it('does not machine-gun switches when the energy flickers', () => {
+    let gate = gateMusicMood(beginMoodGate(0), 'calm', 1000)
+    gate = gateMusicMood(gate, 'groove', 1010)
+    gate = gateMusicMood(gate, 'calm', 1200)
+    expect(gate.mood).toBe('calm')
+    expect(gate.candidate).toBeNull()
+    gate = gateMusicMood(gate, 'groove', 1300)
+    expect(gate.mood).toBe('calm')
+  })
+
+  it('waits for the minimum hold after a switch', () => {
+    let gate = gateMusicMood(beginMoodGate(0), 'calm', 1000)
+    gate = gateMusicMood(gate, 'groove', 2000)
+    gate = gateMusicMood(gate, 'groove', 2000 + MOOD_DWELL_MS)
+    expect(gate.mood).toBe('groove')
+    gate = gateMusicMood(gate, 'intense', 2000 + MOOD_DWELL_MS + 10)
+    // 候选站住了，但离上次换档还不到 MOOD_MIN_HOLD_MS。
+    gate = gateMusicMood(gate, 'intense', 2000 + MOOD_DWELL_MS + MOOD_MIN_HOLD_MS - 1)
+    expect(gate.mood).toBe('groove')
+    gate = gateMusicMood(gate, 'intense', 2000 + MOOD_MIN_HOLD_MS + MOOD_DWELL_MS)
+    expect(gate.mood).toBe('intense')
+  })
+})
+
 describe('预览与错误文案', () => {
   it('reads the forced preview mood from the query string', () => {
     expect(forcedMusicMood('?music=calm')).toBe('calm')
@@ -140,6 +263,21 @@ describe('预览与错误文案', () => {
     expect(musicErrorMessage('music_unavailable')).toContain('播放设备')
     expect(musicErrorMessage('music_format_unsupported')).toContain('格式')
     expect(musicErrorMessage('something_new')).toContain('something_new')
+  })
+
+  it('says when music is followed without a beat estimate', () => {
+    // 判定为音乐但估不出 BPM：必须写明按备用拍摇摆，不能只留一句“正在跟随音乐”。
+    expect(musicFollowLabel({ music: true, active: true, bpm: 0 })).toBe(
+      '正在跟随音乐 · 未识别到节拍（按 96 BPM 摆动）',
+    )
+    expect(musicFollowLabel({ music: true, active: true })).toContain('未识别到节拍')
+    expect(musicFollowLabel({ music: true, active: true, bpm: 122.4 })).toBe(
+      '正在跟随音乐 · 122 BPM',
+    )
+    expect(musicFollowLabel({ music: false, active: true, bpm: 0 })).toBe(
+      '听到声音，但不是音乐（人声/噪声不跟拍）',
+    )
+    expect(musicFollowLabel({ music: false, active: false })).toBe('正在监听，等待音乐')
   })
 
   it('hides the music pose while the pet is speaking', () => {

@@ -38,6 +38,10 @@ describe('灵泡 SVG', () => {
     expect(html).not.toContain('lp-notes on')
   })
 
+  it('keeps the eye group class the blink and eye-cover selectors need', () => {
+    expect(render({ music: 'groove' })).toContain('data-part="eyes" class="lp-eyes"')
+  })
+
   it('sticks to the 8KB budget', () => {
     expect(render().length).toBeLessThanOrEqual(8 * 1024)
   })

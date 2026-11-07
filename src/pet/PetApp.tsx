@@ -55,6 +55,7 @@ export default function PetApp(): JSX.Element {
   const [line, setLine] = useState<PetLine>(() => initialPetLine(inTauri()))
   const [voice, setVoiceOn] = useState(() => loadQiLingSettings().voice)
   const [musicOn, setMusicOn] = useState(() => loadQiLingSettings().music)
+  const [musicTuning, setMusicTuning] = useState(() => loadQiLingSettings().musicTuning)
   const [stateId, setStateId] = useState<PetStateId>(() => {
     if (line.phase !== 'idle') {
       return poseForLine({ ...line, voice: loadQiLingSettings().voice, playback: 'waiting' })
@@ -275,6 +276,7 @@ export default function PetApp(): JSX.Element {
     setVoiceOn(next.voice)
     setBubbleOpen(next.bubble)
     setMusicOn(next.music)
+    setMusicTuning(next.musicTuning)
   }), [])
 
   useEffect(() => {
@@ -639,6 +641,7 @@ export default function PetApp(): JSX.Element {
               speaking={speech.speaking}
               holding={drag.holding}
               musicEnabled={musicOn && shown && ready}
+              musicTuning={musicTuning}
               gazeEnabled={shown && ready}
             />
           ) : (

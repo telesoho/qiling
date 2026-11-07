@@ -1,12 +1,14 @@
 /**
  * 听音乐的律动契约。
  *
- * 所有阈值、节拍与运动参数都对齐设计原型
+ * 阈值、节拍与运动参数的默认值都对齐设计原型
  * `design/characters/lingpao/sheets/lingpao-groove.html`：
- *   - 阈值来自原型滑块的默认值（0.60 / 0.30），不是设计提案 §5.5 的初值；
+ *   - 三档阈值来自原型滑块的默认值（0.60 / 0.30），不是设计提案 §5.5 的初值；
  *   - `chooseMusicMood` 逐分支照抄原型的 `chooseMood`；
  *   - `beatAt` / `motionFor` 照抄原型的节拍时钟与三档运动分层。
- * 改这里之前先对照原型，避免「听起来对、动起来不对」。
+ *
+ * 识别阈值可以在设定页由用户调整（`MusicTuning`）。默认值仍是原型标定值，
+ * 所以「不调」时行为和以前完全一致；改默认值之前先对照原型。
  */
 
 export type MusicMood = 'calm' | 'groove' | 'intense'
@@ -28,6 +30,108 @@ export const MUSIC_TUNING = {
   intenseHysteresis: 0.1,
 } as const
 
+function clamp(value: number, min = 0, max = 1): number {
+  return Math.max(min, Math.min(max, value))
+}
+
+function roundHundredths(value: number): number {
+  return Math.round(value * 100) / 100
+}
+
+const defaultEnterIntense = clamp(
+  Math.max(MUSIC_TUNING.intenseFloor, MUSIC_TUNING.swayThreshold + MUSIC_TUNING.intenseGap),
+  0,
+  0.95,
+)
+
+/**
+ * 识别音乐时可调的控制参数。
+ *
+ * `enterScore` / `exitScore` 由后端使用：最近 1 秒的节奏与音色证据得分高于
+ * `enterScore` 持续 1 秒进入音乐，低于 `exitScore` 持续 1 秒退出。
+ * 其余四个阈值由前端使用：把 0–1 的平滑能量映射到舒缓 / 轻快 / 激烈。
+ */
+export interface MusicTuning {
+  /** 音乐判定进入分数（0–1）。越低越容易把声音当成音乐。 */
+  enterScore: number
+  /** 音乐判定退出分数，必须低于 `enterScore`。 */
+  exitScore: number
+  /** 舒缓 → 轻快的能量阈值。 */
+  enterGroove: number
+  /** 轻快 → 舒缓的能量阈值，必须低于 `enterGroove`。 */
+  exitGroove: number
+  /** 轻快 → 激烈的能量阈值，必须高于 `enterGroove`。 */
+  enterIntense: number
+  /** 激烈 → 轻快的能量阈值。 */
+  exitIntense: number
+}
+
+/** 原型标定值；「恢复默认」和旧设置都回落到这里。 */
+export const DEFAULT_MUSIC_TUNING: MusicTuning = {
+  enterScore: 0.32,
+  exitScore: 0.2,
+  enterGroove: MUSIC_TUNING.swayThreshold,
+  exitGroove: MUSIC_TUNING.calmThreshold,
+  enterIntense: defaultEnterIntense,
+  exitIntense: clamp(
+    Math.max(MUSIC_TUNING.calmThreshold, defaultEnterIntense - MUSIC_TUNING.intenseHysteresis),
+    0,
+    defaultEnterIntense,
+  ),
+}
+
+function finiteOr(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+/**
+ * 把任意来源（旧设置、手改的 localStorage、后端回显）收敛成合法阈值。
+ *
+ * 进入阈值必须高于退出阈值，激烈档必须高于轻快档；越界的值直接夹住，
+ * 而不是让 UI 拒绝保存。这样旧版本设置、拖动滑块和手改 JSON 都不会产生
+ * 永远进不去 / 退不出的滞回区间。
+ */
+export function normalizeMusicTuning(input: unknown): MusicTuning {
+  const raw = (typeof input === 'object' && input !== null ? input : {}) as Partial<
+    Record<keyof MusicTuning, unknown>
+  >
+  const enterScore = roundHundredths(
+    clamp(finiteOr(raw.enterScore, DEFAULT_MUSIC_TUNING.enterScore), 0.05, 0.95),
+  )
+  const exitScore = roundHundredths(
+    clamp(
+      finiteOr(raw.exitScore, DEFAULT_MUSIC_TUNING.exitScore),
+      0.01,
+      Math.max(0.01, enterScore - 0.01),
+    ),
+  )
+  const enterGroove = roundHundredths(
+    clamp(finiteOr(raw.enterGroove, DEFAULT_MUSIC_TUNING.enterGroove), 0.05, 0.95),
+  )
+  const exitGroove = roundHundredths(
+    clamp(
+      finiteOr(raw.exitGroove, DEFAULT_MUSIC_TUNING.exitGroove),
+      0.01,
+      Math.max(0.01, enterGroove - 0.01),
+    ),
+  )
+  const enterIntense = roundHundredths(
+    clamp(
+      finiteOr(raw.enterIntense, DEFAULT_MUSIC_TUNING.enterIntense),
+      Math.max(0, enterGroove + 0.01),
+      0.99,
+    ),
+  )
+  const exitIntense = roundHundredths(
+    clamp(
+      finiteOr(raw.exitIntense, DEFAULT_MUSIC_TUNING.exitIntense),
+      Math.min(exitGroove, enterIntense - 0.01),
+      Math.max(exitGroove, enterIntense - 0.01),
+    ),
+  )
+  return { enterScore, exitScore, enterGroove, exitGroove, enterIntense, exitIntense }
+}
+
 export interface MusicThresholds {
   enterGroove: number
   exitGroove: number
@@ -35,30 +139,16 @@ export interface MusicThresholds {
   exitIntense: number
 }
 
-function clamp(value: number, min = 0, max = 1): number {
-  return Math.max(min, Math.min(max, value))
-}
-
-/** 原型 `thresholdValues()` 的移植。 */
+/** 把用户阈值整理成三档滞回判定需要的四个边界。 */
 export function musicThresholds(
-  sway: number = MUSIC_TUNING.swayThreshold,
-  calm: number = MUSIC_TUNING.calmThreshold,
+  tuning: MusicTuning = DEFAULT_MUSIC_TUNING,
 ): MusicThresholds {
-  const enterIntense = clamp(
-    Math.max(MUSIC_TUNING.intenseFloor, sway + MUSIC_TUNING.intenseGap),
-    0,
-    0.95,
-  )
-  const exitIntense = clamp(
-    Math.max(calm, enterIntense - MUSIC_TUNING.intenseHysteresis),
-    0,
-    enterIntense,
-  )
+  const safe = normalizeMusicTuning(tuning)
   return {
-    enterGroove: clamp(sway),
-    exitGroove: clamp(calm),
-    enterIntense,
-    exitIntense,
+    enterGroove: safe.enterGroove,
+    exitGroove: safe.exitGroove,
+    enterIntense: safe.enterIntense,
+    exitIntense: safe.exitIntense,
   }
 }
 
@@ -72,9 +162,10 @@ export function chooseMusicMood(
   current: MusicMood | null,
   energy: number,
   active: boolean,
+  tuning: MusicTuning = DEFAULT_MUSIC_TUNING,
 ): MusicMood | null {
   if (!active) return null
-  const { enterGroove, exitGroove, enterIntense, exitIntense } = musicThresholds()
+  const { enterGroove, exitGroove, enterIntense, exitIntense } = musicThresholds(tuning)
   if (current === null || current === 'calm') {
     if (energy < enterGroove) return 'calm'
     return energy >= enterIntense ? 'intense' : 'groove'
@@ -85,6 +176,60 @@ export function chooseMusicMood(
     return 'groove'
   }
   return energy < exitIntense ? 'groove' : 'intense'
+}
+
+/**
+ * 换档防抖：新档位连续成立这么久才真的切。
+ *
+ * 滞回区间只挡住阈值上的抖动；副歌/主歌这种能量整体抬落仍会让档位在几秒内
+ * 连续换两次。每次换档都伴随动作与表情过渡，太密会显得抽搐，所以再等半拍确认。
+ */
+export const MOOD_DWELL_MS = 420
+/** 两次真正换档之间的最小间隔，避免在阈值边缘来回拉锯。 */
+export const MOOD_MIN_HOLD_MS = 700
+
+export interface MoodGate {
+  /** 已经确认、正在生效的档位。 */
+  mood: MusicMood | null
+  /** 正在等待确认的候选档位。 */
+  candidate: MusicMood | null
+  /** 候选从何时开始连续成立（`performance.now()` 毫秒）。 */
+  candidateSince: number
+  /** 上一次真正换档的时间。 */
+  changedAt: number
+}
+
+export function beginMoodGate(now = 0): MoodGate {
+  return { mood: null, candidate: null, candidateSince: 0, changedAt: now }
+}
+
+/**
+ * 给 `chooseMusicMood` 的结果加一层确认。
+ *
+ * 音乐开始/结束（`raw === null` 或当前没有音乐）是明确事件，立即生效；
+ * 只有舒缓/轻快/激烈之间的来回复跳才要求候选档位站住 `dwellMs`，
+ * 且距离上次换档满 `minHoldMs`。
+ */
+export function gateMusicMood(
+  gate: MoodGate,
+  raw: MusicMood | null,
+  now: number,
+  dwellMs: number = MOOD_DWELL_MS,
+  minHoldMs: number = MOOD_MIN_HOLD_MS,
+): MoodGate {
+  if (raw === gate.mood) {
+    if (gate.candidate === null && gate.candidateSince === 0) return gate
+    return { ...gate, candidate: null, candidateSince: 0 }
+  }
+  if (raw === null || gate.mood === null) {
+    return { mood: raw, candidate: null, candidateSince: 0, changedAt: now }
+  }
+  if (raw !== gate.candidate) {
+    return { ...gate, candidate: raw, candidateSince: now }
+  }
+  if (now - gate.candidateSince < dwellMs) return gate
+  if (now - gate.changedAt < minHoldMs) return gate
+  return { mood: raw, candidate: null, candidateSince: 0, changedAt: now }
 }
 
 export interface BeatClock {
@@ -150,6 +295,56 @@ export interface Motion {
 export const REST_MOTION: Motion = { x: 0, y: 0, rotation: 0, sx: 1, sy: 1 }
 
 /**
+ * 档位切换的交叉淡入时长。
+ *
+ * 三档的动作公式不同（舒缓是慢正弦，轻快/激烈是拍点摇摆），直接换档会在同一帧跳变；
+ * 切档时从「上一帧真正画出来的值」用 smoothstep 过渡到新档，首尾速度为 0，
+ * 所以接得上、也停得稳。数值取一拍左右（96 BPM ≈ 625ms），读起来像顺着刚才的动作换气。
+ */
+export const MOOD_BLEND_MS = 620
+
+/** 音乐出现/消失时，从静止淡入或收拢回静止的时长。 */
+export const MOOD_SETTLE_MS = 360
+
+/** `t` 夹到 0…1 后的 smoothstep：两端速度为 0，避免过渡起止各顿一下。 */
+export function smoothstep(t: number): number {
+  const x = clamp(t)
+  return x * x * (3 - 2 * x)
+}
+
+/** 两套动作之间做插值；音乐开头/收尾都走这里，保证帧间连续。 */
+export function blendMotion(from: Motion, to: Motion, t: number): Motion {
+  const k = smoothstep(t)
+  return {
+    x: from.x + (to.x - from.x) * k,
+    y: from.y + (to.y - from.y) * k,
+    rotation: from.rotation + (to.rotation - from.rotation) * k,
+    sx: from.sx + (to.sx - from.sx) * k,
+    sy: from.sy + (to.sy - from.sy) * k,
+  }
+}
+
+export interface GroundShadow {
+  opacity: number
+  scale: number
+}
+
+/** 待机时 CSS 画的地面影子（`lingpao-idle.svg` / `.lp-ground`），收尾时要交还这份数值。 */
+export const IDLE_GROUND: GroundShadow = { opacity: 0.14, scale: 1 }
+
+export function blendGround(
+  from: GroundShadow,
+  to: GroundShadow,
+  t: number,
+): GroundShadow {
+  const k = smoothstep(t)
+  return {
+    opacity: from.opacity + (to.opacity - from.opacity) * k,
+    scale: from.scale + (to.scale - from.scale) * k,
+  }
+}
+
+/**
  * 原型 `frame()` 里的三档运动分层：
  * 舒缓只呼吸漂浮、轻快只左右摇摆（y 恒为 0）、激烈在摇摆上按拍点轻弹。
  */
@@ -187,7 +382,7 @@ export function motionFor(
 }
 
 /** 原型 `ground.style.opacity / transform`：抬得越高，影子越淡越小。 */
-export function groundFor(motion: Motion): { opacity: number; scale: number } {
+export function groundFor(motion: Motion): GroundShadow {
   const lift = Math.max(0, -motion.y)
   return {
     opacity: 0.19 * (1 - lift / 260),
@@ -234,6 +429,30 @@ export interface MusicSenseStatus {
   music?: boolean
   bpm?: number
   bpmConfidence?: number
+}
+
+/**
+ * 设定页「监听状态」行的文案。
+ *
+ * `music` 与 `bpm` 是两条独立信号：`music` 只表示“这段声音像音乐”（节奏/音色证据 + 滞回），
+ * 不要求估出速度。靠音色认出、或者节拍证据不够的音乐会把 BPM 留成 0，前端按
+ * `fallbackBpm` 的备用拍摇摆。所以这里必须把“没估出 BPM”写成看得见的状态，
+ * 否则界面会出现“正在跟随音乐”却不显示 BPM 的矛盾感。
+ */
+export function musicFollowLabel(status: {
+  music?: boolean
+  active?: boolean
+  bpm?: number
+}): string {
+  if (status.music === true) {
+    const bpm = status.bpm ?? 0
+    return bpm > 0
+      ? `正在跟随音乐 · ${Math.round(bpm)} BPM`
+      : `正在跟随音乐 · 未识别到节拍（按 ${MUSIC_TUNING.fallbackBpm} BPM 摆动）`
+  }
+  return status.active === true
+    ? '听到声音，但不是音乐（人声/噪声不跟拍）'
+    : '正在监听，等待音乐'
 }
 
 export const MUSIC_ERRORS: Record<string, string> = {

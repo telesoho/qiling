@@ -1,3 +1,9 @@
+import {
+  DEFAULT_MUSIC_TUNING,
+  normalizeMusicTuning,
+  type MusicTuning,
+} from '../pet/music'
+
 const STORAGE_KEY = 'qiling.settings'
 
 export type VoiceEnginePreference = 'auto' | 'edge' | 'cosyvoice' | 'system'
@@ -11,6 +17,8 @@ export interface PetSettings {
   edgeVoice: string
   /** 听系统正在播放的音乐并自动切换灵泡的状态。默认开启。 */
   music: boolean
+  /** 识别音乐用的可调阈值；旧设置没有这一项时回落到原型标定值。 */
+  musicTuning: MusicTuning
 }
 
 export const defaultPetSettings: PetSettings = {
@@ -21,6 +29,7 @@ export const defaultPetSettings: PetSettings = {
   voiceEngine: 'auto',
   edgeVoice: 'zh-CN-XiaoxiaoNeural',
   music: true,
+  musicTuning: { ...DEFAULT_MUSIC_TUNING },
 }
 
 export function isValidWakeWord(wakeWord: string): boolean {
@@ -67,6 +76,7 @@ export function loadQiLingSettings(): PetSettings {
         ? parsed.edgeVoice
         : defaultPetSettings.edgeVoice,
       music: parsed.music !== false,
+      musicTuning: normalizeMusicTuning(parsed.musicTuning),
     }
   } catch {
     return { ...defaultPetSettings }
@@ -90,6 +100,7 @@ export function saveQiLingSettings(settings: PetSettings): void {
       ? settings.edgeVoice
       : defaultPetSettings.edgeVoice,
     music: settings.music !== false,
+    musicTuning: normalizeMusicTuning(settings.musicTuning),
   }
   store.setItem(STORAGE_KEY, JSON.stringify(safe))
   if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('qiling-settings'))

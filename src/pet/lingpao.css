@@ -15,6 +15,9 @@
 
 .lingpao .lp-dance {
   transform-box: view-box;
+  /* SVG 分组不写 transform-origin 时按 0 0（画布左上角）旋转，摇摆会绕左上角甩出去。
+     原型 `lingpao-groove.html` 与设计提案都要求绕底部（90, 209）旋转，像摇头。 */
+  transform-origin: 90px 209px;
   animation: lp-float 4.2s ease-in-out infinite alternate;
 }
 
@@ -27,6 +30,8 @@
 .lingpao .lp-tilt {
   transform-box: view-box;
   transform-origin: 90px 160px;
+  /* 状态切换时 tilt 会差 3°~5°，没有过渡就直接「弹」一下。 */
+  transition: transform 0.5s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .lingpao .lp-ground {
@@ -88,6 +93,19 @@
 
 .lingpao .lp-eyes.blink .lp-eye {
   transform: scaleY(0.08);
+}
+
+/* 换眼遮罩：眼睛是不同图形（椭圆 ↔ 弯眼弧），无法 tween。
+   换眼时先整体闭一下、在最闭的一帧换图形再睁开，时长与 `SvgSprite` 的定时器对齐。 */
+.lingpao .lp-eyes {
+  transform-box: view-box;
+  transform-origin: 90px 152px;
+  transition: transform 0.1s ease, opacity 0.1s ease;
+}
+
+.lingpao .lp-eyes.cover {
+  transform: scaleY(0.04);
+  opacity: 0;
 }
 
 .lingpao .lp-mouth-talk {

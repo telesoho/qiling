@@ -260,7 +260,7 @@ public/pet/anim/                   # bake 生成物（gitignore），勿手改
 - SVG 角色**不进** `design/anim/tracks.manifest.json`、不参与 `npm run bake:anim`、也不进资源包格式；`?track=` 预览只对位图角色生效。
 - 姿态由 `src/pet/lingpao.ts` 的 `poseForRuntime` 从五态、说话、拎起、音乐档位映射；渲染与动画在 `src/pet/SvgSprite.tsx` 与 `src/pet/lingpao.css`。
 - 听音乐的三档（舒缓／轻快／激烈）是**运行期视觉状态**，沿用 §3 的 `idle` stateId，不新增协议 stateId，也不改变对外 `state`／`phase`／`mood`。
-- 音乐阈值、节拍时钟与运动参数以 `design/characters/lingpao/sheets/lingpao-groove.html` 为准，运行时实现见 `src/pet/music.ts` 与 `src-tauri/src/music.rs`。
+- 音乐阈值的默认值、节拍时钟与运动参数以 `design/characters/lingpao/sheets/lingpao-groove.html` 为准；用户可在设定页覆盖识别阈值。运行时实现见 `src/pet/music.ts` 与 `src-tauri/src/music.rs`。
 - 灵泡没有吊起逐帧轨：拖拽时用 SVG 形变（拉长 + 摆动）表达，窗口本身仍跟手移动。
 
 ---

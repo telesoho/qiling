@@ -25,7 +25,7 @@ use std::{
     time::Duration,
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
 
@@ -72,12 +72,59 @@ const MAX_BPM: f32 = 200.0;
 /// 但语音通常低于 0.2，所以门限要按实测回环标定，不能只按合成音轨。
 const MUSIC_ENTER_SCORE: f32 = 0.32;
 const MUSIC_EXIT_SCORE: f32 = 0.20;
+/// 用户可调阈值的硬边界：低于 0.05 几乎任何声音都会被判成音乐。
+const MIN_TUNED_SCORE: f32 = 0.05;
+const MIN_TUNED_GAP: f32 = 0.01;
 /// 进入音乐状态要连续这么多秒达到门限：语音偶尔也能碰到 0.3，但撑不住 1 秒。
 const MUSIC_ENTER_HOLD_SECONDS: f32 = 1.0;
 const MUSIC_EXIT_HOLD_SECONDS: f32 = 1.0;
+/// 速度估计“不可信”也要连续这么久才把 BPM 收回 0：门限附近的判定会逐帧翻转，
+/// 不驻留的话界面上的 BPM 会时有时无，灵泡也会在真实拍点和 96 备用拍之间来回切。
+const TEMPO_DOWNGRADE_HOLD_SECONDS: f32 = 1.0;
 /// 速度候选与上一拍相差超过 8% 时，要连续两次估计一致才切换，避免半拍/双拍来回跳。
 const BPM_SWITCH_RATIO: f32 = 0.08;
 const BPM_SWITCH_CONFIRM: u8 = 2;
+
+/// 用户在设定页调整的音乐判定阈值。
+///
+/// 只暴露会影响“是不是音乐”的两个分数；进入和退出分开，保留滞回。
+/// 字段用 camelCase 与前端设置一致，`default` 让旧前端只传一个字段时不会失败。
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MusicTuning {
+    pub enter_score: f32,
+    pub exit_score: f32,
+}
+
+impl Default for MusicTuning {
+    fn default() -> Self {
+        Self {
+            enter_score: MUSIC_ENTER_SCORE,
+            exit_score: MUSIC_EXIT_SCORE,
+        }
+    }
+}
+
+impl MusicTuning {
+    /// 把前端传来的值收敛到可用范围，保证退出阈值严格低于进入阈值。
+    fn sanitized(self) -> Self {
+        let enter_score = if self.enter_score.is_finite() {
+            self.enter_score.clamp(MIN_TUNED_SCORE, 0.95)
+        } else {
+            MUSIC_ENTER_SCORE
+        };
+        let max_exit = (enter_score - MIN_TUNED_GAP).max(MIN_TUNED_GAP);
+        let exit_score = if self.exit_score.is_finite() {
+            self.exit_score.clamp(MIN_TUNED_GAP, max_exit)
+        } else {
+            MUSIC_EXIT_SCORE.min(max_exit)
+        };
+        Self {
+            enter_score,
+            exit_score,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -119,6 +166,8 @@ struct Inner {
     last_error: Mutex<Option<String>>,
     /// 最近一次分析结果，供设定页显示“听到了什么”。
     latest: Mutex<Option<MusicSnapshot>>,
+    /// 用户在设定页调整的阈值；运行中也能改，采集线程会轮流读取。
+    tuning: Mutex<MusicTuning>,
 }
 
 pub struct MusicSense {
@@ -140,6 +189,7 @@ impl MusicSense {
                 session_stop: Mutex::new(None),
                 last_error: Mutex::new(None),
                 latest: Mutex::new(None),
+                tuning: Mutex::new(MusicTuning::default()),
             }),
         }
     }
@@ -158,6 +208,7 @@ impl MusicSense {
             *latest = None;
         }
         let generation = self.inner.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let tuning = self.tuning();
         let stop = Arc::new(AtomicBool::new(false));
         if let Ok(mut session) = self.inner.session_stop.lock() {
             *session = Some(Arc::clone(&stop));
@@ -168,7 +219,9 @@ impl MusicSense {
             let (ready_tx, ready_rx) = mpsc::channel::<Result<(), &'static str>>();
             let inner = Arc::clone(&self.inner);
             let session_stop = Arc::clone(&stop);
-            thread::spawn(move || platform::run(inner, app, session_stop, generation, ready_tx));
+            thread::spawn(move || {
+                platform::run(inner, app, session_stop, generation, ready_tx, tuning)
+            });
             match ready_rx.recv_timeout(Duration::from_secs(2)) {
                 Ok(Ok(())) => Ok(true),
                 Ok(Err(code)) => {
@@ -207,6 +260,21 @@ impl MusicSense {
 
     pub fn shutdown(&self) {
         let _ = self.stop();
+    }
+
+    fn tuning(&self) -> MusicTuning {
+        self.inner
+            .tuning
+            .lock()
+            .map(|tuning| *tuning)
+            .unwrap_or_default()
+    }
+
+    /// 设定页改阈值时调用；运行中的采集线程会在下一轮读到新值。
+    pub fn configure(&self, tuning: MusicTuning) {
+        if let Ok(mut current) = self.inner.tuning.lock() {
+            *current = tuning.sanitized();
+        }
     }
 
     /// 线程退出或启动失败时调用；已被更新的会话取代时不改状态。
@@ -491,10 +559,13 @@ pub struct MusicAnalyser {
     flatness_history: VecDeque<f32>,
     music: bool,
     music_score: f32,
+    tuning: MusicTuning,
     music_enter_seconds: f32,
     music_exit_seconds: f32,
     bpm: f32,
     bpm_confidence: f32,
+    /// 连续“速度不可信”的秒数；用来给收回 BPM 加驻留。
+    tempo_downgrade_seconds: f32,
     pending_bpm: f32,
     pending_bpm_count: u8,
     last_tempo_at: f64,
@@ -556,10 +627,12 @@ impl MusicAnalyser {
             flatness_history: VecDeque::with_capacity(MAX_HISTORY_FRAMES),
             music: false,
             music_score: 0.0,
+            tuning: MusicTuning::default(),
             music_enter_seconds: 0.0,
             music_exit_seconds: 0.0,
             bpm: 0.0,
             bpm_confidence: 0.0,
+            tempo_downgrade_seconds: 0.0,
             pending_bpm: 0.0,
             pending_bpm_count: 0,
             last_tempo_at: f64::NEG_INFINITY,
@@ -569,6 +642,11 @@ impl MusicAnalyser {
             clock: 0.0,
             last_emit: -1.0,
         }
+    }
+
+    /// 设定页调整阈值后由采集线程调用；不会清空已经累积的音频特征。
+    pub fn set_tuning(&mut self, tuning: MusicTuning) {
+        self.tuning = tuning.sanitized();
     }
 
     pub fn push(&mut self, samples: &[f32]) -> Vec<AnalysisEvent> {
@@ -1014,13 +1092,13 @@ impl MusicAnalyser {
         let score = rhythm_score.max(texture);
         self.music_score = score;
 
-        if score >= MUSIC_ENTER_SCORE {
+        if score >= self.tuning.enter_score {
             self.music_enter_seconds += TEMPO_UPDATE_SECONDS as f32;
             if self.music || self.music_enter_seconds >= MUSIC_ENTER_HOLD_SECONDS {
                 self.music = true;
                 self.music_exit_seconds = 0.0;
             }
-        } else if score <= MUSIC_EXIT_SCORE {
+        } else if score <= self.tuning.exit_score {
             self.music_enter_seconds = 0.0;
             self.music_exit_seconds += TEMPO_UPDATE_SECONDS as f32;
             if self.music_exit_seconds >= MUSIC_EXIT_HOLD_SECONDS {
@@ -1031,13 +1109,23 @@ impl MusicAnalyser {
             self.music_exit_seconds = 0.0;
         }
 
+        // 靠音色而不是靠鼓点认出来的慢歌，速度估计通常不可信；让前端按 96 的备用拍摇摆。
+        // 但这个判定是贴着门限逐帧算的，会一帧可信一帧不可信，所以收回 BPM 也要驻留：
+        // 连续 TEMPO_DOWNGRADE_HOLD_SECONDS 都不可信才清空，避免界面上的 BPM 时有时无。
+        let tempo_unreliable =
+            texture > rhythm_score && (estimate.pulse < 0.35 || estimate.confidence < 0.60);
         if !self.music {
             self.bpm = 0.0;
             self.bpm_confidence = 0.0;
-        } else if texture > rhythm_score && (estimate.pulse < 0.35 || estimate.confidence < 0.60) {
-            // 靠音色而不是靠鼓点认出来的慢歌，速度估计通常不可信；让前端按 96 的备用拍摇摆。
-            self.bpm = 0.0;
-            self.bpm_confidence = 0.0;
+            self.tempo_downgrade_seconds = 0.0;
+        } else if tempo_unreliable {
+            self.tempo_downgrade_seconds += TEMPO_UPDATE_SECONDS as f32;
+            if self.tempo_downgrade_seconds >= TEMPO_DOWNGRADE_HOLD_SECONDS {
+                self.bpm = 0.0;
+                self.bpm_confidence = 0.0;
+            }
+        } else {
+            self.tempo_downgrade_seconds = 0.0;
         }
     }
 
@@ -1071,6 +1159,7 @@ impl MusicAnalyser {
         self.music_exit_seconds = 0.0;
         self.bpm = 0.0;
         self.bpm_confidence = 0.0;
+        self.tempo_downgrade_seconds = 0.0;
         self.pending_bpm = 0.0;
         self.pending_bpm_count = 0;
         self.beat_period = 0.0;
@@ -1276,7 +1365,7 @@ mod platform {
         COINIT_MULTITHREADED,
     };
 
-    use super::{emit_events, AudioFormat, Inner, MusicAnalyser};
+    use super::{emit_events, AudioFormat, Inner, MusicAnalyser, MusicTuning};
 
     const WAVE_FORMAT_PCM: u16 = 1;
     const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
@@ -1342,8 +1431,9 @@ mod platform {
         stop: Arc<AtomicBool>,
         generation: u64,
         ready: Sender<Result<(), &'static str>>,
+        tuning: MusicTuning,
     ) {
-        let result = capture_loop(&app, &inner, &stop, &ready);
+        let result = capture_loop(&app, &inner, &stop, &ready, tuning);
         let current = inner.generation.load(Ordering::SeqCst) == generation;
         if let Err(code) = result {
             // 初始化成功后才失败时，start() 已经返回；前端靠 watchdog 与状态行收尾。
@@ -1372,6 +1462,7 @@ mod platform {
         inner: &Inner,
         stop: &AtomicBool,
         ready: &Sender<Result<(), &'static str>>,
+        tuning: MusicTuning,
     ) -> Result<(), &'static str> {
         unsafe {
             if CoInitializeEx(None, COINIT_MULTITHREADED).is_err() {
@@ -1424,9 +1515,18 @@ mod platform {
 
             let _ = ready.send(Ok(()));
             let mut analyser = MusicAnalyser::new(format.sample_rate);
+            analyser.set_tuning(tuning);
+            let mut applied_tuning = tuning;
             let mut decoded: Vec<f32> = Vec::new();
 
             while !stop.load(Ordering::Relaxed) {
+                // 设定页可能随时改阈值；只在变化时写入分析器，避免每包重复加锁。
+                if let Ok(current) = inner.tuning.lock() {
+                    if *current != applied_tuning {
+                        applied_tuning = *current;
+                        analyser.set_tuning(applied_tuning);
+                    }
+                }
                 let mut packets = 0;
                 loop {
                     let frames = match capture.GetNextPacketSize() {
@@ -1937,6 +2037,97 @@ mod tests {
         let last = last_snapshot(&events);
         assert!(last.active);
         assert!(last.music, "score: {}", analyser.music_score());
+    }
+
+    /// 设定页把进入阈值调高后，同一段音乐不应再被判成音乐。
+    #[test]
+    fn custom_thresholds_can_suppress_music_detection() {
+        let mut analyser = MusicAnalyser::new(48_000);
+        analyser.set_tuning(MusicTuning {
+            enter_score: 0.99,
+            exit_score: 0.98,
+        });
+        let events = feed(&mut analyser, &click_track(120.0, 12.0, true));
+        let last = last_snapshot(&events);
+        assert!(last.active);
+        assert!(!last.music, "score: {}", analyser.music_score());
+        assert_eq!(last.bpm, 0.0);
+        assert_eq!(beat_count(&events), 0);
+    }
+
+    /// 速度“不可信”要连续 1 秒才把 BPM 收回 0；单帧置信度掉下去不能让界面闪断。
+    #[test]
+    fn holds_the_bpm_for_a_second_before_the_texture_fallback() {
+        let mut analyser = MusicAnalyser::new(48_000);
+        analyser.music = true;
+        analyser.bpm = 120.0;
+        analyser.bpm_confidence = 0.9;
+        // 音色像音乐、节奏证据很弱：让 update_music 走到“速度不可信”的分支。
+        for _ in 0..100 {
+            push_bounded(&mut analyser.rms_history, 0.05);
+            push_bounded(&mut analyser.zcr_history, 0.001);
+            push_bounded(&mut analyser.centroid_history, 300.0);
+            push_bounded(&mut analyser.flatness_history, 0.001);
+        }
+        let unreliable = TempoEstimate {
+            bpm: 120.0,
+            confidence: 0.4,
+            pulse: 0.2,
+            cover: 0.2,
+            phase: 0.0,
+            score: 0.2,
+            occupancy: 0.2,
+            regularity: 0.2,
+        };
+        analyser.update_music(&unreliable);
+        assert_eq!(analyser.bpm, 120.0, "第一帧就收回会让界面闪断");
+        analyser.update_music(&unreliable);
+        assert_eq!(analyser.bpm, 0.0, "连续 1 秒不可信后应改走 96 备用拍");
+    }
+
+    /// 设定页发来的 JSON 用 camelCase；缺字段时用原型默认值补全。
+    #[test]
+    fn deserializes_user_tuning_with_camel_case_and_defaults() {
+        let tuning: MusicTuning =
+            serde_json::from_str(r#"{"enterScore":0.4,"exitScore":0.25}"#).unwrap();
+        assert_eq!(
+            tuning,
+            MusicTuning {
+                enter_score: 0.4,
+                exit_score: 0.25,
+            }
+        );
+
+        let partial: MusicTuning = serde_json::from_str(r#"{"enterScore":0.4}"#).unwrap();
+        assert_eq!(partial.enter_score, 0.4);
+        assert_eq!(partial.exit_score, MUSIC_EXIT_SCORE);
+    }
+
+    /// 前端传入越界或 NaN 时也要收敛成可用的滞回区间，而不是让判定卡死。
+    #[test]
+    fn tuning_is_clamped_into_a_valid_hysteresis_band() {
+        let high = MusicTuning {
+            enter_score: 2.0,
+            exit_score: 3.0,
+        }
+        .sanitized();
+        assert!((high.enter_score - 0.95).abs() < 1e-6);
+        assert!(high.exit_score < high.enter_score);
+
+        let low = MusicTuning {
+            enter_score: -1.0,
+            exit_score: -1.0,
+        }
+        .sanitized();
+        assert!((low.enter_score - MIN_TUNED_SCORE).abs() < 1e-6);
+        assert!(low.exit_score < low.enter_score);
+
+        let broken = MusicTuning {
+            enter_score: f32::NAN,
+            exit_score: f32::NAN,
+        }
+        .sanitized();
+        assert_eq!(broken, MusicTuning::default());
     }
 
     /// 音乐停了要尽快退出音乐状态，而不是继续按旧节拍跳到 3.5s 静音判定。

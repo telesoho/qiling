@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
+import { DEFAULT_MUSIC_TUNING } from '../pet/music'
 import {
   defaultPetSettings,
   isValidWakeWord,
@@ -62,6 +63,44 @@ describe('wake word settings', () => {
       JSON.stringify({ voice: true, bubble: false, edgeVoice: 'zh-CN-XiaoyiNeural' }),
     )
     expect(loadQiLingSettings().music).toBe(true)
+  })
+
+  it('defaults music thresholds for older settings', () => {
+    localStorage.setItem('qiling.settings', JSON.stringify({ music: true }))
+    expect(loadQiLingSettings().musicTuning).toEqual(DEFAULT_MUSIC_TUNING)
+  })
+
+  it('persists the music thresholds the user adjusted', () => {
+    saveQiLingSettings({
+      ...defaultPetSettings,
+      musicTuning: {
+        ...DEFAULT_MUSIC_TUNING,
+        enterScore: 0.45,
+        exitScore: 0.25,
+        enterGroove: 0.7,
+        exitGroove: 0.35,
+        enterIntense: 0.92,
+        exitIntense: 0.8,
+      },
+    })
+    expect(loadQiLingSettings().musicTuning).toEqual({
+      ...DEFAULT_MUSIC_TUNING,
+      enterScore: 0.45,
+      exitScore: 0.25,
+      enterGroove: 0.7,
+      exitGroove: 0.35,
+      enterIntense: 0.92,
+      exitIntense: 0.8,
+    })
+  })
+
+  it('repairs a stored hysteresis band that would never switch', () => {
+    localStorage.setItem(
+      'qiling.settings',
+      JSON.stringify({ musicTuning: { enterScore: 0.2, exitScore: 0.9 } }),
+    )
+    const tuning = loadQiLingSettings().musicTuning
+    expect(tuning.exitScore).toBeLessThan(tuning.enterScore)
   })
 
   it('rejects invalid Edge voice identifiers', () => {

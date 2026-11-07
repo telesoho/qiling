@@ -9,12 +9,17 @@
 import { useEffect, useRef, useState, type MutableRefObject } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import {
+  beginMoodGate,
   chooseMusicMood,
+  DEFAULT_MUSIC_TUNING,
   forcedMusicMood,
+  gateMusicMood,
   musicErrorMessage,
+  type MoodGate,
   type MusicMood,
   type MusicSenseEvent,
   type MusicSenseStatus,
+  type MusicTuning,
 } from './music'
 import { inTauri } from './sync'
 
@@ -34,21 +39,42 @@ export interface MusicSense {
 
 const STALE_MS = 2500
 
-export function useMusicSense(options: { enabled: boolean }): MusicSense {
+export function useMusicSense(options: {
+  enabled: boolean
+  tuning?: MusicTuning
+}): MusicSense {
+  const tuning = options.tuning ?? DEFAULT_MUSIC_TUNING
   const [mood, setMood] = useState<MusicMood | null>(null)
   const [error, setError] = useState('')
   const energy = useRef(0)
   const bass = useRef(0)
   const bpm = useRef(0)
   const beatAt = useRef(0)
-  const moodRef = useRef<MusicMood | null>(null)
+  const gateRef = useRef<MoodGate>(beginMoodGate())
   const lastEventAt = useRef(0)
+  const tuningRef = useRef(tuning)
+  tuningRef.current = tuning
   const forced = useRef<MusicMood | null>(inTauri() ? null : forcedMusicMood()).current
+
+  // 阈值只影响 50ms 一次的能量判定，不需要重启 WASAPI 采集。
+  // 这里把后端要用的音乐判定阈值单独下发，拖动滑块后 120ms 内生效。
+  useEffect(() => {
+    if (!inTauri() || !options.enabled) return
+    const timer = window.setTimeout(() => {
+      void invoke('qiling_music_sense_configure', {
+        tuning: {
+          enterScore: tuning.enterScore,
+          exitScore: tuning.exitScore,
+        },
+      }).catch(() => {})
+    }, 120)
+    return () => window.clearTimeout(timer)
+  }, [options.enabled, tuning.enterScore, tuning.exitScore])
 
   useEffect(() => {
     if (!inTauri()) return
     if (!options.enabled) {
-      moodRef.current = null
+      gateRef.current = beginMoodGate(performance.now())
       setMood(null)
       energy.current = 0
       bass.current = 0
@@ -62,10 +88,11 @@ export function useMusicSense(options: { enabled: boolean }): MusicSense {
 
     const applyEnergy = (value: number, active: boolean) => {
       energy.current = value
-      const next = chooseMusicMood(moodRef.current, value, active)
-      if (next === moodRef.current) return
-      moodRef.current = next
-      setMood(next)
+      const raw = chooseMusicMood(gateRef.current.mood, value, active, tuningRef.current)
+      const next = gateMusicMood(gateRef.current, raw, performance.now())
+      gateRef.current = next
+      // 候选档位只在 ref 里排队，不触发重渲染；确认换档才 setState。
+      setMood((current) => (current === next.mood ? current : next.mood))
     }
 
     void import('@tauri-apps/api/event')
@@ -120,7 +147,7 @@ export function useMusicSense(options: { enabled: boolean }): MusicSense {
       window.clearInterval(watchdog)
       stopSense?.()
       stopBeat?.()
-      moodRef.current = null
+      gateRef.current = beginMoodGate(performance.now())
       void invoke('qiling_music_sense_stop').catch(() => {})
     }
   }, [options.enabled])

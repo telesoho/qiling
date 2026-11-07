@@ -68,10 +68,12 @@ const cases = [
   ['app-intense.png', `${APP}&music=intense`],
   ['app-shiju.png', `${APP}&character=shiju`],
 ]
+const origins = {}
 for (const [name, url] of cases) {
   await navigate(url)
   const info = await evaluate(`(() => {
     const svg = document.querySelector('.lingpao');
+    const dance = document.querySelector('.lp-dance');
     return JSON.stringify({
       aria: svg && svg.getAttribute('aria-label'),
       classes: svg && svg.getAttribute('class'),
@@ -79,8 +81,10 @@ for (const [name, url] of cases) {
       notes: !!document.querySelector('.lp-notes.on'),
       cheeks: !!document.querySelector('.lp-cheeks.on'),
       img: document.querySelector('.pet-sprite img')?.getAttribute('src') || null,
+      danceOrigin: dance ? getComputedStyle(dance).transformOrigin : null,
     });
   })()`)
+  origins[name] = JSON.parse(info).danceOrigin
   const shot = await send('Page.captureScreenshot', { format: 'png' })
   fs.writeFileSync(`${outDir}/${name}`, Buffer.from(shot.data, 'base64'))
   console.log(name, info)
@@ -114,6 +118,9 @@ const intense = await motion('intense')
 const calm = await motion('calm')
 const checks = {
   'groove sways': new Set(groove.map((frame) => frame.dance)).size > 1,
+  // SVG 分组不写 transform-origin 时默认绕 (0, 0)（画布左上角）旋转；
+  // 摇摆必须绕身体底部 (90, 209)，和原型 #dance 的支点一致。
+  'sway pivots at the body base': origins['app-groove.png'] === '90px 209px',
   'groove never hops': groove.every((frame) => yOf(frame.dance) === 0),
   'intense hops on beats': intense.some((frame) => yOf(frame.dance) < -0.5),
   'calm stays near rest': calm.every((frame) => Math.abs(yOf(frame.dance)) <= 3.3),

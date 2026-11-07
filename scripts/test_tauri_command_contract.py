@@ -109,6 +109,7 @@ class TauriCommandContractTests(unittest.TestCase):
             ("qiling_music_sense_start", sense),
             ("qiling_music_sense_stop", sense),
             ("qiling_music_sense_status", sense),
+            ("qiling_music_sense_configure", sense),
         ):
             with self.subTest(command=command):
                 self.assertIn(command, frontend)

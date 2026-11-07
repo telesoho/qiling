@@ -446,6 +446,64 @@ html.pet-window #root {
   color: #b42318 !important;
 }
 
+.music-tuning {
+  padding: 10px;
+  border: 1px solid #e8d8c8;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.music-tuning summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.music-tuning summary:focus-visible {
+  outline: 2px solid #8a6040;
+  outline-offset: 2px;
+}
+
+.music-tuning-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.music-tuning-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.music-tuning-row label {
+  justify-content: space-between;
+}
+
+.music-tuning-row output {
+  color: #8a6040;
+  font-variant-numeric: tabular-nums;
+}
+
+.music-tuning-row input[type="range"] {
+  width: 100%;
+  margin: 0;
+  accent-color: #8a6040;
+}
+
+.music-tuning-help {
+  color: #6b6259;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.music-tuning-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
 .settings-status {
   color: #356344 !important;
 }

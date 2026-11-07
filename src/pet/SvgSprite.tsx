@@ -23,13 +23,22 @@ import {
 } from './lingpao'
 import {
   beatAt,
+  blendGround,
+  blendMotion,
   createBeatClock,
   groundFor,
+  IDLE_GROUND,
   lockBeatPhase,
+  MOOD_BLEND_MS,
+  MOOD_SETTLE_MS,
   motionFor,
+  REST_MOTION,
   retuneBeatClock,
   visibleMusicMood,
+  type GroundShadow,
+  type Motion,
   type MusicMood,
+  type MusicTuning,
 } from './music'
 import type { PetStateId } from './states'
 import { inTauri } from './sync'
@@ -40,6 +49,13 @@ const INK = '#2B1618'
 const CREAM = '#FFF3E6'
 const GOLD = '#FFC978'
 const SKY = '#8FCBFF'
+
+/**
+ * 换眼睛＝换图形（椭圆 ↔ 弯眼弧），CSS 没法 tween 两个不同节点，
+ * 所以先眨眼遮住，在最闭的一帧换图形，再睁开。时长与 `.lp-eyes` 的过渡对齐。
+ */
+const EYE_COVER_CLOSE_MS = 90
+const EYE_COVER_OPEN_MS = 110
 
 const BODY_PATH =
   'M90 101 C119 101 143 123 145 155 C147 189 123 209 90 209 C57 209 33 189 35 155 C37 123 61 101 90 101 Z'
@@ -467,7 +483,7 @@ export function LingpaoFigure(props: LingpaoFigureProps): JSX.Element {
               <ellipse cx={124} cy={176} rx={9} ry={5} />
             </g>
             <g className="lp-gaze" ref={parts?.gaze}>
-              <g data-part="eyes" ref={parts?.eyes}>
+              <g data-part="eyes" className="lp-eyes" ref={parts?.eyes}>
                 {eyeNode(pose.eye, 71, eyeScale, 'left')}
                 {eyeNode(pose.eye, 109, eyeScale, 'right')}
               </g>
@@ -492,12 +508,17 @@ export interface SvgSpriteProps {
   holding: boolean
   /** 设定里开了听音乐，且器灵可见、已就绪。 */
   musicEnabled: boolean
+  /** 用户在设定页调整的识别阈值。 */
+  musicTuning: MusicTuning
   /** 器灵可见时才跟随鼠标，隐藏时停掉轮询。 */
   gazeEnabled: boolean
 }
 
 export default function SvgSprite(props: SvgSpriteProps): JSX.Element {
-  const sense = useMusicSense({ enabled: props.musicEnabled })
+  const sense = useMusicSense({
+    enabled: props.musicEnabled,
+    tuning: props.musicTuning,
+  })
   // 器灵自己的播报会经过系统回环被采集到；后端会判成人声，这里再加一道门：
   // 正在说话时即使误判也不进入听音乐状态，说完再恢复。
   const music = visibleMusicMood(props.musicEnabled, props.speaking, sense.mood)
@@ -522,8 +543,14 @@ export default function SvgSprite(props: SvgSpriteProps): JSX.Element {
   const gazeTarget = useRef<Gaze>({ x: 0, y: 0 })
   const dancing =
     props.musicEnabled && !props.holding && props.stateId === 'idle' && music !== null && !reduced
+  // 音乐停下不立刻把 transform 交还 CSS：先让 rAF 在 360ms 内收拢到静止，
+  // 否则会从「摇到一半」瞬移回待机位。`danceActive` 覆盖这段收尾时间。
+  const [danceActive, setDanceActive] = useState(false)
   const dancingRef = useRef(false)
-  dancingRef.current = dancing
+  dancingRef.current = danceActive
+  // rAF 循环靠 ref 读档位，这样换档只改变目标，不重启循环、不重置节拍相位。
+  const moodRef = useRef<MusicMood | null>(music)
+  moodRef.current = music
   const parts = useMemo<LingpaoParts>(
     () => ({
       dance: danceRef,
@@ -534,6 +561,21 @@ export default function SvgSprite(props: SvgSpriteProps): JSX.Element {
     }),
     [],
   )
+
+  useEffect(() => {
+    if (dancing) {
+      setDanceActive(true)
+      return
+    }
+    if (!danceActive) return
+    // 被拎起或用户要求减少动效时立刻停；音乐自然结束才走收尾过渡。
+    if (props.holding || reduced) {
+      setDanceActive(false)
+      return
+    }
+    const timer = window.setTimeout(() => setDanceActive(false), MOOD_SETTLE_MS + 60)
+    return () => window.clearTimeout(timer)
+  }, [dancing, danceActive, props.holding, reduced])
 
   useEffect(() => {
     if (typeof window === 'undefined' || !window.matchMedia) return
@@ -570,6 +612,35 @@ export default function SvgSprite(props: SvgSpriteProps): JSX.Element {
       eyesRef.current?.classList.remove('blink')
     }
   }, [pose.eye, music, reduced])
+
+  // 换眼遮罩：眼睛形状变了就先用 `.cover` 闭一下，在最闭的一帧换图形再睁开。
+  // 只跟着 `pose.eye` 走，`setShownEye` 不会重跑本 effect（否则会提前睁眼）。
+  const [shownEye, setShownEye] = useState<LingpaoEye>(pose.eye)
+  const shownEyeRef = useRef<LingpaoEye>(pose.eye)
+  useEffect(() => {
+    if (pose.eye === shownEyeRef.current) return
+    if (reduced) {
+      shownEyeRef.current = pose.eye
+      setShownEye(pose.eye)
+      return
+    }
+    const eyes = eyesRef.current
+    eyes?.classList.add('cover')
+    const close = window.setTimeout(() => {
+      shownEyeRef.current = pose.eye
+      setShownEye(pose.eye)
+    }, EYE_COVER_CLOSE_MS)
+    const open = window.setTimeout(() => {
+      eyes?.classList.remove('cover')
+    }, EYE_COVER_CLOSE_MS + EYE_COVER_OPEN_MS)
+    return () => {
+      window.clearTimeout(close)
+      window.clearTimeout(open)
+      eyes?.classList.remove('cover')
+    }
+  }, [pose.eye, reduced])
+  // 换脸期间先画旧眼睛，闭眼帧之后切到新眼睛。
+  const shownPose = shownEye === pose.eye ? pose : { ...pose, eye: shownEye }
 
   // 眼神跟随：浏览器用指针；Tauri 用全局光标（窗口外也跟随）。
   useEffect(() => {
@@ -656,33 +727,49 @@ export default function SvgSprite(props: SvgSpriteProps): JSX.Element {
     }
   }, [props.gazeEnabled, reduced])
 
-  // 听音乐：单一 rAF 写三档运动；停止时清掉 inline 样式，让 CSS 待机动画回来。
+  // 听音乐：单一 rAF 写三档运动。
+  //
+  // 换档**不重启**这个循环：节拍时钟和上一帧动作都留在闭包里。若按档位重启，
+  // 清理会先清掉 inline transform（瞬移回原位）、新时钟又从 wave=+1 起拍，
+  // 于是「激烈 → 舒缓」必然跳一下。现在换档只换目标，并用 smoothstep 从上一帧
+  // 真正画出的值过渡过去；音乐结束则先收拢到静止，再把 transform 交还 CSS。
   useEffect(() => {
-    if (!dancing || !music) return
+    if (!danceActive || reduced) return
     const danceNode = danceRef.current
     const breatheNode = breatheRef.current
     const groundNode = groundRef.current
     const gazeNode = gazeRef.current
     if (!danceNode || !breatheNode || !groundNode) return
 
-    const mood = music
-    let clock = createBeatClock(performance.now(), sense.bpm.current)
+    const bpmRef = sense.bpm
+    const beatAtRef = sense.beatAt
+    let clock = createBeatClock(performance.now(), bpmRef.current)
     let lastIndex = -1
     let pulse = 0
     let lastNow = performance.now()
-    let lastBeat = sense.beatAt.current
+    let lastBeat = beatAtRef.current
     let raf = 0
+
+    let mood: MusicMood | null = moodRef.current
+    let lastMotion: Motion = REST_MOTION
+    let lastGround: GroundShadow = IDLE_GROUND
+    // 入场也走过渡：从待机位淡入，而不是第一帧直接贴上摇摆值。
+    let motionFrom: Motion = REST_MOTION
+    let groundFrom: GroundShadow = IDLE_GROUND
+    let blendStart = performance.now()
+    let blendDuration = MOOD_SETTLE_MS
+    let blending = true
 
     const step = (now: number) => {
       const dt = Math.min(0.05, Math.max(0.001, (now - lastNow) / 1000))
       lastNow = now
-      const bpm = sense.bpm.current
+      const bpm = bpmRef.current
       const reference = Math.max(clock.bpm || bpm, 1)
       if (Math.abs(bpm - clock.bpm) / reference > 0.08) {
         clock = retuneBeatClock(clock, now, bpm)
       }
-      if (sense.beatAt.current > lastBeat) {
-        lastBeat = sense.beatAt.current
+      if (beatAtRef.current > lastBeat) {
+        lastBeat = beatAtRef.current
         clock = lockBeatPhase(clock, now, bpm)
       }
       const beat = beatAt(clock, now)
@@ -691,11 +778,40 @@ export default function SvgSprite(props: SvgSpriteProps): JSX.Element {
         pulse = 1
       }
       pulse *= Math.exp(-dt * 4.2)
-      const motion = motionFor(mood, beat.wave, pulse, now / 1000)
+
+      const nextMood = moodRef.current
+      if (nextMood !== mood) {
+        // 从上一帧真正画出来的姿态起步，无论换档多频繁都接得上，不会跳回基准位。
+        motionFrom = lastMotion
+        groundFrom = lastGround
+        blendStart = now
+        blendDuration = nextMood === null || mood === null ? MOOD_SETTLE_MS : MOOD_BLEND_MS
+        blending = true
+        mood = nextMood
+      }
+
+      const target = motionFor(mood, beat.wave, pulse, now / 1000)
+      let motion = target
+      let ground = mood === null ? IDLE_GROUND : groundFor(target)
+      if (blending) {
+        const progress = (now - blendStart) / blendDuration
+        if (progress >= 1) {
+          blending = false
+        } else {
+          motion = blendMotion(motionFrom, target, progress)
+          ground = blendGround(
+            groundFrom,
+            mood === null ? IDLE_GROUND : groundFor(motion),
+            progress,
+          )
+        }
+      }
+      lastMotion = motion
+      lastGround = ground
+
       danceNode.style.transform = `translate3d(${motion.x.toFixed(2)}px,${motion.y.toFixed(2)}px,0) rotate(${motion.rotation.toFixed(2)}deg)`
       breatheNode.style.transform = `scale(${motion.sx.toFixed(4)},${motion.sy.toFixed(4)})`
-      const ground = groundFor(motion)
-      groundNode.style.opacity = String(ground.opacity)
+      groundNode.style.opacity = ground.opacity.toFixed(3)
       groundNode.style.transform = `scale(${ground.scale.toFixed(3)})`
       if (gazeNode) {
         gazeNode.style.transform = `translate(${(gazeTarget.current.x + beat.wave * 2.5).toFixed(2)}px,${gazeTarget.current.y.toFixed(2)}px)`
@@ -714,14 +830,14 @@ export default function SvgSprite(props: SvgSpriteProps): JSX.Element {
         gazeNode.style.transform = `translate(${gazeTarget.current.x}px, ${gazeTarget.current.y}px)`
       }
     }
-  }, [dancing, music, sense.bpm, sense.beatAt])
+  }, [danceActive, reduced, sense.bpm, sense.beatAt])
 
   return (
     <MemoFigure
-      pose={pose}
+      pose={shownPose}
       ariaLabel={ariaLabel}
       holding={props.holding}
-      dancing={dancing}
+      dancing={danceActive}
       mood={music}
       parts={parts}
     />

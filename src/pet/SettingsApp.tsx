@@ -20,7 +20,14 @@ import {
   packErrorMessage,
   type PacksView,
 } from './packs'
-import { musicErrorMessage, type MusicSenseStatus } from './music'
+import {
+  DEFAULT_MUSIC_TUNING,
+  musicErrorMessage,
+  musicFollowLabel,
+  normalizeMusicTuning,
+  type MusicSenseStatus,
+  type MusicTuning,
+} from './music'
 import { loadMusicSenseStatus } from './useMusicSense'
 import { inTauri } from './sync'
 
@@ -107,6 +114,39 @@ const defaultLlmProfiles: Record<LlmProvider, Pick<LlmProfile, 'baseUrl' | 'mode
   ollama: { baseUrl: 'http://127.0.0.1:11434', model: 'qwen3.5:4b' },
   deepseek: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-chat' },
   openai_compatible: { baseUrl: 'https://api.openai.com/v1', model: '' },
+}
+
+function MusicThresholdSlider(props: {
+  id: string
+  label: string
+  help: string
+  value: number
+  min: number
+  max: number
+  onChange: (value: number) => void
+}): JSX.Element {
+  const helpId = `${props.id}-help`
+  return (
+    <div className="music-tuning-row">
+      <label htmlFor={props.id}>
+        <span>{props.label}</span>
+        <output htmlFor={props.id}>{props.value.toFixed(2)}</output>
+      </label>
+      <input
+        id={props.id}
+        type="range"
+        min={props.min}
+        max={props.max}
+        step={0.01}
+        value={props.value}
+        aria-describedby={helpId}
+        onChange={(event) => props.onChange(Number(event.target.value))}
+      />
+      <span id={helpId} className="music-tuning-help">
+        {props.help}
+      </span>
+    </div>
+  )
 }
 
 export function settingsForProvider(settings: LlmSettings, provider: LlmProvider): LlmSettings {
@@ -557,6 +597,15 @@ export default function SettingsApp(): JSX.Element {
     saveQiLingSettings({ ...loadQiLingSettings(), ...next })
   }
 
+  function patchMusicTuning(next: Partial<MusicTuning>) {
+    patch({
+      musicTuning: normalizeMusicTuning({
+        ...loadQiLingSettings().musicTuning,
+        ...next,
+      }),
+    })
+  }
+
   async function refreshModels(baseUrl: string) {
     const request = modelRequest.current + 1
     modelRequest.current = request
@@ -841,11 +890,7 @@ export default function SettingsApp(): JSX.Element {
         : !musicIsForCurrentCharacter
           ? '当前角色不是灵泡，音乐效果只在灵泡上出现'
           : musicStatus?.running
-            ? musicStatus.music
-              ? `正在跟随音乐${musicStatus.bpm && musicStatus.bpm > 0 ? ` · ${Math.round(musicStatus.bpm)} BPM` : ''}`
-              : musicStatus.active
-                ? '听到声音，但不是音乐（人声/噪声不跟拍）'
-                : '正在监听，等待音乐'
+            ? musicFollowLabel(musicStatus)
             : musicStatus?.supported === false
               ? '当前系统不支持读取系统声音'
               : '已开启，灵泡显示时会开始跟随'
@@ -893,6 +938,75 @@ export default function SettingsApp(): JSX.Element {
           关闭开关或隐藏器灵后立即停止采集。只读取默认播放设备；独占模式、受版权保护的音频或非默认设备可能听不到。目前只有灵泡支持这个效果。
         </p>
         <p role="status" aria-live="polite">监听状态：{musicStatusText}</p>
+        <details className="music-tuning">
+          <summary>识别阈值（进阶）</summary>
+          <p id="music-tuning-help">
+            数值越低越容易触发。音乐判定综合节奏、音色和最近 1 秒的响度占空比，得分连续高于进入阈值 1
+            秒才算音乐、低于退出阈值 1 秒才退出；三档阈值使用 0–1 的平滑能量，并在进入/退出之间保留滞回。
+            调整后立即生效，可随时恢复默认值。
+          </p>
+          <div className="music-tuning-grid" aria-describedby="music-tuning-help">
+            <MusicThresholdSlider
+              id="music-enter-score"
+              label="进入音乐阈值"
+              help="音乐证据得分高于它才进入摇摆；调低会更灵敏，但人声也可能被误判。"
+              value={settings.musicTuning.enterScore}
+              min={0.05}
+              max={0.95}
+              onChange={(enterScore) => patchMusicTuning({ enterScore })}
+            />
+            <MusicThresholdSlider
+              id="music-exit-score"
+              label="退出音乐阈值"
+              help="得分低于它持续 1 秒才退出音乐；必须低于进入阈值。"
+              value={settings.musicTuning.exitScore}
+              min={0.01}
+              max={0.9}
+              onChange={(exitScore) => patchMusicTuning({ exitScore })}
+            />
+            <MusicThresholdSlider
+              id="music-enter-groove"
+              label="轻快进入阈值"
+              help="能量达到这里从“舒缓”切到“轻快”。"
+              value={settings.musicTuning.enterGroove}
+              min={0.05}
+              max={0.95}
+              onChange={(enterGroove) => patchMusicTuning({ enterGroove })}
+            />
+            <MusicThresholdSlider
+              id="music-exit-groove"
+              label="轻快退出阈值"
+              help="能量低于这里从“轻快”回到“舒缓”。"
+              value={settings.musicTuning.exitGroove}
+              min={0.01}
+              max={0.9}
+              onChange={(exitGroove) => patchMusicTuning({ exitGroove })}
+            />
+            <MusicThresholdSlider
+              id="music-enter-intense"
+              label="激烈进入阈值"
+              help="能量达到这里从“轻快”切到“激烈”；必须高于轻快进入阈值。"
+              value={settings.musicTuning.enterIntense}
+              min={0.06}
+              max={0.99}
+              onChange={(enterIntense) => patchMusicTuning({ enterIntense })}
+            />
+            <MusicThresholdSlider
+              id="music-exit-intense"
+              label="激烈退出阈值"
+              help="能量低于这里从“激烈”回到“轻快”。"
+              value={settings.musicTuning.exitIntense}
+              min={0.01}
+              max={0.98}
+              onChange={(exitIntense) => patchMusicTuning({ exitIntense })}
+            />
+          </div>
+          <div className="music-tuning-actions">
+            <button type="button" onClick={() => patch({ musicTuning: { ...DEFAULT_MUSIC_TUNING } })}>
+              恢复默认阈值
+            </button>
+          </div>
+        </details>
       </section>
 
       <section className="settings-section" aria-labelledby="voice-title">

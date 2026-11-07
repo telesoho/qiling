@@ -126,7 +126,7 @@ design/
 - `characters/dafeiyu/sheets|docs|anim(.gitkeep)|_workshop/`（绿幕源 mp4）
 - `anim/spec/` 未动；`anim/tracks.manifest.json` 与 `demo-tracks.html` 路径已更新
 - 运行时多轨：`npm run bake:anim` 从 `anim/tracks.manifest.json` 生成 `public/pet/anim/manifest.json` + 8 条轨（含 pickup 逐帧、7 条姿势 WebP 轨）；桌宠由 `src/pet/anim.ts` 在运行时 fetch，`?track=<id>` 可在浏览器预览锁定任一轨
-- 默认角色已切到灵泡；诗琚保留为第二内置角色。灵泡的 SVG 骨架、眼神跟随与听音乐三档（阈值与运动参数取自 `lingpao-groove.html`）由 `src/pet/` 与 `src-tauri/src/music.rs` 实现
+- 默认角色已切到灵泡；诗琚保留为第二内置角色。灵泡的 SVG 骨架、眼神跟随与听音乐三档（默认阈值与运动参数取自 `lingpao-groove.html`，识别阈值可在设定页调整）由 `src/pet/` 与 `src-tauri/src/music.rs` 实现
 
 已知残留：
 

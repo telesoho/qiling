@@ -26,6 +26,7 @@ commands.allow = [
   "qiling_music_sense_start",
   "qiling_music_sense_stop",
   "qiling_music_sense_status",
+  "qiling_music_sense_configure",
   "qiling_voice_status",
   "qiling_voice_synthesize",
   "qiling_voice_cancel",
