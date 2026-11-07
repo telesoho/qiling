@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="180" height="240" viewBox="0 0 180 240" role="img" aria-label="器灵 · 灵泡（待机姿态）">
+  <title>灵泡 · 待机姿态</title>
+  <style>
+    .body { fill: #FF6B4A; }
+    .ink  { fill: #2B1618; }
+  </style>
+
+  <!-- 落地阴影：让角色在浅色桌面上“站住” -->
+  <ellipse cx="90" cy="216" rx="34" ry="6" fill="#000" opacity=".14"/>
+
+  <!-- 身体：略呈梨形，底部更宽，站得住 -->
+  <path class="body" d="M90 101 C119 101 143 123 145 155 C147 189 123 209 90 209 C57 209 33 189 35 155 C37 123 61 101 90 101 Z"/>
+
+  <!-- 五官：只有两只竖椭圆眼睛 -->
+  <ellipse class="ink" cx="71" cy="152" rx="8.6" ry="12.4"/>
+  <ellipse class="ink" cx="109" cy="152" rx="8.6" ry="12.4"/>
+</svg>
