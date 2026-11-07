@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "music",
+  "description": "器灵曲库：添加本地/网络歌曲、管理缓存与播放控制。",
+  "windows": ["music"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "allow-music-commands"
+  ]
+}

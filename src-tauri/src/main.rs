@@ -4,7 +4,9 @@ mod cosyvoice;
 mod edge_tts;
 mod http;
 mod local_llm;
+mod local_music;
 mod music;
+mod music_library;
 mod narration;
 mod pet_pack;
 mod spirit;
@@ -44,6 +46,8 @@ pub struct AppState {
     packs: Arc<pet_pack::PetPackRegistry>,
     /// System audio loopback for the music-following state.
     music: Arc<music::MusicSense>,
+    /// Local/remote song library used by the library player.
+    music_library: Arc<music_library::MusicLibraryStore>,
 }
 
 fn place_pet(pet: &WebviewWindow) {
@@ -202,6 +206,98 @@ fn qiling_music_sense_status(state: State<AppState>) -> music::MusicSenseStatus 
 #[tauri::command]
 fn qiling_music_sense_configure(state: State<AppState>, tuning: music::MusicTuning) {
     state.music.configure(tuning);
+}
+
+#[tauri::command]
+fn qiling_music_open(app: AppHandle) -> Result<(), String> {
+    open_music(&app)
+}
+
+#[tauri::command]
+async fn qiling_music_pick_files(app: AppHandle) -> Result<Vec<String>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let mut dialog = app
+        .dialog()
+        .file()
+        .add_filter("音频文件", music_library::supported_extensions());
+    if let Some(window) = app
+        .get_webview_window("music")
+        .or_else(|| app.get_webview_window("settings"))
+        .or_else(|| app.get_webview_window("pet"))
+    {
+        dialog = dialog.set_parent(&window);
+    }
+    dialog.pick_files(move |picked| {
+        let _ = tx.send(picked);
+    });
+    let picked = rx
+        .await
+        .map_err(|_| "music_library_unavailable".to_string())?;
+    Ok(picked
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|file| file.into_path().ok())
+        .map(|path| path.to_string_lossy().to_string())
+        .collect())
+}
+
+#[tauri::command]
+fn qiling_music_library_get(state: State<AppState>) -> music_library::MusicLibraryView {
+    state.music_library.view()
+}
+
+#[tauri::command]
+fn qiling_music_library_add_local(
+    state: State<AppState>,
+    paths: Vec<String>,
+) -> Result<music_library::AddLocalResult, String> {
+    state.music_library.add_local(paths)
+}
+
+#[tauri::command]
+fn qiling_music_library_add_remote(
+    state: State<AppState>,
+    name: String,
+    url: String,
+) -> Result<music_library::MusicLibraryView, String> {
+    state.music_library.add_remote(name, url)
+}
+
+#[tauri::command]
+fn qiling_music_library_remove(
+    state: State<AppState>,
+    id: String,
+) -> Result<music_library::MusicLibraryView, String> {
+    state.music_library.remove(&id)
+}
+
+#[tauri::command]
+fn qiling_music_library_clear(
+    state: State<AppState>,
+) -> Result<music_library::MusicLibraryView, String> {
+    state.music_library.clear()
+}
+
+#[tauri::command]
+async fn qiling_music_track_audio(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<tauri::ipc::Response, String> {
+    let library = Arc::clone(&state.music_library);
+    let bytes = tauri::async_runtime::spawn_blocking(move || {
+        local_music::read_track_audio(&app, &library, &id)
+    })
+    .await
+    .map_err(|_| "music_track_missing".to_string())??;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+#[tauri::command]
+fn qiling_music_cache_clear(
+    state: State<AppState>,
+) -> Result<music_library::CacheStats, String> {
+    state.music_library.clear_cache()
 }
 
 #[tauri::command]
@@ -871,8 +967,37 @@ fn open_settings(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+fn open_music(app: &AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("music") {
+        let _ = window.unminimize();
+        window.show().map_err(|err| err.to_string())?;
+        window.set_focus().map_err(|err| err.to_string())?;
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(app, "music", WebviewUrl::App("index.html".into()))
+        .title("器灵 · 曲库")
+        .inner_size(720.0, 780.0)
+        .min_inner_size(600.0, 560.0)
+        .resizable(true)
+        .maximizable(false)
+        .minimizable(true)
+        .closable(true)
+        .focused(true)
+        .decorations(true)
+        .always_on_top(false)
+        .skip_taskbar(false)
+        .transparent(false)
+        .visible(true)
+        .center()
+        .build()
+        .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 fn pet_menu(app: AppHandle) -> Result<(), String> {
+    let music = MenuItem::with_id(&app, "music", "曲库…", true, None::<&str>)
+        .map_err(|err| err.to_string())?;
     let packs = MenuItem::with_id(&app, "packs", "角色资源包…", true, None::<&str>)
         .map_err(|err| err.to_string())?;
     let settings = MenuItem::with_id(&app, "settings", "设定", true, None::<&str>)
@@ -880,7 +1005,7 @@ fn pet_menu(app: AppHandle) -> Result<(), String> {
     let quit = MenuItem::with_id(&app, "quit", "退出", true, None::<&str>)
         .map_err(|err| err.to_string())?;
     let separator = PredefinedMenuItem::separator(&app).map_err(|err| err.to_string())?;
-    let menu = Menu::with_items(&app, &[&packs, &settings, &separator, &quit])
+    let menu = Menu::with_items(&app, &[&music, &packs, &settings, &separator, &quit])
         .map_err(|err| err.to_string())?;
     let pet = app.get_webview_window("pet").ok_or("没有器灵窗口")?;
     pet.popup_menu(&menu).map_err(|err| err.to_string())
@@ -905,10 +1030,11 @@ fn tray_menu(app: &AppHandle, visible: bool) -> tauri::Result<Menu<tauri::Wry>> 
         None::<&str>,
     )?;
     let settings = MenuItem::with_id(app, "tray-settings", "设定…", true, None::<&str>)?;
+    let music = MenuItem::with_id(app, "tray-music", "曲库…", true, None::<&str>)?;
     let packs = MenuItem::with_id(app, "tray-packs", "角色资源包…", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "tray-quit", "退出器灵", true, None::<&str>)?;
-    Menu::with_items(app, &[&toggle, &settings, &packs, &separator, &quit])
+    Menu::with_items(app, &[&toggle, &settings, &music, &packs, &separator, &quit])
 }
 
 /// Keep the tray menu label and tooltip in step with the pet window.
@@ -948,6 +1074,9 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             "tray-settings" => {
                 let _ = open_settings(app);
             }
+            "tray-music" => {
+                let _ = open_music(app);
+            }
             "tray-packs" => {
                 let _ = open_pet_packs(app);
             }
@@ -980,6 +1109,8 @@ fn main() {
         .setup(|app| {
             let protocol_dir = app.path().app_config_dir()?.join("spirit-clients");
             let llm_settings_path = app.path().app_config_dir()?.join("llm-settings.json");
+            let music_library_path = app.path().app_config_dir()?.join("music-library.json");
+            let music_cache_dir = app.path().app_data_dir()?.join("music-cache");
             let voice_data_dir = app.path().app_data_dir()?;
             let packs_root = app.path().app_data_dir()?.join("pet-packs");
             let bundled_voice_script = app
@@ -1019,6 +1150,10 @@ fn main() {
                 narrations: Arc::clone(&narrations),
                 packs,
                 music: Arc::new(music::MusicSense::new()),
+                music_library: Arc::new(music_library::MusicLibraryStore::load(
+                    music_library_path,
+                    music_cache_dir,
+                )),
             });
             if let Some(pet) = app.get_webview_window("pet") {
                 place_pet(&pet);
@@ -1063,6 +1198,8 @@ fn main() {
         .on_menu_event(|app, event| {
             if event.id() == "settings" {
                 let _ = open_settings(app);
+            } else if event.id() == "music" {
+                let _ = open_music(app);
             } else if event.id() == "packs" {
                 let _ = open_pet_packs(app);
             } else if event.id() == "quit" {
@@ -1084,6 +1221,15 @@ fn main() {
             qiling_music_sense_stop,
             qiling_music_sense_status,
             qiling_music_sense_configure,
+            qiling_music_open,
+            qiling_music_pick_files,
+            qiling_music_library_get,
+            qiling_music_library_add_local,
+            qiling_music_library_add_remote,
+            qiling_music_library_remove,
+            qiling_music_library_clear,
+            qiling_music_track_audio,
+            qiling_music_cache_clear,
             qiling_voice_status,
             qiling_voice_synthesize,
             qiling_voice_cancel,

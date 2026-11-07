@@ -232,6 +232,36 @@ export function gateMusicMood(
   return { mood: raw, candidate: null, candidateSince: 0, changedAt: now }
 }
 
+/**
+ * 原型 `readMusicFeatures()` 的能量口径。
+ *
+ * 系统声音由 `music.rs` 按同一套权重计算；曲库播放直接读 AnalyserNode，
+ * 也必须用这套权重，否则设定页的三档阈值会只在系统声音上成立。
+ */
+export const MUSIC_ENERGY = {
+  bassWeight: 1.32,
+  midWeight: 0.28,
+  rmsWeight: 0.4,
+  attack: 5,
+  release: 1.4,
+} as const
+
+/** 把低频 / 中频 / RMS 合成为 0–1 能量。 */
+export function mixMusicEnergy(bass: number, mid: number, rms: number): number {
+  const value =
+    bass * MUSIC_ENERGY.bassWeight +
+    mid * MUSIC_ENERGY.midWeight +
+    rms * MUSIC_ENERGY.rmsWeight
+  return clamp(value)
+}
+
+/** 原型 `energySmooth += (target - energy) * (1 - exp(-dt * rate))` 的移植。 */
+export function smoothMusicEnergy(current: number, target: number, dtSec: number): number {
+  const dt = Math.max(0.001, Math.min(0.05, dtSec))
+  const rate = target > current ? MUSIC_ENERGY.attack : MUSIC_ENERGY.release
+  return current + (target - current) * (1 - Math.exp(-dt * rate))
+}
+
 export interface BeatClock {
   /** 0 表示还没有估到速度，节拍按 `fallbackBpm` 走。 */
   bpm: number
@@ -243,8 +273,15 @@ export function beatDurationMs(bpm: number): number {
   return 60_000 / safe
 }
 
-export function createBeatClock(nowMs: number, bpm = 0): BeatClock {
-  return { bpm: bpm > 0 ? bpm : 0, startMs: nowMs }
+/**
+ * 建立节拍时钟。
+ *
+ * `nextBeatMs` 是"从现在到下一拍"的毫秒数，用来给曲库播放种子相位：
+ * 本地估速会同时给出第一拍位置，若从按下播放的瞬间起算，动作会和音乐错半拍。
+ * 传 0（默认）表示"现在就是拍点"，与旧行为一致。
+ */
+export function createBeatClock(nowMs: number, bpm = 0, nextBeatMs = 0): BeatClock {
+  return { bpm: bpm > 0 ? bpm : 0, startMs: nowMs + nextBeatMs }
 }
 
 /** 速度变化时保留当前相位，避免摇摆跳一下。 */

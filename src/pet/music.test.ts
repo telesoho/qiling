@@ -4,6 +4,7 @@ import {
   IDLE_GROUND,
   MOOD_DWELL_MS,
   MOOD_MIN_HOLD_MS,
+  MUSIC_ENERGY,
   MUSIC_TUNING,
   beatAt,
   beatDurationMs,
@@ -16,12 +17,14 @@ import {
   gateMusicMood,
   groundFor,
   lockBeatPhase,
+  mixMusicEnergy,
   motionFor,
   musicErrorMessage,
   musicFollowLabel,
   musicThresholds,
   normalizeMusicTuning,
   retuneBeatClock,
+  smoothMusicEnergy,
   smoothstep,
   visibleMusicMood,
 } from './music'
@@ -132,6 +135,32 @@ describe('节拍时钟', () => {
     expect(lockBeatPhase(clock, 60, 120).startMs).toBeCloseTo(15)
     expect(lockBeatPhase(clock, 170, 120).startMs).toBeCloseTo(40)
     expect(lockBeatPhase(clock, 250, 120).startMs).toBe(0)
+  })
+
+  it('seeds the phase so the next beat lands after nextBeatMs', () => {
+    const clock = createBeatClock(0, 120, 200)
+    const beat = beatAt(clock, 200)
+    expect(beat.index).toBe(0)
+    expect(beat.wave).toBeCloseTo(1)
+    expect(beatAt(clock, 100).index).toBe(-1)
+  })
+})
+
+describe('曲库能量口径', () => {
+  it('uses the same weights as the prototype and music.rs', () => {
+    expect(MUSIC_ENERGY.bassWeight).toBe(1.32)
+    expect(MUSIC_ENERGY.midWeight).toBe(0.28)
+    expect(MUSIC_ENERGY.rmsWeight).toBe(0.4)
+    expect(mixMusicEnergy(0.5, 0.2, 0.1)).toBeCloseTo(0.5 * 1.32 + 0.2 * 0.28 + 0.1 * 0.4)
+    expect(mixMusicEnergy(1, 1, 1)).toBe(1)
+    expect(mixMusicEnergy(-1, -1, -1)).toBe(0)
+  })
+
+  it('attacks faster than it releases', () => {
+    const rise = smoothMusicEnergy(0, 0.5, 0.016)
+    const fall = 0.5 - smoothMusicEnergy(0.5, 0, 0.016)
+    expect(rise).toBeGreaterThan(fall)
+    expect(smoothMusicEnergy(0.3, 0.3, 0.016)).toBeCloseTo(0.3)
   })
 })
 

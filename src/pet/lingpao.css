@@ -95,14 +95,20 @@
   transform: scaleY(0.08);
 }
 
-/* 换眼遮罩：眼睛是不同图形（椭圆 ↔ 弯眼弧），无法 tween。
-   换眼时先整体闭一下、在最闭的一帧换图形再睁开，时长与 `SvgSprite` 的定时器对齐。 */
 .lingpao .lp-eyes {
   transform-box: view-box;
   transform-origin: 90px 152px;
   transition: transform 0.1s ease, opacity 0.1s ease;
 }
 
+/* 曲库播放的逐拍点缀：只在 groove / intense 时由 `SvgSprite` 短暂加类。
+   写在 `.cover` 之前，换眼遮罩（scaleY(.04)）优先级更高。 */
+.lingpao .lp-eyes.beat {
+  transform: scaleY(0.78);
+}
+
+/* 换眼遮罩：眼睛是不同图形（椭圆 ↔ 弯眼弧），无法 tween。
+   换眼时先整体闭一下、在最闭的一帧换图形再睁开，时长与 `SvgSprite` 的定时器对齐。 */
 .lingpao .lp-eyes.cover {
   transform: scaleY(0.04);
   opacity: 0;

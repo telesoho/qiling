@@ -43,6 +43,7 @@ import {
   type PetStateId,
 } from './states'
 import { inTauri, petWindowIsOpen, publishPet, readPetState, setPetWindowOpen, subscribePet } from './sync'
+import { useLocalMusic } from './useLocalMusic'
 import { usePetDrag } from './usePetDrag'
 
 function speakPhase(phase: LinePhase): QiLingPhase {
@@ -56,6 +57,7 @@ export default function PetApp(): JSX.Element {
   const [voice, setVoiceOn] = useState(() => loadQiLingSettings().voice)
   const [musicOn, setMusicOn] = useState(() => loadQiLingSettings().music)
   const [musicTuning, setMusicTuning] = useState(() => loadQiLingSettings().musicTuning)
+  const localMusic = useLocalMusic({ enabled: inTauri(), tuning: musicTuning })
   const [stateId, setStateId] = useState<PetStateId>(() => {
     if (line.phase !== 'idle') {
       return poseForLine({ ...line, voice: loadQiLingSettings().voice, playback: 'waiting' })
@@ -642,6 +644,7 @@ export default function PetApp(): JSX.Element {
               holding={drag.holding}
               musicEnabled={musicOn && shown && ready}
               musicTuning={musicTuning}
+              localMusic={localMusic.sense}
               gazeEnabled={shown && ready}
             />
           ) : (

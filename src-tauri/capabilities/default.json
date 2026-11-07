@@ -8,6 +8,7 @@
     "core:event:default",
     "core:window:allow-set-position",
     "allow-pet-commands",
-    "allow-pet-pack-commands"
+    "allow-pet-pack-commands",
+    "allow-music-commands"
   ]
 }

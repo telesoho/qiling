@@ -42,6 +42,7 @@ import {
 } from './music'
 import type { PetStateId } from './states'
 import { inTauri } from './sync'
+import type { LocalMusicSense } from './localMusic'
 import { useMusicSense } from './useMusicSense'
 import './lingpao.css'
 
@@ -510,18 +511,24 @@ export interface SvgSpriteProps {
   musicEnabled: boolean
   /** 用户在设定页调整的识别阈值。 */
   musicTuning: MusicTuning
+  /** 曲库播放引擎的实时状态；播放中时优先于系统声音。 */
+  localMusic?: LocalMusicSense
   /** 器灵可见时才跟随鼠标，隐藏时停掉轮询。 */
   gazeEnabled: boolean
 }
 
 export default function SvgSprite(props: SvgSpriteProps): JSX.Element {
+  const local = props.localMusic
+  const localActive = local?.active ?? false
   const sense = useMusicSense({
-    enabled: props.musicEnabled,
+    enabled: props.musicEnabled && !localActive,
     tuning: props.musicTuning,
   })
+  // 曲库播放时由本地引擎驱动；否则继续跟随系统声音。
+  const sourceMood = localActive ? local?.mood ?? null : sense.mood
   // 器灵自己的播报会经过系统回环被采集到；后端会判成人声，这里再加一道门：
   // 正在说话时即使误判也不进入听音乐状态，说完再恢复。
-  const music = visibleMusicMood(props.musicEnabled, props.speaking, sense.mood)
+  const music = visibleMusicMood(props.musicEnabled, props.speaking, sourceMood)
   const pose = poseForRuntime({
     stateId: props.stateId,
     speaking: props.speaking,
@@ -741,14 +748,25 @@ export default function SvgSprite(props: SvgSpriteProps): JSX.Element {
     const gazeNode = gazeRef.current
     if (!danceNode || !breatheNode || !groundNode) return
 
-    const bpmRef = sense.bpm
-    const beatAtRef = sense.beatAt
-    let clock = createBeatClock(performance.now(), bpmRef.current)
+    const bpmRef = localActive ? local?.bpm ?? sense.bpm : sense.bpm
+    const beatAtRef = localActive ? local?.beatAt ?? sense.beatAt : sense.beatAt
+    const nextBeat = localActive ? local?.nextBeatMs.current ?? 0 : 0
+    let clock = createBeatClock(performance.now(), bpmRef.current, nextBeat)
     let lastIndex = -1
     let pulse = 0
     let lastNow = performance.now()
     let lastBeat = beatAtRef.current
+    let accentTimer = 0
     let raf = 0
+
+    // 逐拍的点缀只动眼睛（换表情仍由 mood 决定），不打断换档与换眼遮罩。
+    const accentEyes = () => {
+      const eyes = eyesRef.current
+      if (!eyes) return
+      eyes.classList.add('beat')
+      window.clearTimeout(accentTimer)
+      accentTimer = window.setTimeout(() => eyes.classList.remove('beat'), 110)
+    }
 
     let mood: MusicMood | null = moodRef.current
     let lastMotion: Motion = REST_MOTION
@@ -776,6 +794,7 @@ export default function SvgSprite(props: SvgSpriteProps): JSX.Element {
       if (beat.index !== lastIndex) {
         lastIndex = beat.index
         pulse = 1
+        if (moodRef.current !== null && moodRef.current !== 'calm') accentEyes()
       }
       pulse *= Math.exp(-dt * 4.2)
 
@@ -822,6 +841,8 @@ export default function SvgSprite(props: SvgSpriteProps): JSX.Element {
 
     return () => {
       cancelAnimationFrame(raf)
+      window.clearTimeout(accentTimer)
+      eyesRef.current?.classList.remove('beat')
       danceNode.style.transform = ''
       breatheNode.style.transform = ''
       groundNode.style.opacity = ''
@@ -830,7 +851,7 @@ export default function SvgSprite(props: SvgSpriteProps): JSX.Element {
         gazeNode.style.transform = `translate(${gazeTarget.current.x}px, ${gazeTarget.current.y}px)`
       }
     }
-  }, [danceActive, reduced, sense.bpm, sense.beatAt])
+  }, [danceActive, reduced, localActive, sense.bpm, sense.beatAt])
 
   return (
     <MemoFigure

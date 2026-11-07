@@ -33,5 +33,7 @@ describe('灵泡 CSS 动画', () => {
     // 换眼靠遮罩：闭眼帧里换图形，支点在两眼之间。
     expect(rule('.lingpao .lp-eyes')).toMatch(/transform-origin:\s*90px\s+152px/)
     expect(rule('.lingpao .lp-eyes.cover')).toMatch(/scaleY/)
+    // 曲库播放的逐拍点缀：眯眼幅度要比换眼遮罩小，不能盖住换眼。
+    expect(rule('.lingpao .lp-eyes.beat')).toMatch(/scaleY\(\s*0?\.\d+\s*\)/)
   })
 })

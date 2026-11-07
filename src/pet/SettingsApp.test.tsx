@@ -93,6 +93,8 @@ describe('器灵设定', () => {
     expect(page).toContain('不录音、不保存、不上传')
     expect(page).toContain('只有灵泡支持这个效果')
     expect(page).toContain('监听状态：仅应用内可用')
+    expect(page).toContain('打开曲库…')
+    expect(page).toContain('曲库支持本地音频文件与网络音频直链')
   })
 
   it('lets the user adjust every music detection threshold', () => {

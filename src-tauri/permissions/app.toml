@@ -18,6 +18,21 @@ commands.allow = [
 ]
 
 [[permission]]
+identifier = "allow-music-commands"
+description = "Manage the local/remote song library and play it from the library window"
+commands.allow = [
+  "qiling_music_open",
+  "qiling_music_pick_files",
+  "qiling_music_library_get",
+  "qiling_music_library_add_local",
+  "qiling_music_library_add_remote",
+  "qiling_music_library_remove",
+  "qiling_music_library_clear",
+  "qiling_music_track_audio",
+  "qiling_music_cache_clear"
+]
+
+[[permission]]
 identifier = "allow-pet-commands"
 description = "Desktop pet voice"
 commands.allow = [

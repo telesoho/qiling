@@ -29,6 +29,7 @@ import {
   type MusicTuning,
 } from './music'
 import { loadMusicSenseStatus } from './useMusicSense'
+import { useMusicPlayer } from './useMusicPlayer'
 import { inTauri } from './sync'
 
 interface ClientInfo {
@@ -289,6 +290,8 @@ function actionErrorMessage(reason: unknown, clientName: string): string {
 
 export default function SettingsApp(): JSX.Element {
   const native = inTauri()
+  // 曲库播放可能在设定页之外进行；只取状态用于"系统声音监听暂停"的提示。
+  const musicPlayer = useMusicPlayer({ enabled: native, progress: false })
   const [settings, setSettings] = useState<PetSettings>(loadQiLingSettings)
   const [wakeWordDraft, setWakeWordDraft] = useState(() => loadQiLingSettings().wakeWord)
   const [savingWakeWord, setSavingWakeWord] = useState(false)
@@ -883,17 +886,21 @@ export default function SettingsApp(): JSX.Element {
     !characterView || activeCharacter?.id === 'lingpao' || activeCharacter === undefined
   const musicStatusText = !native
     ? '仅应用内可用'
-    : !settings.music
-      ? '已关闭'
-      : musicStatusError
-        ? musicStatusError
-        : !musicIsForCurrentCharacter
-          ? '当前角色不是灵泡，音乐效果只在灵泡上出现'
-          : musicStatus?.running
-            ? musicFollowLabel(musicStatus)
-            : musicStatus?.supported === false
-              ? '当前系统不支持读取系统声音'
-              : '已开启，灵泡显示时会开始跟随'
+    : musicPlayer.state.status === 'playing'
+      ? settings.music
+        ? '曲库音乐播放中（系统声音监听已暂停）'
+        : '曲库音乐播放中（表情跟随已关闭）'
+      : !settings.music
+        ? '已关闭'
+        : musicStatusError
+          ? musicStatusError
+          : !musicIsForCurrentCharacter
+            ? '当前角色不是灵泡，音乐效果只在灵泡上出现'
+            : musicStatus?.running
+              ? musicFollowLabel(musicStatus)
+              : musicStatus?.supported === false
+                ? '当前系统不支持读取系统声音'
+                : '已开启，灵泡显示时会开始跟随'
 
   return (
     <main className="pet-settings" aria-label="设定">
@@ -1007,6 +1014,14 @@ export default function SettingsApp(): JSX.Element {
             </button>
           </div>
         </details>
+        <h3>曲库</h3>
+        <p>
+          曲库支持本地音频文件与网络音频直链；器灵播放时按曲库顺序进行，关闭曲库窗口也不会停止播放。
+          曲库播放与系统声音共用上面的「听音乐时自动切换状态」开关和三档能量阈值；两个音乐判定分数只作用于系统声音。
+        </p>
+        <button type="button" disabled={!native} onClick={() => void invoke('qiling_music_open')}>
+          打开曲库…
+        </button>
       </section>
 
       <section className="settings-section" aria-labelledby="voice-title">
