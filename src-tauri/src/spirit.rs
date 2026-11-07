@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, OpenOptions},
     io::Write,
     path::PathBuf,
@@ -21,6 +21,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::voice_command;
+
 const PAIRING_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_PAIRING_ATTEMPTS: u8 = 5;
 const MAX_CLIENTS: usize = 32;
@@ -28,6 +30,19 @@ const MAX_CONNECTIONS: usize = 32;
 const MAX_EVENTS_PER_MINUTE: u8 = 60;
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(5);
 const PAIR_APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const MAX_ACTIONS_PER_CLIENT: usize = 16;
+const MAX_EVENTS_PER_CLIENT: usize = 16;
+const MAX_ACTION_ID_CHARS: usize = 128;
+const MAX_DESCRIPTION_CHARS: usize = 120;
+const MAX_SCHEMA_BYTES: usize = 16 * 1024;
+const MAX_SCHEMA_DEPTH: usize = 8;
+const MAX_VOICE_EXAMPLES: usize = 12;
+const MAX_VOICE_EXAMPLE_CHARS: usize = 40;
+const MAX_VOICE_TOTAL_CHARS: usize = 240;
+const MAX_VOICE_ACTIONS: usize = 64;
+const MAX_LOCALE_CHARS: usize = 16;
+const MAX_EVENT_PAYLOAD_BYTES: usize = 4 * 1024;
+const MAX_EVENT_PAYLOAD_DEPTH: usize = 4;
 pub const DEFAULT_ACTION_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,9 +64,24 @@ struct AuthenticateParams {
 pub struct ActionCapability {
     pub id: String,
     pub risk: String,
+    #[serde(default)]
+    pub description: Option<String>,
     pub input_schema: Value,
     pub output_schema: Value,
     pub supports_cancellation: bool,
+    /// Optional client-declared voice entry. It only narrows matching: it can
+    /// never add an Action, raise its risk, or bypass the pairing approval.
+    #[serde(default)]
+    pub voice: Option<VoiceCapability>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VoiceCapability {
+    #[serde(default)]
+    pub examples: Vec<String>,
+    #[serde(default)]
+    pub locale: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,9 +233,11 @@ impl PairingManager {
                 return Err("credential_record_invalid".into());
             }
             validate_client(&client.client).map_err(|_| "credential_record_invalid")?;
-            validate_capabilities(&client.client.id, &client.capabilities)
-                .map_err(|_| "credential_record_invalid")?;
+            validate_capabilities(&client.capabilities).map_err(|_| "credential_record_invalid")?;
             inner.clients.insert(client.client_key.clone(), client);
+        }
+        if total_voice_actions(&inner.clients) > MAX_VOICE_ACTIONS {
+            return Err("credential_record_invalid".into());
         }
 
         Ok(Self {
@@ -246,23 +278,30 @@ impl PairingManager {
         String,
     > {
         validate_client(&params.client)?;
-        validate_capabilities(&params.client.id, &params.requested_capabilities)?;
+        validate_capabilities(&params.requested_capabilities)?;
         let requested_code = params.pairing_code.trim().to_ascii_uppercase();
         let mut inner = self.inner.lock().map_err(|_| "pairing_state_unavailable")?;
-        let Some(pairing) = inner.pairing.as_mut() else {
-            return Err("pairing_required".into());
-        };
-        if Instant::now() >= pairing.expires_at {
-            inner.pairing = None;
-            return Err("pairing_expired".into());
-        }
-        if !constant_time_eq(&pairing.code, &requested_code) {
-            pairing.failed_attempts = pairing.failed_attempts.saturating_add(1);
-            if pairing.failed_attempts >= MAX_PAIRING_ATTEMPTS {
+        {
+            let Some(pairing) = inner.pairing.as_mut() else {
+                return Err("pairing_required".into());
+            };
+            if Instant::now() >= pairing.expires_at {
                 inner.pairing = None;
                 return Err("pairing_expired".into());
             }
-            return Err("pairing_required".into());
+            if !constant_time_eq(&pairing.code, &requested_code) {
+                pairing.failed_attempts = pairing.failed_attempts.saturating_add(1);
+                if pairing.failed_attempts >= MAX_PAIRING_ATTEMPTS {
+                    inner.pairing = None;
+                    return Err("pairing_expired".into());
+                }
+                return Err("pairing_required".into());
+            }
+        }
+        if total_voice_actions(&inner.clients) + count_voice_actions(&params.requested_capabilities)
+            > MAX_VOICE_ACTIONS
+        {
+            return Err("voice_command_limit".into());
         }
 
         inner.pairing = None;
@@ -318,6 +357,13 @@ impl PairingManager {
         if inner.clients.len() >= MAX_CLIENTS {
             let _ = pending.decision.send(Err("client_limit".into()));
             return Err("client_limit".into());
+        }
+        if total_voice_actions(&inner.clients)
+            + count_voice_actions(&pending.view.requested_capabilities)
+            > MAX_VOICE_ACTIONS
+        {
+            let _ = pending.decision.send(Err("voice_command_limit".into()));
+            return Err("voice_command_limit".into());
         }
 
         let mut entropy = [0u8; 32];
@@ -441,15 +487,6 @@ impl PairingManager {
         Ok((session_id, cancelled))
     }
 
-    pub async fn invoke_narrate_current(
-        &self,
-        client_id: &str,
-        action_timeout: Duration,
-    ) -> Result<NarrationResult, String> {
-        self.invoke_action(client_id, "siju.narrate_current", action_timeout)
-            .await
-    }
-
     pub async fn invoke_action(
         &self,
         client_id: &str,
@@ -477,13 +514,6 @@ impl PairingManager {
             }
             record.client_key.clone()
         };
-        if !matches!(
-            (client_id, action_id),
-            ("com.siju.app", "siju.narrate_current")
-                | ("com.qiling.vscode", "vscode.explain_selection")
-        ) {
-            return Err("action_not_found".into());
-        }
         let request_id = Uuid::new_v4().to_string();
         let (response_tx, response_rx) = oneshot::channel();
         {
@@ -534,6 +564,85 @@ impl PairingManager {
         outcome
     }
 
+    /// Update the voice metadata of an already-approved client.
+    ///
+    /// Actions, events, schemas, risk and descriptions stay exactly as the user
+    /// approved them. Only client-provided matching hints may change, and the
+    /// updated record is persisted so the settings page keeps showing what will
+    /// trigger the command.
+    fn adopt_voice_metadata(
+        &self,
+        client_key: &str,
+        declared: CapabilityManifest,
+    ) -> Result<StoredClient, String> {
+        let mut inner = self.inner.lock().map_err(|_| "pairing_state_unavailable")?;
+        let record = inner
+            .clients
+            .get(client_key)
+            .ok_or_else(|| "not_authorized".to_string())?
+            .clone();
+        if !authorization_equal(&record.capabilities, &declared) {
+            return Err("not_authorized".into());
+        }
+        if record.capabilities == declared {
+            return Ok(record);
+        }
+        let other_voice: usize = inner
+            .clients
+            .values()
+            .filter(|client| client.client_key != record.client_key)
+            .map(|client| count_voice_actions(&client.capabilities))
+            .sum();
+        if other_voice + count_voice_actions(&declared) > MAX_VOICE_ACTIONS {
+            return Err("voice_command_limit".into());
+        }
+        let mut updated = record;
+        updated.capabilities = declared;
+        self.persist(&updated)?;
+        inner
+            .clients
+            .insert(client_key.to_string(), updated.clone());
+        Ok(updated)
+    }
+
+    /// Snapshot every approved Action of every paired client, for the voice
+    /// router. Offline clients stay in the snapshot so a recognised command can
+    /// answer "not connected" instead of falling through to the conversation
+    /// model. Nothing is cached: disconnects and revocations take effect on the
+    /// next utterance.
+    pub fn route_actions(&self) -> Result<Vec<voice_command::AvailableAction>, String> {
+        let inner = self.inner.lock().map_err(|_| "pairing_state_unavailable")?;
+        let mut actions = Vec::new();
+        for record in inner.clients.values() {
+            let connected = inner.sessions.contains_key(&record.client_key);
+            for action in &record.capabilities.actions {
+                actions.push(voice_command::AvailableAction {
+                    client_id: record.client.id.clone(),
+                    client_name: record.client.name.clone(),
+                    action_id: action.id.clone(),
+                    voice: action.voice.as_ref().map(|voice| voice.examples.clone()),
+                    connected,
+                });
+            }
+        }
+        actions.sort_by(|left, right| {
+            left.client_name
+                .cmp(&right.client_name)
+                .then_with(|| left.client_id.cmp(&right.client_id))
+                .then_with(|| left.action_id.cmp(&right.action_id))
+        });
+        Ok(actions)
+    }
+
+    pub fn client_name(&self, client_id: &str) -> Result<Option<String>, String> {
+        let inner = self.inner.lock().map_err(|_| "pairing_state_unavailable")?;
+        Ok(inner
+            .clients
+            .values()
+            .find(|record| record.client.id == client_id)
+            .map(|record| record.client.name.clone()))
+    }
+
     fn close_session(&self, client_key: &str, session_id: &str) {
         if let Ok(mut inner) = self.inner.lock() {
             if inner
@@ -558,7 +667,8 @@ impl PairingManager {
             serde_json::to_vec(record).map_err(|err| format!("credential_serialize:{err}"))?;
         let mut file = OpenOptions::new()
             .write(true)
-            .create_new(true)
+            .create(true)
+            .truncate(true)
             .open(&temp_path)
             .map_err(|err| format!("credential_write:{err}"))?;
         if let Err(err) = file.write_all(&data).and_then(|_| file.sync_all()) {
@@ -573,22 +683,37 @@ impl PairingManager {
 }
 
 fn validate_client(client: &ClientInfo) -> Result<(), String> {
-    if client.id.trim().is_empty()
-        || client.id.chars().count() > 128
-        || client.name.trim().is_empty()
+    let id = client.id.trim();
+    let id_length = id.chars().count();
+    if id_length < 3
+        || id_length > 128
+        || !id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+        })
+        || !id
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_alphanumeric())
+    {
+        return Err("invalid_client".into());
+    }
+    if client.name.trim().is_empty()
         || client.name.chars().count() > 80
+        || voice_command::spoken_key(&client.name).is_empty()
         || client.version.trim().is_empty()
         || client.version.chars().count() > 40
     {
-        return Err("invalid_params".into());
+        return Err("invalid_client".into());
     }
     Ok(())
 }
 
+#[cfg(test)]
 fn action_capability(id: &str, risk: &str) -> ActionCapability {
     ActionCapability {
         id: id.into(),
         risk: risk.into(),
+        description: None,
         input_schema: json!({
             "type": "object",
             "additionalProperties": false,
@@ -604,9 +729,11 @@ fn action_capability(id: &str, risk: &str) -> ActionCapability {
             "additionalProperties": false
         }),
         supports_cancellation: false,
+        voice: None,
     }
 }
 
+#[cfg(test)]
 fn siju_capabilities() -> CapabilityManifest {
     CapabilityManifest {
         actions: vec![action_capability("siju.narrate_current", "no_state_change")],
@@ -617,6 +744,7 @@ fn siju_capabilities() -> CapabilityManifest {
     }
 }
 
+#[cfg(test)]
 fn vscode_capabilities() -> CapabilityManifest {
     CapabilityManifest {
         actions: vec![action_capability("vscode.explain_selection", "sensitive")],
@@ -627,16 +755,286 @@ fn vscode_capabilities() -> CapabilityManifest {
     }
 }
 
-fn validate_capabilities(client_id: &str, capabilities: &CapabilityManifest) -> Result<(), String> {
-    let expected = match client_id {
-        "com.siju.app" => siju_capabilities(),
-        "com.qiling.vscode" => vscode_capabilities(),
-        _ => return Err("unsupported_client".into()),
-    };
-    if capabilities != &expected {
-        return Err("unsupported_capabilities".into());
+/// Validate a client-declared capability manifest against the generic V1
+/// policy. No client ID is special-cased: authorization comes from the pairing
+/// approval, not from this function.
+fn validate_capabilities(capabilities: &CapabilityManifest) -> Result<(), String> {
+    if capabilities.actions.len() > MAX_ACTIONS_PER_CLIENT {
+        return Err("invalid_capabilities".into());
+    }
+    let mut action_ids = HashSet::new();
+    for action in &capabilities.actions {
+        validate_action(action)?;
+        if !action_ids.insert(action.id.as_str()) {
+            return Err("invalid_capabilities".into());
+        }
+    }
+    validate_event_types(&capabilities.events.publishes)?;
+    validate_event_types(&capabilities.events.subscribes)?;
+    Ok(())
+}
+
+fn validate_action(action: &ActionCapability) -> Result<(), String> {
+    if !is_valid_dotted_id(&action.id) {
+        return Err("invalid_capabilities".into());
+    }
+    if !matches!(
+        action.risk.as_str(),
+        "no_state_change" | "state_change" | "sensitive"
+    ) {
+        return Err("invalid_capabilities".into());
+    }
+    if let Some(description) = &action.description {
+        let trimmed = description.trim();
+        if trimmed.is_empty()
+            || trimmed.chars().count() > MAX_DESCRIPTION_CHARS
+            || description.chars().any(char::is_control)
+        {
+            return Err("invalid_capabilities".into());
+        }
+    }
+    if !is_no_argument_schema(&action.input_schema)
+        || !is_narration_output_schema(&action.output_schema)
+        || schema_too_large(&action.input_schema)
+        || schema_too_large(&action.output_schema)
+        || schema_depth_exceeded(&action.input_schema)
+        || schema_depth_exceeded(&action.output_schema)
+    {
+        return Err("invalid_capabilities".into());
+    }
+    if let Some(voice) = &action.voice {
+        if action.risk != "no_state_change" || action.supports_cancellation {
+            return Err("invalid_capabilities".into());
+        }
+        validate_voice(voice)?;
     }
     Ok(())
+}
+
+fn validate_event_types(event_types: &[String]) -> Result<(), String> {
+    if event_types.len() > MAX_EVENTS_PER_CLIENT {
+        return Err("invalid_capabilities".into());
+    }
+    let mut seen = HashSet::new();
+    for event_type in event_types {
+        if !is_valid_dotted_id(event_type) || !seen.insert(event_type.as_str()) {
+            return Err("invalid_capabilities".into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_voice(voice: &VoiceCapability) -> Result<(), String> {
+    if voice.examples.is_empty() || voice.examples.len() > MAX_VOICE_EXAMPLES {
+        return Err("invalid_capabilities".into());
+    }
+    if let Some(locale) = &voice.locale {
+        if !is_valid_locale(locale) {
+            return Err("invalid_capabilities".into());
+        }
+    }
+    let mut keys = HashSet::new();
+    let mut total = 0usize;
+    for example in &voice.examples {
+        let trimmed = example.trim();
+        if trimmed.is_empty()
+            || trimmed.chars().count() > MAX_VOICE_EXAMPLE_CHARS
+            || example.chars().any(char::is_control)
+        {
+            return Err("invalid_capabilities".into());
+        }
+        let key = voice_command::spoken_key(trimmed);
+        if key.chars().count() < 2
+            || !keys.insert(key.clone())
+            || voice_command::is_reserved_example(&key)
+            || voice_command::contains_negation(&key)
+        {
+            return Err("invalid_capabilities".into());
+        }
+        total += trimmed.chars().count();
+        if total > MAX_VOICE_TOTAL_CHARS {
+            return Err("invalid_capabilities".into());
+        }
+    }
+    Ok(())
+}
+
+fn is_valid_dotted_id(value: &str) -> bool {
+    let length = value.chars().count();
+    if length == 0 || length > MAX_ACTION_ID_CHARS {
+        return false;
+    }
+    let mut segments = value.split('.');
+    let Some(first) = segments.next() else {
+        return false;
+    };
+    if !is_lower_segment(first) {
+        return false;
+    }
+    let rest: Vec<&str> = segments.collect();
+    !rest.is_empty() && rest.iter().all(|segment| is_lower_segment(segment))
+}
+
+fn is_lower_segment(segment: &str) -> bool {
+    let mut characters = segment.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    first.is_ascii_lowercase()
+        && characters.all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+        })
+}
+
+fn is_valid_locale(locale: &str) -> bool {
+    let length = locale.chars().count();
+    if length == 0 || length > MAX_LOCALE_CHARS {
+        return false;
+    }
+    let mut parts = locale.split('-');
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    let first_length = first.chars().count();
+    if !(2..=3).contains(&first_length)
+        || !first
+            .chars()
+            .all(|character| character.is_ascii_alphabetic())
+    {
+        return false;
+    }
+    parts.all(|part| {
+        let length = part.chars().count();
+        (2..=8).contains(&length)
+            && part
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric())
+    })
+}
+
+fn is_no_argument_schema(schema: &Value) -> bool {
+    let Some(object) = schema.as_object() else {
+        return false;
+    };
+    if object.get("type").and_then(Value::as_str) != Some("object")
+        || object.get("additionalProperties") != Some(&Value::Bool(false))
+    {
+        return false;
+    }
+    let properties_empty = match object.get("properties") {
+        None => true,
+        Some(Value::Object(properties)) => properties.is_empty(),
+        _ => false,
+    };
+    let required_empty = match object.get("required") {
+        None => true,
+        Some(Value::Array(required)) => required.is_empty(),
+        _ => false,
+    };
+    properties_empty && required_empty
+}
+
+fn is_narration_output_schema(schema: &Value) -> bool {
+    let Some(object) = schema.as_object() else {
+        return false;
+    };
+    if object.get("type").and_then(Value::as_str) != Some("object")
+        || object.get("additionalProperties") != Some(&Value::Bool(false))
+    {
+        return false;
+    }
+    let required_ok = object
+        .get("required")
+        .and_then(Value::as_array)
+        .is_some_and(|required| {
+            required.len() == 2
+                && required.iter().any(|value| value.as_str() == Some("text"))
+                && required.iter().any(|value| value.as_str() == Some("mood"))
+        });
+    if !required_ok {
+        return false;
+    }
+    let Some(properties) = object.get("properties").and_then(Value::as_object) else {
+        return false;
+    };
+    if properties.len() != 2 {
+        return false;
+    }
+    let Some(text) = properties.get("text").and_then(Value::as_object) else {
+        return false;
+    };
+    let Some(mood) = properties.get("mood").and_then(Value::as_object) else {
+        return false;
+    };
+    let moods = mood.get("enum").and_then(Value::as_array).map(|values| {
+        let mut names: Vec<&str> = values.iter().filter_map(Value::as_str).collect();
+        names.sort_unstable();
+        names
+    });
+    text.get("type").and_then(Value::as_str) == Some("string")
+        && text.get("maxLength").and_then(Value::as_u64) == Some(400)
+        && mood.get("type").and_then(Value::as_str) == Some("string")
+        && moods == Some(vec!["down", "neutral", "up"])
+}
+
+fn schema_too_large(schema: &Value) -> bool {
+    json_size_exceeds(schema, MAX_SCHEMA_BYTES)
+}
+
+fn json_size_exceeds(value: &Value, limit: usize) -> bool {
+    serde_json::to_vec(value)
+        .map(|encoded| encoded.len() > limit)
+        .unwrap_or(true)
+}
+
+fn schema_depth_exceeded(schema: &Value) -> bool {
+    value_depth(schema) > MAX_SCHEMA_DEPTH
+}
+
+fn value_depth(value: &Value) -> usize {
+    match value {
+        Value::Array(items) => 1 + items.iter().map(value_depth).max().unwrap_or(0),
+        Value::Object(object) => 1 + object.values().map(value_depth).max().unwrap_or(0),
+        _ => 1,
+    }
+}
+
+fn count_voice_actions(capabilities: &CapabilityManifest) -> usize {
+    capabilities
+        .actions
+        .iter()
+        .filter(|action| action.voice.is_some())
+        .count()
+}
+
+fn total_voice_actions(clients: &HashMap<String, StoredClient>) -> usize {
+    clients
+        .values()
+        .map(|client| count_voice_actions(&client.capabilities))
+        .sum()
+}
+
+/// The parts of a manifest the user approved. Voice metadata is matching-only
+/// and may be refreshed by a reconnecting client; everything else is fixed
+/// until the user pairs the client again.
+fn authorization_equal(approved: &CapabilityManifest, declared: &CapabilityManifest) -> bool {
+    approved.events == declared.events
+        && approved.actions.len() == declared.actions.len()
+        && approved.actions.iter().all(|approved_action| {
+            declared
+                .actions
+                .iter()
+                .any(|declared_action| action_authorization_equal(approved_action, declared_action))
+        })
+}
+
+fn action_authorization_equal(approved: &ActionCapability, declared: &ActionCapability) -> bool {
+    approved.id == declared.id
+        && approved.risk == declared.risk
+        && approved.description == declared.description
+        && approved.input_schema == declared.input_schema
+        && approved.output_schema == declared.output_schema
+        && approved.supports_cancellation == declared.supports_cancellation
 }
 
 fn token_hash(token: &str) -> String {
@@ -869,10 +1267,32 @@ async fn authenticated_session(
         .await;
         return;
     }
-    if init.client != client.client || init.capabilities != client.capabilities {
+    if init.client != client.client {
         let _ = send_json(&mut socket, &rpc_error(id, -32000, "not_authorized", false)).await;
         return;
     }
+    if validate_capabilities(&init.capabilities).is_err() {
+        let _ = send_json(
+            &mut socket,
+            &rpc_error(id, -32000, "invalid_capabilities", false),
+        )
+        .await;
+        return;
+    }
+    if !authorization_equal(&client.capabilities, &init.capabilities) {
+        let _ = send_json(&mut socket, &rpc_error(id, -32000, "not_authorized", false)).await;
+        return;
+    }
+    // Only client-provided voice hints may differ from the approved record.
+    // They are persisted so the settings page and the next connection keep
+    // showing the same phrases.
+    let client = match manager.adopt_voice_metadata(&client.client_key, init.capabilities) {
+        Ok(client) => client,
+        Err(code) => {
+            let _ = send_json(&mut socket, &rpc_error(id, -32000, &code, false)).await;
+            return;
+        }
+    };
     let (action_tx, mut action_rx) = mpsc::unbounded_channel();
     let (session_id, cancelled) = match manager.open_session(&client.client_key, action_tx) {
         Ok(session) => session,
@@ -1096,30 +1516,35 @@ async fn handle_client_message(
             Ok(params) => params,
             Err(_) => return false,
         };
-    let expected_event = match client.client.id.as_str() {
-        "com.siju.app" => "siju.analysis.status",
-        "com.qiling.vscode" => "vscode.editor.status",
-        _ => return false,
-    };
-    if params.event_type != expected_event
-        || !client
-            .capabilities
-            .events
-            .publishes
-            .iter()
-            .any(|event| event == &params.event_type)
+    if !client
+        .capabilities
+        .events
+        .publishes
+        .iter()
+        .any(|event| event == &params.event_type)
         || params.event_id.trim().is_empty()
         || params.event_id.chars().count() > 128
     {
         return false;
     }
-    let status = params.payload.get("status").and_then(Value::as_str);
-    if !matches!(status, Some("ready" | "unavailable"))
-        || params.payload.as_object().map(|p| p.len()) != Some(1)
+    if !params.payload.is_object()
+        || json_size_exceeds(&params.payload, MAX_EVENT_PAYLOAD_BYTES)
+        || value_depth(&params.payload) > MAX_EVENT_PAYLOAD_DEPTH
         || params.occurred_at.trim().is_empty()
         || params.occurred_at.chars().count() > 40
     {
         return false;
+    }
+    if matches!(
+        params.event_type.as_str(),
+        "siju.analysis.status" | "vscode.editor.status"
+    ) {
+        let status = params.payload.get("status").and_then(Value::as_str);
+        if !matches!(status, Some("ready" | "unavailable"))
+            || params.payload.as_object().map(|payload| payload.len()) != Some(1)
+        {
+            return false;
+        }
     }
     *event_count += 1;
     if let Err(err) = emitter.emit_event(json!({
@@ -1211,6 +1636,57 @@ mod tests {
             },
             requested_capabilities: vscode_manifest(),
         }
+    }
+
+    fn voice_manifest() -> CapabilityManifest {
+        CapabilityManifest {
+            actions: vec![ActionCapability {
+                id: "demo.say_hello".into(),
+                risk: "no_state_change".into(),
+                description: Some("打个招呼".into()),
+                input_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {}
+                }),
+                output_schema: json!({
+                    "type": "object",
+                    "required": ["text", "mood"],
+                    "properties": {
+                        "text": { "type": "string", "maxLength": 400 },
+                        "mood": { "type": "string", "enum": ["neutral", "up", "down"] }
+                    },
+                    "additionalProperties": false
+                }),
+                supports_cancellation: false,
+                voice: Some(VoiceCapability {
+                    examples: vec!["打个招呼".into(), "说声你好".into()],
+                    locale: Some("zh-CN".into()),
+                }),
+            }],
+            events: EventCapabilities {
+                publishes: vec![],
+                subscribes: vec![],
+            },
+        }
+    }
+
+    fn voice_pair_params(code: &str) -> PairParams {
+        PairParams {
+            pairing_code: code.into(),
+            client: ClientInfo {
+                id: "com.example.voice-demo".into(),
+                name: "示例客户端".into(),
+                version: "0.1.0".into(),
+            },
+            requested_capabilities: voice_manifest(),
+        }
+    }
+
+    fn approve_generic(manager: &PairingManager, code: &str) -> String {
+        let (pending, receiver) = manager.request_pairing(voice_pair_params(code)).unwrap();
+        manager.approve_pairing(&pending.request_id).unwrap();
+        receiver.blocking_recv().unwrap().unwrap()
     }
 
     fn manager() -> (PairingManager, PathBuf) {
@@ -1310,22 +1786,208 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_capabilities_cannot_be_paired() {
+    fn generic_clients_pair_but_invalid_manifests_are_rejected() {
         let (manager, directory) = manager();
         let pairing = manager.begin_pairing().unwrap();
-        let mut params = pair_params(&pairing.code);
-        params.requested_capabilities.actions[0].id = "system.run_command".into();
+
+        let mut voice_on_sensitive = voice_pair_params(&pairing.code);
+        voice_on_sensitive.requested_capabilities.actions[0].risk = "sensitive".into();
         assert_eq!(
-            manager.request_pairing(params).unwrap_err(),
-            "unsupported_capabilities"
+            manager.request_pairing(voice_on_sensitive).unwrap_err(),
+            "invalid_capabilities"
         );
-        let mut unknown_client = pair_params(&pairing.code);
-        unknown_client.client.id = "com.example.arbitrary".into();
+
+        let mut invalid_client = voice_pair_params(&pairing.code);
+        invalid_client.client.id = "bad id!".into();
         assert_eq!(
-            manager.request_pairing(unknown_client).unwrap_err(),
-            "unsupported_client"
+            manager.request_pairing(invalid_client).unwrap_err(),
+            "invalid_client"
         );
+
         assert_eq!(manager.list_clients().unwrap().len(), 0);
+        let _token = approve_generic(&manager, &pairing.code);
+        assert_eq!(
+            manager.list_clients().unwrap()[0].client.id,
+            "com.example.voice-demo"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn voice_metadata_is_bounded_and_low_risk_only() {
+        let mut manifest = voice_manifest();
+        manifest.actions[0].supports_cancellation = true;
+        assert_eq!(
+            validate_capabilities(&manifest).unwrap_err(),
+            "invalid_capabilities"
+        );
+
+        let mut manifest = voice_manifest();
+        manifest.actions[0].risk = "state_change".into();
+        assert_eq!(
+            validate_capabilities(&manifest).unwrap_err(),
+            "invalid_capabilities"
+        );
+
+        let mut manifest = voice_manifest();
+        manifest.actions[0].voice = Some(VoiceCapability {
+            examples: vec!["停止导航".into()],
+            locale: None,
+        });
+        assert_eq!(
+            validate_capabilities(&manifest).unwrap_err(),
+            "invalid_capabilities"
+        );
+
+        let mut manifest = voice_manifest();
+        manifest.actions[0].voice = Some(VoiceCapability {
+            examples: vec!["打个招呼".into(), "打个招呼".into()],
+            locale: None,
+        });
+        assert_eq!(
+            validate_capabilities(&manifest).unwrap_err(),
+            "invalid_capabilities"
+        );
+
+        let mut manifest = voice_manifest();
+        manifest.actions[0].voice = Some(VoiceCapability {
+            examples: (0..13).map(|index| format!("示例口令{index}")).collect(),
+            locale: None,
+        });
+        assert_eq!(
+            validate_capabilities(&manifest).unwrap_err(),
+            "invalid_capabilities"
+        );
+
+        let mut manifest = voice_manifest();
+        manifest.actions[0].input_schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": { "target": { "type": "string" } }
+        });
+        assert_eq!(
+            validate_capabilities(&manifest).unwrap_err(),
+            "invalid_capabilities"
+        );
+
+        let mut manifest = voice_manifest();
+        manifest.actions[0].output_schema = json!({ "type": "object" });
+        assert_eq!(
+            validate_capabilities(&manifest).unwrap_err(),
+            "invalid_capabilities"
+        );
+    }
+
+    #[test]
+    fn voice_metadata_updates_without_reapproval_but_actions_stay_fixed() {
+        let (manager, directory) = manager();
+        let pairing = manager.begin_pairing().unwrap();
+        let _token = approve_generic(&manager, &pairing.code);
+        let client_key = manager.list_clients().unwrap()[0].client_key.clone();
+
+        let mut updated = voice_manifest();
+        updated.actions[0].voice = Some(VoiceCapability {
+            examples: vec!["你好呀".into()],
+            locale: None,
+        });
+        let record = manager
+            .adopt_voice_metadata(&client_key, updated.clone())
+            .unwrap();
+        assert_eq!(
+            record.capabilities.actions[0]
+                .voice
+                .as_ref()
+                .unwrap()
+                .examples,
+            vec!["你好呀"]
+        );
+
+        let reloaded = PairingManager::load(&directory).unwrap();
+        assert_eq!(
+            reloaded.list_clients().unwrap()[0].capabilities.actions[0]
+                .voice
+                .as_ref()
+                .unwrap()
+                .examples,
+            vec!["你好呀"]
+        );
+
+        let mut changed_action = voice_manifest();
+        changed_action.actions[0].id = "demo.other".into();
+        assert_eq!(
+            manager
+                .adopt_voice_metadata(&client_key, changed_action)
+                .unwrap_err(),
+            "not_authorized"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn route_snapshot_tracks_voice_metadata_and_connection_state() {
+        let (manager, directory) = manager();
+        let pairing = manager.begin_pairing().unwrap();
+        let _token = approve_generic(&manager, &pairing.code);
+        let client_key = manager.list_clients().unwrap()[0].client_key.clone();
+
+        let actions = manager.route_actions().unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].client_id, "com.example.voice-demo");
+        assert_eq!(
+            actions[0].voice.as_deref(),
+            Some(["打个招呼".to_string(), "说声你好".to_string()].as_slice())
+        );
+        assert!(!actions[0].connected);
+        assert!(matches!(
+            voice_command::match_transcript(&actions, "打个招呼"),
+            voice_command::VoiceOutcome::Action(voice_command::MatchedAction {
+                connected: false,
+                ..
+            })
+        ));
+
+        let (action_tx, _action_rx) = mpsc::unbounded_channel();
+        manager.open_session(&client_key, action_tx).unwrap();
+        assert!(manager.route_actions().unwrap()[0].connected);
+
+        manager.revoke_client(&client_key).unwrap();
+        assert!(manager.route_actions().unwrap().is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn generic_actions_are_invocable_without_a_client_whitelist() {
+        let (manager, directory) = manager();
+        let pairing = manager.begin_pairing().unwrap();
+        let _token = approve_generic(&manager, &pairing.code);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            assert_eq!(
+                manager
+                    .invoke_action(
+                        "com.example.voice-demo",
+                        "demo.say_hello",
+                        Duration::from_secs(1)
+                    )
+                    .await
+                    .unwrap_err(),
+                "client_unavailable"
+            );
+            assert_eq!(
+                manager
+                    .invoke_action(
+                        "com.example.voice-demo",
+                        "demo.missing",
+                        Duration::from_secs(1)
+                    )
+                    .await
+                    .unwrap_err(),
+                "action_not_found"
+            );
+        });
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1417,8 +2079,7 @@ mod tests {
             match method {
                 "client.pair" => {
                     let params: PairParams = serde_json::from_value(params).unwrap();
-                    validate_capabilities(&params.client.id, &params.requested_capabilities)
-                        .unwrap();
+                    validate_capabilities(&params.requested_capabilities).unwrap();
                     checked += 1;
                 }
                 "client.authenticate" => {
@@ -1429,13 +2090,13 @@ mod tests {
                 "client.initialize" => {
                     let params: InitializeParams = serde_json::from_value(params).unwrap();
                     assert_eq!(params.protocol_version, "1");
-                    validate_capabilities(&params.client.id, &params.capabilities).unwrap();
+                    validate_capabilities(&params.capabilities).unwrap();
                     checked += 1;
                 }
                 _ => {}
             }
         }
-        assert_eq!(checked, 4);
+        assert_eq!(checked, 6);
     }
 
     #[tokio::test]
@@ -1551,7 +2212,11 @@ mod tests {
         let invoke_manager = Arc::clone(&manager);
         let invocation = tokio::spawn(async move {
             invoke_manager
-                .invoke_narrate_current("com.siju.app", Duration::from_secs(2))
+                .invoke_action(
+                    "com.siju.app",
+                    "siju.narrate_current",
+                    Duration::from_secs(2),
+                )
                 .await
         });
         let action_request = receive_client_json(&mut client_socket).await;
@@ -1560,7 +2225,11 @@ mod tests {
         assert_eq!(action_request["params"]["arguments"], json!({}));
         assert_eq!(
             manager
-                .invoke_narrate_current("com.siju.app", Duration::from_secs(2))
+                .invoke_action(
+                    "com.siju.app",
+                    "siju.narrate_current",
+                    Duration::from_secs(2)
+                )
                 .await
                 .unwrap_err(),
             "busy"
@@ -1585,7 +2254,11 @@ mod tests {
         let timeout_manager = Arc::clone(&manager);
         let timed_invocation = tokio::spawn(async move {
             timeout_manager
-                .invoke_narrate_current("com.siju.app", Duration::from_millis(20))
+                .invoke_action(
+                    "com.siju.app",
+                    "siju.narrate_current",
+                    Duration::from_millis(20),
+                )
                 .await
         });
         let late_action_request = receive_client_json(&mut client_socket).await;
@@ -1775,6 +2448,148 @@ mod tests {
             NarrationResult {
                 text: "const answer = 42;".into(),
                 mood: "neutral".into()
+            }
+        );
+
+        server.abort();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn generic_voice_client_is_discovered_over_the_wire() {
+        let (manager, directory) = manager();
+        let manager = Arc::new(manager);
+        let emitter: Arc<dyn ProtocolEventEmitter> = Arc::new(|_event: Value| Ok(()));
+        let app = Router::new()
+            .route("/v1/connect", get(test_connect))
+            .with_state(WebSocketTestState {
+                manager: Arc::clone(&manager),
+                emitter,
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let pairing = manager.begin_pairing().unwrap();
+        let (mut pairing_socket, _) = connect_async(format!("ws://{addr}/v1/connect"))
+            .await
+            .unwrap();
+        send_client_json(
+            &mut pairing_socket,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "voice-pair-1",
+                "method": "client.pair",
+                "params": voice_pair_params(&pairing.code)
+            }),
+        )
+        .await;
+        let pending = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(pending) = manager.pending_pairings().unwrap().into_iter().next() {
+                    break pending;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        manager.approve_pairing(&pending.request_id).unwrap();
+        let token = receive_client_json(&mut pairing_socket).await["result"]["accessToken"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        pairing_socket.close(None).await.unwrap();
+
+        let (mut client_socket, _) = connect_async(format!("ws://{addr}/v1/connect"))
+            .await
+            .unwrap();
+        send_client_json(
+            &mut client_socket,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "voice-auth-1",
+                "method": "client.authenticate",
+                "params": { "accessToken": token }
+            }),
+        )
+        .await;
+        assert_eq!(
+            receive_client_json(&mut client_socket).await["result"]["authenticated"],
+            true
+        );
+
+        let mut initialize = voice_pair_params("unused");
+        initialize.requested_capabilities.actions[0].voice = Some(VoiceCapability {
+            examples: vec!["你好呀".into(), "打个招呼".into()],
+            locale: Some("zh-CN".into()),
+        });
+        send_client_json(
+            &mut client_socket,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "voice-init-1",
+                "method": "client.initialize",
+                "params": {
+                    "protocolVersion": "1",
+                    "client": initialize.client,
+                    "capabilities": initialize.requested_capabilities
+                }
+            }),
+        )
+        .await;
+        let init_response = receive_client_json(&mut client_socket).await;
+        assert_eq!(
+            init_response["result"]["grantedCapabilities"],
+            json!(["demo.say_hello"])
+        );
+
+        // The reconnecting client's new example set is visible immediately.
+        let actions = manager.route_actions().unwrap();
+        assert_eq!(actions.len(), 1);
+        assert!(actions[0].connected);
+        assert_eq!(
+            actions[0].voice.as_ref().unwrap(),
+            &vec!["你好呀".to_string(), "打个招呼".to_string()]
+        );
+        assert!(matches!(
+            voice_command::match_transcript(&actions, "你好呀"),
+            voice_command::VoiceOutcome::Action(voice_command::MatchedAction {
+                connected: true,
+                ..
+            })
+        ));
+
+        let invoke_manager = Arc::clone(&manager);
+        let invocation = tokio::spawn(async move {
+            invoke_manager
+                .invoke_action(
+                    "com.example.voice-demo",
+                    "demo.say_hello",
+                    Duration::from_secs(2),
+                )
+                .await
+        });
+        let action_request = receive_client_json(&mut client_socket).await;
+        assert_eq!(action_request["method"], "action.invoke");
+        assert_eq!(action_request["params"]["action"], "demo.say_hello");
+        assert_eq!(action_request["params"]["arguments"], json!({}));
+        send_client_json(
+            &mut client_socket,
+            json!({
+                "jsonrpc": "2.0",
+                "id": action_request["id"],
+                "result": { "text": "你好呀，我是示例客户端。", "mood": "up" }
+            }),
+        )
+        .await;
+        assert_eq!(
+            invocation.await.unwrap().unwrap(),
+            NarrationResult {
+                text: "你好呀，我是示例客户端。".into(),
+                mood: "up".into()
             }
         );
 

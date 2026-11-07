@@ -72,25 +72,28 @@ class TauriCommandContractTests(unittest.TestCase):
                 )
                 self.assertRegex(permissions, rf'"{re.escape(command)}"')
 
-    def test_vscode_explain_command_is_registered_and_allowed(self):
+    def test_generic_action_command_is_registered_and_allowed(self):
         settings = (ROOT / "src/pet/SettingsApp.tsx").read_text(encoding="utf-8")
         rust = (ROOT / "src-tauri/src/main.rs").read_text(encoding="utf-8")
         permissions = (ROOT / "src-tauri/permissions/app.toml").read_text(
             encoding="utf-8"
         )
+        command = "spirit_invoke_action"
 
-        match = re.search(
-            r"invoke\(['\"](?P<command>spirit_invoke_vscode_explain\w*)['\"]\)",
-            settings,
-        )
-        self.assertIsNotNone(match, "VS Code explanation invoke command not found")
-        command = match.group("command")
+        self.assertIn(command, settings)
+        self.assertRegex(settings, rf"invoke\(['\"]{re.escape(command)}['\"]")
         self.assertRegex(rust, rf"fn {re.escape(command)}\s*\(")
         self.assertRegex(
             rust,
             rf"generate_handler!\s*\[[\s\S]*?\b{re.escape(command)}\b",
         )
         self.assertRegex(permissions, rf'"{re.escape(command)}"')
+        # The old per-client invoke commands must not come back: new clients are
+        # reached through the generic command only.
+        self.assertNotIn("spirit_invoke_vscode_explain_selection", settings)
+        self.assertNotIn("spirit_invoke_narrate_current", settings)
+        self.assertNotIn("spirit_invoke_vscode_explain_selection", rust)
+        self.assertNotIn("spirit_invoke_narrate_current", rust)
 
     def test_pet_pack_commands_are_registered_and_allowed(self):
         packs = (ROOT / "src/pet/packs.ts").read_text(encoding="utf-8")

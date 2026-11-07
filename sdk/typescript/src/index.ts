@@ -1,5 +1,6 @@
 export type SpiritMood = 'neutral' | 'up' | 'down'
 export type AnalysisStatus = 'ready' | 'unavailable'
+export type ActionRisk = 'no_state_change' | 'state_change' | 'sensitive'
 
 export interface ClientIdentity {
   id: string
@@ -11,6 +12,32 @@ export interface NarrationResult {
   text: string
   mood: SpiritMood
 }
+
+export interface VoiceCommandDeclaration {
+  examples: string[]
+  locale?: string
+}
+
+export interface ActionDeclaration {
+  id: string
+  risk: ActionRisk
+  description?: string
+  inputSchema?: Record<string, unknown>
+  outputSchema?: Record<string, unknown>
+  supportsCancellation?: boolean
+  /** Client-provided matching hints. They never grant the Action. */
+  voice?: VoiceCommandDeclaration
+}
+
+export interface CapabilitiesDeclaration {
+  actions: ActionDeclaration[]
+  events: { publishes: string[]; subscribes?: string[] }
+}
+
+export type ActionHandler = (
+  signal: AbortSignal,
+  args: Record<string, never>,
+) => Promise<NarrationResult>
 
 export interface CredentialStore {
   get(): Promise<string | null>
@@ -31,7 +58,16 @@ export interface WebSocketLike {
 export interface SpiritClientOptions {
   identity: ClientIdentity
   credentials: CredentialStore
+  /**
+   * Declare a generic client. When omitted, the legacy Siju / VS Code profile
+   * is inferred from `identity.id` and the legacy handler options are used.
+   */
+  capabilities?: CapabilitiesDeclaration
+  /** One handler per declared Action, keyed by Action ID. */
+  handlers?: Record<string, ActionHandler>
+  /** Legacy Siju profile handler. */
   onNarrateCurrent?: (signal: AbortSignal) => Promise<NarrationResult>
+  /** Legacy VS Code profile handler. */
   onExplainSelection?: (signal: AbortSignal) => Promise<NarrationResult>
   endpoint?: string
   connectTimeoutMs?: number
@@ -53,6 +89,7 @@ export class SpiritError extends Error {
 
 type JsonRpcId = string | number
 type JsonObject = Record<string, unknown>
+type LegacyHandlerName = 'onNarrateCurrent' | 'onExplainSelection'
 
 interface PendingRequest {
   resolve: (value: unknown) => void
@@ -64,10 +101,33 @@ interface ClientProfile {
   actionId: 'siju.narrate_current' | 'vscode.explain_selection'
   eventType: 'siju.analysis.status' | 'vscode.editor.status'
   risk: 'no_state_change' | 'sensitive'
-  handler: 'onNarrateCurrent' | 'onExplainSelection'
+  handler: LegacyHandlerName
 }
 
-function profileFor(clientId: string): ClientProfile {
+interface ResolvedAction {
+  id: string
+  risk: ActionRisk
+  description?: string
+  inputSchema: JsonObject
+  outputSchema: JsonObject
+  supportsCancellation: boolean
+  voice?: VoiceCommandDeclaration
+}
+
+interface ResolvedCapabilities {
+  actions: ResolvedAction[]
+  events: { publishes: string[]; subscribes: string[] }
+}
+
+interface Resolution {
+  capabilities: ResolvedCapabilities
+  handlers: Map<string, ActionHandler>
+}
+
+const ACTION_ID_PATTERN = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9_]*)+$/
+const LOCALE_PATTERN = /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/
+
+function profileFor(clientId: string): ClientProfile | null {
   if (clientId === 'com.siju.app') {
     return {
       actionId: 'siju.narrate_current',
@@ -84,29 +144,37 @@ function profileFor(clientId: string): ClientProfile {
       handler: 'onExplainSelection',
     }
   }
-  throw new SpiritError('unsupported_client')
+  return null
 }
 
-function capabilitiesFor(profile: ClientProfile) {
+function defaultInputSchema(): JsonObject {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    properties: {},
+  }
+}
+
+function defaultOutputSchema(): JsonObject {
+  return {
+    type: 'object',
+    required: ['text', 'mood'],
+    properties: {
+      text: { type: 'string', maxLength: 400 },
+      mood: { type: 'string', enum: ['neutral', 'up', 'down'] },
+    },
+    additionalProperties: false,
+  }
+}
+
+function legacyCapabilities(profile: ClientProfile): ResolvedCapabilities {
   return {
     actions: [
       {
         id: profile.actionId,
         risk: profile.risk,
-        inputSchema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {},
-        },
-        outputSchema: {
-          type: 'object',
-          required: ['text', 'mood'],
-          properties: {
-            text: { type: 'string', maxLength: 400 },
-            mood: { type: 'string', enum: ['neutral', 'up', 'down'] },
-          },
-          additionalProperties: false,
-        },
+        inputSchema: defaultInputSchema(),
+        outputSchema: defaultOutputSchema(),
         supportsCancellation: false,
       },
     ],
@@ -114,6 +182,135 @@ function capabilitiesFor(profile: ClientProfile) {
       publishes: [profile.eventType],
       subscribes: [],
     },
+  }
+}
+
+function isPlainObject(value: unknown): value is JsonObject {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function validateActionDeclaration(action: ActionDeclaration): ResolvedAction {
+  if (!isPlainObject(action)) throw new SpiritError('invalid_capabilities')
+  if (typeof action.id !== 'string' || !ACTION_ID_PATTERN.test(action.id)) {
+    throw new SpiritError('invalid_capabilities')
+  }
+  if (
+    action.risk !== 'no_state_change' &&
+    action.risk !== 'state_change' &&
+    action.risk !== 'sensitive'
+  ) {
+    throw new SpiritError('invalid_capabilities')
+  }
+  if (action.description !== undefined) {
+    const description = action.description.trim()
+    if (!description || Array.from(description).length > 120) {
+      throw new SpiritError('invalid_capabilities')
+    }
+  }
+  const inputSchema = action.inputSchema ?? defaultInputSchema()
+  const outputSchema = action.outputSchema ?? defaultOutputSchema()
+  if (!isPlainObject(inputSchema) || !isPlainObject(outputSchema)) {
+    throw new SpiritError('invalid_capabilities')
+  }
+  const supportsCancellation = action.supportsCancellation ?? false
+  if (typeof supportsCancellation !== 'boolean') {
+    throw new SpiritError('invalid_capabilities')
+  }
+  const voice = action.voice
+  if (voice !== undefined) {
+    if (action.risk !== 'no_state_change' || supportsCancellation) {
+      throw new SpiritError('invalid_capabilities')
+    }
+    if (
+      !Array.isArray(voice.examples) ||
+      voice.examples.length < 1 ||
+      voice.examples.length > 12
+    ) {
+      throw new SpiritError('invalid_capabilities')
+    }
+    const seen = new Set<string>()
+    for (const example of voice.examples) {
+      if (typeof example !== 'string') throw new SpiritError('invalid_capabilities')
+      const trimmed = example.trim()
+      const length = Array.from(trimmed).length
+      if (length < 2 || length > 40 || seen.has(trimmed)) {
+        throw new SpiritError('invalid_capabilities')
+      }
+      seen.add(trimmed)
+    }
+    if (voice.locale !== undefined && !LOCALE_PATTERN.test(voice.locale)) {
+      throw new SpiritError('invalid_capabilities')
+    }
+  }
+  return {
+    id: action.id,
+    risk: action.risk,
+    ...(action.description === undefined ? {} : { description: action.description.trim() }),
+    inputSchema,
+    outputSchema,
+    supportsCancellation,
+    ...(voice === undefined ? {} : { voice }),
+  }
+}
+
+function validateEventTypes(eventTypes: unknown): string[] {
+  if (!Array.isArray(eventTypes) || eventTypes.length > 16) {
+    throw new SpiritError('invalid_capabilities')
+  }
+  const seen = new Set<string>()
+  return eventTypes.map((eventType) => {
+    if (typeof eventType !== 'string' || !ACTION_ID_PATTERN.test(eventType) || seen.has(eventType)) {
+      throw new SpiritError('invalid_capabilities')
+    }
+    seen.add(eventType)
+    return eventType
+  })
+}
+
+function normalizeDeclaration(declaration: CapabilitiesDeclaration): ResolvedCapabilities {
+  if (!isPlainObject(declaration) || !Array.isArray(declaration.actions)) {
+    throw new SpiritError('invalid_capabilities')
+  }
+  if (declaration.actions.length > 16) throw new SpiritError('invalid_capabilities')
+  const actions = declaration.actions.map(validateActionDeclaration)
+  const ids = new Set<string>()
+  for (const action of actions) {
+    if (ids.has(action.id)) throw new SpiritError('invalid_capabilities')
+    ids.add(action.id)
+  }
+  if (!isPlainObject(declaration.events)) throw new SpiritError('invalid_capabilities')
+  const publishes = validateEventTypes(declaration.events.publishes)
+  const subscribes = validateEventTypes(declaration.events.subscribes ?? [])
+  return { actions, events: { publishes, subscribes } }
+}
+
+function resolveOptions(options: SpiritClientOptions): Resolution {
+  if (options.capabilities) {
+    const capabilities = normalizeDeclaration(options.capabilities)
+    const handlers = new Map<string, ActionHandler>()
+    for (const action of capabilities.actions) {
+      const handler = options.handlers?.[action.id]
+      if (typeof handler !== 'function') throw new SpiritError('invalid_client_handler')
+      handlers.set(action.id, handler)
+    }
+    for (const declared of Object.keys(options.handlers ?? {})) {
+      if (!capabilities.actions.some((action) => action.id === declared)) {
+        throw new SpiritError('invalid_client_handler')
+      }
+    }
+    return { capabilities, handlers }
+  }
+
+  const profile = profileFor(options.identity.id)
+  if (!profile) throw new SpiritError('unsupported_client')
+  const handler = options[profile.handler]
+  if (typeof handler !== 'function') throw new SpiritError('invalid_client_handler')
+  const legacyCapabilities_ = legacyCapabilities(profile)
+  return {
+    capabilities: legacyCapabilities_,
+    handlers: new Map([
+      [profile.actionId, (signal) => handler(signal)],
+    ]),
   }
 }
 
@@ -163,9 +360,7 @@ function validateNarration(value: unknown): NarrationResult {
   if (
     value.text.trim().length === 0 ||
     Array.from(value.text).length > 400 ||
-    mood !== 'neutral' &&
-      mood !== 'up' &&
-      mood !== 'down'
+    (mood !== 'neutral' && mood !== 'up' && mood !== 'down')
   ) {
     throw new SpiritError('invalid_action_result')
   }
@@ -174,7 +369,8 @@ function validateNarration(value: unknown): NarrationResult {
 
 export class SpiritClient {
   private readonly endpoint: string
-  private readonly profile: ClientProfile
+  private readonly capabilities: ResolvedCapabilities
+  private readonly handlers: Map<string, ActionHandler>
   private readonly socketFactory: (url: string) => WebSocketLike
   private socket: WebSocketLike | null = null
   private state: ConnectionState = 'disconnected'
@@ -184,15 +380,9 @@ export class SpiritClient {
   private actionController: AbortController | null = null
 
   constructor(private readonly options: SpiritClientOptions) {
-    this.profile = profileFor(options.identity.id)
-    if (
-      typeof options[this.profile.handler] !== 'function' ||
-      typeof options[this.profile.handler === 'onNarrateCurrent'
-        ? 'onExplainSelection'
-        : 'onNarrateCurrent'] === 'function'
-    ) {
-      throw new SpiritError('invalid_client_handler')
-    }
+    const resolution = resolveOptions(options)
+    this.capabilities = resolution.capabilities
+    this.handlers = resolution.handlers
     this.endpoint = validateEndpoint(options.endpoint ?? DEFAULT_ENDPOINT)
     this.socketFactory =
       options.createWebSocket ??
@@ -218,7 +408,7 @@ export class SpiritClient {
         {
           pairingCode,
           client: this.options.identity,
-          requestedCapabilities: capabilitiesFor(this.profile),
+          requestedCapabilities: this.capabilities,
         },
         this.options.pairingTimeoutMs ?? 5 * 60_000,
       )
@@ -242,24 +432,11 @@ export class SpiritClient {
     return this.connectionPromise
   }
 
-  async publishAnalysisStatus(status: AnalysisStatus): Promise<void> {
-    if (this.profile.eventType !== 'siju.analysis.status') {
+  async publishEvent(eventType: string, payload: JsonObject): Promise<void> {
+    if (!this.capabilities.events.publishes.includes(eventType)) {
       throw new SpiritError('unsupported_event')
     }
-    return this.publishStatus(this.profile.eventType, status)
-  }
-
-  async publishEditorStatus(status: AnalysisStatus): Promise<void> {
-    if (this.profile.eventType !== 'vscode.editor.status') {
-      throw new SpiritError('unsupported_event')
-    }
-    return this.publishStatus(this.profile.eventType, status)
-  }
-
-  private async publishStatus(eventType: string, status: AnalysisStatus): Promise<void> {
-    if (status !== 'ready' && status !== 'unavailable') {
-      throw new SpiritError('invalid_analysis_status')
-    }
+    if (!isObject(payload)) throw new SpiritError('invalid_event_payload')
     if (this.state !== 'connected' || !this.socket || this.socket.readyState !== OPEN) {
       throw new SpiritError('client_unavailable')
     }
@@ -270,9 +447,29 @@ export class SpiritClient {
         eventId: this.newId(),
         eventType,
         occurredAt: new Date().toISOString(),
-        payload: { status },
+        payload,
       },
     })
+  }
+
+  async publishAnalysisStatus(status: AnalysisStatus): Promise<void> {
+    if (!this.capabilities.events.publishes.includes('siju.analysis.status')) {
+      throw new SpiritError('unsupported_event')
+    }
+    if (status !== 'ready' && status !== 'unavailable') {
+      throw new SpiritError('invalid_analysis_status')
+    }
+    return this.publishEvent('siju.analysis.status', { status })
+  }
+
+  async publishEditorStatus(status: AnalysisStatus): Promise<void> {
+    if (!this.capabilities.events.publishes.includes('vscode.editor.status')) {
+      throw new SpiritError('unsupported_event')
+    }
+    if (status !== 'ready' && status !== 'unavailable') {
+      throw new SpiritError('invalid_analysis_status')
+    }
+    return this.publishEvent('vscode.editor.status', { status })
   }
 
   async unpair(): Promise<void> {
@@ -306,16 +503,17 @@ export class SpiritClient {
       const initialized = await this.request('client.initialize', {
         protocolVersion: '1',
         client: this.options.identity,
-        capabilities: capabilitiesFor(this.profile),
+        capabilities: this.capabilities,
       })
       if (!isObject(initialized) || initialized.protocolVersion !== '1') {
         throw new SpiritError('version_unsupported')
       }
-      if (
-        !Array.isArray(initialized.grantedCapabilities) ||
-        !initialized.grantedCapabilities.includes(this.profile.actionId) ||
-        !initialized.grantedCapabilities.includes(`event.publish:${this.profile.eventType}`)
-      ) {
+      const granted = initialized.grantedCapabilities
+      const required = [
+        ...this.capabilities.actions.map((action) => action.id),
+        ...this.capabilities.events.publishes.map((event) => `event.publish:${event}`),
+      ]
+      if (!Array.isArray(granted) || !required.every((item) => granted.includes(item))) {
         throw new SpiritError('not_authorized')
       }
       this.state = 'connected'
@@ -441,57 +639,58 @@ export class SpiritClient {
     if (typeof id !== 'string' && typeof id !== 'number') return
     const params = message.params
     let response: JsonObject
-    if (
-      !isObject(params) ||
-      params.action !== this.profile.actionId
-    ) {
+    if (!isObject(params)) {
       response = this.errorResponse(id, 'action_not_found')
-    } else if (
-      !isObject(params.arguments) ||
-      Object.keys(params.arguments).length !== 0
-    ) {
-      response = this.errorResponse(id, 'invalid_params')
     } else {
-      const handler = this.options[this.profile.handler]
-      if (!handler) {
+      const action = this.capabilities.actions.find(
+        (declared) => declared.id === params.action,
+      )
+      if (!action) {
         response = this.errorResponse(id, 'action_not_found')
+      } else if (!isObject(params.arguments) || Object.keys(params.arguments).length !== 0) {
+        response = this.errorResponse(id, 'invalid_params')
       } else {
-        const timeoutMs =
-          typeof params.timeoutMs === 'number' &&
-          params.timeoutMs >= 1_000 &&
-          params.timeoutMs <= 120_000
-            ? params.timeoutMs
-            : DEFAULT_TIMEOUT_MS
-        const controller = new AbortController()
-        this.actionController?.abort()
-        this.actionController = controller
-        let timeoutId: ReturnType<typeof setTimeout> | undefined
-        let timedOut = false
-        let rejectOnAbort: (() => void) | undefined
-        try {
-          const narration = await Promise.race([
-            handler(controller.signal).then(validateNarration),
-            new Promise<never>((_, reject) => {
-              rejectOnAbort = () =>
-                reject(new SpiritError(timedOut ? 'deadline_exceeded' : 'client_unavailable'))
-              controller.signal.addEventListener('abort', rejectOnAbort, { once: true })
-            }),
-            new Promise<never>((_, reject) => {
-              timeoutId = setTimeout(() => {
-                timedOut = true
-                controller.abort()
-                reject(new SpiritError('deadline_exceeded'))
-              }, timeoutMs)
-            }),
-          ])
-          response = { jsonrpc: '2.0', id, result: narration }
-        } catch (error) {
-          const code = error instanceof SpiritError ? error.code : 'summarizer_unavailable'
-          response = this.errorResponse(id, code)
-        } finally {
-          if (timeoutId) clearTimeout(timeoutId)
-          if (rejectOnAbort) controller.signal.removeEventListener('abort', rejectOnAbort)
-          if (this.actionController === controller) this.actionController = null
+        const handler = this.handlers.get(action.id)
+        if (!handler) {
+          response = this.errorResponse(id, 'action_not_found')
+        } else {
+          const timeoutMs =
+            typeof params.timeoutMs === 'number' &&
+            params.timeoutMs >= 1_000 &&
+            params.timeoutMs <= 120_000
+              ? params.timeoutMs
+              : DEFAULT_TIMEOUT_MS
+          const controller = new AbortController()
+          this.actionController?.abort()
+          this.actionController = controller
+          let timeoutId: ReturnType<typeof setTimeout> | undefined
+          let timedOut = false
+          let rejectOnAbort: (() => void) | undefined
+          try {
+            const narration = await Promise.race([
+              handler(controller.signal, {}).then(validateNarration),
+              new Promise<never>((_, reject) => {
+                rejectOnAbort = () =>
+                  reject(new SpiritError(timedOut ? 'deadline_exceeded' : 'client_unavailable'))
+                controller.signal.addEventListener('abort', rejectOnAbort, { once: true })
+              }),
+              new Promise<never>((_, reject) => {
+                timeoutId = setTimeout(() => {
+                  timedOut = true
+                  controller.abort()
+                  reject(new SpiritError('deadline_exceeded'))
+                }, timeoutMs)
+              }),
+            ])
+            response = { jsonrpc: '2.0', id, result: narration }
+          } catch (error) {
+            const code = error instanceof SpiritError ? error.code : 'summarizer_unavailable'
+            response = this.errorResponse(id, code)
+          } finally {
+            if (timeoutId) clearTimeout(timeoutId)
+            if (rejectOnAbort) controller.signal.removeEventListener('abort', rejectOnAbort)
+            if (this.actionController === controller) this.actionController = null
+          }
         }
       }
     }

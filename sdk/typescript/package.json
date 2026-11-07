@@ -1,7 +1,7 @@
 {
   "name": "@qiling/spirit-client",
-  "version": "0.1.0",
-  "description": "TypeScript client SDK for the implemented Spirit Protocol V1 profile",
+  "version": "0.2.0",
+  "description": "TypeScript client SDK for Spirit Protocol V1, including generic clients and voice command declarations",
   "type": "module",
   "engines": {
     "node": ">=22"
