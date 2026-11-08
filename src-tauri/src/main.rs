@@ -243,6 +243,8 @@ async fn qiling_music_pick_files(app: AppHandle) -> Result<Vec<String>, String> 
 
 #[tauri::command]
 fn qiling_music_library_get(state: State<AppState>) -> music_library::MusicLibraryView {
+    // view() 只读内存快照，命中主线程也不做文件 IO；过期时在后台刷新可用性。
+    state.music_library.refresh_in_background();
     state.music_library.view()
 }
 

@@ -10,11 +10,14 @@
 //! 就让整个音乐功能不可用。
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use data_encoding::HEXLOWER;
@@ -26,6 +29,9 @@ use url::Url;
 pub const MAX_AUDIO_BYTES: u64 = 64 * 1024 * 1024;
 /// 曲库最多容纳的歌曲数，避免设置页/曲库页一次渲染过多条目。
 pub const MAX_TRACKS: usize = 1000;
+/// 可用性快照的后台刷新间隔。目录在 UNC 网络上时逐文件 stat 很贵
+/// （224 首要 2~4 秒），所以只在过期后由后台线程扫描，`view()` 只碰内存。
+const REVALIDATE_AFTER: Duration = Duration::from_secs(300);
 pub const MAX_NAME_CHARS: usize = 120;
 pub const MAX_URL_CHARS: usize = 2048;
 
@@ -129,10 +135,26 @@ fn library_version() -> u32 {
     1
 }
 
+/// 单曲在磁盘上的状态快照；`view()` 只读这里，不碰文件系统。
+#[derive(Debug, Clone, Copy, Default)]
+struct TrackState {
+    available: bool,
+    cached: bool,
+    cache_bytes: u64,
+}
+
+struct LibraryInner {
+    tracks: Vec<MusicTrack>,
+    states: HashMap<String, TrackState>,
+    cache: CacheStats,
+}
+
 pub struct MusicLibraryStore {
     path: PathBuf,
     cache_dir: PathBuf,
-    inner: Mutex<Vec<MusicTrack>>,
+    inner: Mutex<LibraryInner>,
+    last_checked: Mutex<Option<Instant>>,
+    checking: AtomicBool,
 }
 
 impl MusicLibraryStore {
@@ -156,10 +178,27 @@ impl MusicLibraryStore {
             }
         }
         let _ = fs::create_dir_all(&cache_dir);
+        let mut states = HashMap::with_capacity(tracks.len());
+        for track in &tracks {
+            // 网络歌曲的缓存目录在本机应用数据里，启动时探测很便宜；本地曲目
+            // 可能在 UNC 共享上，统一留给后台线程。
+            let state = match track.kind {
+                MusicKind::Local => optimistic_state(track),
+                MusicKind::Remote => probe_track(&cache_dir, track),
+            };
+            states.insert(track.id.clone(), state);
+        }
+        let cache = cache_stats(&cache_dir);
         Self {
             path,
             cache_dir,
-            inner: Mutex::new(tracks),
+            inner: Mutex::new(LibraryInner {
+                tracks,
+                states,
+                cache,
+            }),
+            last_checked: Mutex::new(None),
+            checking: AtomicBool::new(false),
         }
     }
 
@@ -167,24 +206,121 @@ impl MusicLibraryStore {
         &self.cache_dir
     }
 
+    /// 纯内存快照。Tauri 的同步命令跑在主线程上，这里做任何文件 IO 都会卡住
+    /// 整个应用：曲库放在 UNC 网络共享时，一次逐文件 stat 要 2~4 秒，连拖动
+    /// 窗口都会停。可用性由 [`Self::refresh_in_background`] 在后台刷新。
     pub fn view(&self) -> MusicLibraryView {
-        let tracks = self
-            .inner
-            .lock()
-            .map(|data| data.clone())
-            .unwrap_or_default();
-        self.view_of(&tracks)
+        match self.inner.lock() {
+            Ok(inner) => self.view_locked(&inner),
+            Err(_) => MusicLibraryView {
+                tracks: Vec::new(),
+                cache: CacheStats { files: 0, bytes: 0 },
+                storage_dir: self.storage_dir(),
+            },
+        }
+    }
+
+    /// 快照过期时在后台线程重新探测文件可用性；调用方立刻返回，不阻塞 UI。
+    pub fn refresh_in_background(self: &Arc<Self>) {
+        if !self.should_revalidate() || self.checking.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let store = Arc::clone(self);
+        std::thread::spawn(move || {
+            store.revalidate();
+            store.checking.store(false, Ordering::Release);
+        });
+    }
+
+    fn should_revalidate(&self) -> bool {
+        match self.last_checked.lock() {
+            Ok(checked) => checked
+                .map(|at: Instant| at.elapsed() >= REVALIDATE_AFTER)
+                .unwrap_or(true),
+            Err(_) => true,
+        }
+    }
+
+    fn revalidate(&self) {
+        let (tracks, cache_dir) = match self.inner.lock() {
+            Ok(inner) => (inner.tracks.clone(), self.cache_dir.clone()),
+            Err(_) => return,
+        };
+        // 慢 IO 在锁外进行，`view()` 不会被它挡住。
+        let checked: HashMap<String, TrackState> = tracks
+            .iter()
+            .map(|track| (track.id.clone(), probe_track(&cache_dir, track)))
+            .collect();
+        let cache = cache_stats(&cache_dir);
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        // 扫描期间曲库可能被增删：只保留仍然存在的曲目状态。
+        let alive: HashSet<&str> = inner.tracks.iter().map(|track| track.id.as_str()).collect();
+        inner.states = checked
+            .into_iter()
+            .filter(|(id, _)| alive.contains(id.as_str()))
+            .collect();
+        inner.cache = cache;
+        drop(inner);
+        if let Ok(mut at) = self.last_checked.lock() {
+            *at = Some(Instant::now());
+        }
+    }
+
+    fn view_locked(&self, inner: &LibraryInner) -> MusicLibraryView {
+        let tracks = inner
+            .tracks
+            .iter()
+            .map(|track| {
+                let state = inner
+                    .states
+                    .get(&track.id)
+                    .copied()
+                    .unwrap_or_else(|| optimistic_state(track));
+                let mime = track.mime.clone().or_else(|| {
+                    if track.kind == MusicKind::Local {
+                        mime_for_path(Path::new(&track.location))
+                    } else {
+                        None
+                    }
+                });
+                MusicTrackView {
+                    id: track.id.clone(),
+                    kind: track.kind,
+                    name: track.name.clone(),
+                    location: track.location.clone(),
+                    added_at: track.added_at,
+                    mime,
+                    available: state.available,
+                    cached: state.cached,
+                    cache_bytes: state.cache_bytes,
+                }
+            })
+            .collect();
+        MusicLibraryView {
+            tracks,
+            cache: inner.cache,
+            storage_dir: self.storage_dir(),
+        }
+    }
+
+    fn storage_dir(&self) -> String {
+        self.path
+            .parent()
+            .map(|dir| dir.to_string_lossy().to_string())
+            .unwrap_or_default()
     }
 
     pub fn track(&self, id: &str) -> Option<MusicTrack> {
         self.inner
             .lock()
             .ok()
-            .and_then(|data| data.iter().find(|track| track.id == id).cloned())
+            .and_then(|inner| inner.tracks.iter().find(|track| track.id == id).cloned())
     }
 
     pub fn add_local(&self, paths: Vec<String>) -> Result<AddLocalResult, String> {
-        let mut data = self
+        let mut inner = self
             .inner
             .lock()
             .map_err(|_| "music_library_unavailable".to_string())?;
@@ -204,12 +340,12 @@ impl MusicLibraryStore {
                 continue;
             }
             let identity = raw.to_lowercase();
-            if data.iter().any(|track| {
+            if inner.tracks.iter().any(|track| {
                 track.kind == MusicKind::Local && track.location.to_lowercase() == identity
             }) {
                 continue;
             }
-            if data.len() >= MAX_TRACKS {
+            if inner.tracks.len() >= MAX_TRACKS {
                 rejected.push(RejectedTrack {
                     name: display_local_name(&raw),
                     reason: "music_library_full".to_string(),
@@ -225,10 +361,19 @@ impl MusicLibraryStore {
                 mime: mime_for_path(&path),
             };
             added_ids.push(track.id.clone());
-            data.push(track);
+            // 刚通过存在性与大小校验，直接记成可用，不必再 stat 一次。
+            inner.states.insert(
+                track.id.clone(),
+                TrackState {
+                    available: true,
+                    cached: false,
+                    cache_bytes: 0,
+                },
+            );
+            inner.tracks.push(track);
         }
-        save_locked(&self.path, &data)?;
-        let view = self.view_of(&data);
+        save_locked(&self.path, &inner.tracks)?;
+        let view = self.view_locked(&inner);
         Ok(AddLocalResult {
             library: view,
             added_ids,
@@ -238,17 +383,18 @@ impl MusicLibraryStore {
 
     pub fn add_remote(&self, name: String, url: String) -> Result<MusicLibraryView, String> {
         let (location, parsed) = normalize_remote_url(&url)?;
-        let mut data = self
+        let mut inner = self
             .inner
             .lock()
             .map_err(|_| "music_library_unavailable".to_string())?;
-        if data
+        if inner
+            .tracks
             .iter()
             .any(|track| track.kind == MusicKind::Remote && track.location == location)
         {
-            return Ok(self.view_of(&data));
+            return Ok(self.view_locked(&inner));
         }
-        if data.len() >= MAX_TRACKS {
+        if inner.tracks.len() >= MAX_TRACKS {
             return Err("music_library_full".to_string());
         }
         let track = MusicTrack {
@@ -259,111 +405,122 @@ impl MusicLibraryStore {
             added_at: now_ms(),
             mime: None,
         };
-        data.push(track);
-        save_locked(&self.path, &data)?;
-        Ok(self.view_of(&data))
+        inner.states.insert(track.id.clone(), TrackState::default());
+        inner.tracks.push(track);
+        save_locked(&self.path, &inner.tracks)?;
+        Ok(self.view_locked(&inner))
     }
 
     pub fn remove(&self, id: &str) -> Result<MusicLibraryView, String> {
-        let mut data = self
+        let mut inner = self
             .inner
             .lock()
             .map_err(|_| "music_library_unavailable".to_string())?;
-        let removed = data
-            .iter()
-            .find(|track| track.id == id)
-            .cloned();
-        data.retain(|track| track.id != id);
+        let removed = inner.tracks.iter().find(|track| track.id == id).cloned();
+        inner.tracks.retain(|track| track.id != id);
+        inner.states.remove(id);
+        let mut cache_touched = false;
         if let Some(track) = removed {
             if track.kind == MusicKind::Remote {
                 let _ = fs::remove_file(cache_path(&self.cache_dir, &track.location));
                 let _ = fs::remove_file(cache_part_path(&self.cache_dir, &track.location));
+                cache_touched = true;
             }
         }
-        save_locked(&self.path, &data)?;
-        Ok(self.view_of(&data))
+        if cache_touched {
+            inner.cache = cache_stats(&self.cache_dir);
+        }
+        save_locked(&self.path, &inner.tracks)?;
+        Ok(self.view_locked(&inner))
     }
 
     pub fn clear(&self) -> Result<MusicLibraryView, String> {
-        let mut data = self
+        let mut inner = self
             .inner
             .lock()
             .map_err(|_| "music_library_unavailable".to_string())?;
-        data.clear();
-        save_locked(&self.path, &data)?;
+        inner.tracks.clear();
+        inner.states.clear();
+        inner.cache = CacheStats { files: 0, bytes: 0 };
+        save_locked(&self.path, &inner.tracks)?;
         let _ = remove_cache_files(&self.cache_dir);
-        Ok(self.view_of(&data))
+        Ok(self.view_locked(&inner))
     }
 
     /// 只删网络缓存，不动曲目；下次播放会重新下载。
     pub fn clear_cache(&self) -> Result<CacheStats, String> {
         let stats = cache_stats(&self.cache_dir);
         remove_cache_files(&self.cache_dir)?;
-        Ok(stats)
-    }
-
-    /// 网络下载完成后回填 MIME，避免前端只能靠扩展名猜。
-    pub fn set_mime(&self, id: &str, mime: &str) -> Result<(), String> {
-        let mut data = self
+        let mut inner = self
             .inner
             .lock()
             .map_err(|_| "music_library_unavailable".to_string())?;
-        let Some(track) = data.iter_mut().find(|track| track.id == id) else {
-            return Err("music_track_missing".to_string());
-        };
-        if track.mime.as_deref() == Some(mime) {
-            return Ok(());
+        let LibraryInner {
+            tracks,
+            states,
+            cache,
+        } = &mut *inner;
+        for track in tracks.iter() {
+            if track.kind == MusicKind::Remote {
+                states.insert(track.id.clone(), TrackState::default());
+            }
         }
-        track.mime = Some(mime.to_string());
-        save_locked(&self.path, &data)
+        *cache = CacheStats { files: 0, bytes: 0 };
+        Ok(stats)
     }
 
-    fn view_of(&self, data: &[MusicTrack]) -> MusicLibraryView {
-        let tracks = data
-            .iter()
-            .map(|track| {
-                let path = Path::new(&track.location);
-                let (available, cached, cache_bytes) = match track.kind {
-                    MusicKind::Local => (path.is_file(), false, 0),
-                    MusicKind::Remote => {
-                        let cache = cache_path(&self.cache_dir, &track.location);
-                        match fs::metadata(&cache) {
-                            Ok(meta) if meta.is_file() && meta.len() > 0 => {
-                                (true, true, meta.len())
-                            }
-                            _ => (false, false, 0),
-                        }
-                    }
-                };
-                let mime = track.mime.clone().or_else(|| {
-                    if track.kind == MusicKind::Local {
-                        mime_for_path(path)
-                    } else {
-                        None
-                    }
-                });
-                MusicTrackView {
-                    id: track.id.clone(),
-                    kind: track.kind,
-                    name: track.name.clone(),
-                    location: track.location.clone(),
-                    added_at: track.added_at,
-                    mime,
-                    available,
-                    cached,
-                    cache_bytes,
-                }
-            })
-            .collect();
-        MusicLibraryView {
-            tracks,
-            cache: cache_stats(&self.cache_dir),
-            storage_dir: self
-                .path
-                .parent()
-                .map(|dir| dir.to_string_lossy().to_string())
-                .unwrap_or_default(),
+    /// 网络下载完成后回填 MIME，避免前端只能靠扩展名猜；顺带刷新这条缓存的状态。
+    pub fn set_mime(&self, id: &str, mime: &str) -> Result<(), String> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| "music_library_unavailable".to_string())?;
+        let Some(index) = inner.tracks.iter().position(|track| track.id == id) else {
+            return Err("music_track_missing".to_string());
+        };
+        if inner.tracks[index].mime.as_deref() == Some(mime) {
+            return Ok(());
         }
+        inner.tracks[index].mime = Some(mime.to_string());
+        save_locked(&self.path, &inner.tracks)?;
+        // 下载已经落盘，这条曲目的 cached / cache_bytes 立刻生效，
+        // 不用等下一轮后台探测。
+        let state = probe_track(&self.cache_dir, &inner.tracks[index]);
+        inner.states.insert(id.to_string(), state);
+        inner.cache = cache_stats(&self.cache_dir);
+        Ok(())
+    }
+}
+
+fn optimistic_state(track: &MusicTrack) -> TrackState {
+    match track.kind {
+        // 本地文件先按“可用”展示；真实探测交给后台线程，避免把 UNC 路径的
+        // 逐文件 stat 拉进主线程。文件确实丢了的话，播放时会报 music_file_missing。
+        MusicKind::Local => TrackState {
+            available: true,
+            cached: false,
+            cache_bytes: 0,
+        },
+        // 网络歌曲首次加入时还没有缓存。
+        MusicKind::Remote => TrackState::default(),
+    }
+}
+
+fn probe_track(cache_dir: &Path, track: &MusicTrack) -> TrackState {
+    match track.kind {
+        MusicKind::Local => TrackState {
+            available: Path::new(&track.location).is_file(),
+            cached: false,
+            cache_bytes: 0,
+        },
+        MusicKind::Remote => match fs::metadata(cache_path(cache_dir, &track.location)) {
+            Ok(meta) if meta.is_file() && meta.len() > 0 => TrackState {
+                available: true,
+                cached: true,
+                cache_bytes: meta.len(),
+            },
+            _ => TrackState::default(),
+        },
     }
 }
 
@@ -692,6 +849,8 @@ mod tests {
         let cache = cache_path(&cache_dir, url);
         fs::write(&cache, b"12345678").unwrap();
         store.add_remote(String::new(), url.into()).unwrap();
+        // 磁盘状态由后台探测刷新；生产里 `refresh_in_background` 会调它。
+        store.revalidate();
         let view = store.view();
         assert_eq!(view.cache.files, 1);
         assert_eq!(view.cache.bytes, 8);
@@ -699,7 +858,26 @@ mod tests {
         assert_eq!(view.tracks[0].cache_bytes, 8);
         let stats = store.clear_cache().unwrap();
         assert_eq!(stats.files, 1);
-        assert_eq!(store.view().cache.files, 0);
+        let view = store.view();
+        assert_eq!(view.cache.files, 0);
+        assert!(!view.tracks[0].cached);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn view_stays_memory_only_until_revalidate() {
+        let dir = temp_dir("view-cache");
+        let store = store(&dir);
+        let song = fake_track(&dir, "gone.mp3");
+        store.add_local(vec![song.clone()]).unwrap();
+        fs::remove_file(&song).unwrap();
+
+        // 契约：view() 不碰文件系统（它跑在 Tauri 主线程上），所以删除文件后
+        // 仍返回上一次快照里的可用状态。
+        assert!(store.view().tracks[0].available);
+        // 显式后台探测才会更新快照。
+        store.revalidate();
+        assert!(!store.view().tracks[0].available);
         let _ = fs::remove_dir_all(dir);
     }
 
