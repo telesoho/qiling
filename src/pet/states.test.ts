@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   IDLE_BEATS,
   PET_STATES,
+  breathBeatOption,
   builtinBeatOptions,
   isPetStateId,
   packBeatOptions,
@@ -60,6 +61,15 @@ describe('器灵姿势', () => {
     const onlyBreath = builtinBeatOptions((track) => track === 'idle')
     expect(onlyBreath.map((option) => option.key)).toEqual(['breath'])
     expect(onlyBreath[0]).toMatchObject({ track: 'idle', line: IDLE_BEATS.breath.line })
+  })
+
+  it('gives the svg character nothing but breathing', () => {
+    expect(breathBeatOption()).toMatchObject({
+      key: 'breath',
+      track: 'idle',
+      line: IDLE_BEATS.breath.line,
+      ms: IDLE_BEATS.breath.ms,
+    })
   })
 
   it('uses declared pack beats, or butterfly/angry as the fallback', () => {

@@ -95,6 +95,86 @@ class TauriCommandContractTests(unittest.TestCase):
         self.assertNotIn("spirit_invoke_vscode_explain_selection", rust)
         self.assertNotIn("spirit_invoke_narrate_current", rust)
 
+    def test_music_sense_commands_are_registered_and_allowed(self):
+        pet = (ROOT / "src/pet/PetApp.tsx").read_text(encoding="utf-8")
+        settings = (ROOT / "src/pet/SettingsApp.tsx").read_text(encoding="utf-8")
+        sense = (ROOT / "src/pet/useMusicSense.ts").read_text(encoding="utf-8")
+        rust = (ROOT / "src-tauri/src/main.rs").read_text(encoding="utf-8")
+        music = (ROOT / "src-tauri/src/music.rs").read_text(encoding="utf-8")
+        permissions = (ROOT / "src-tauri/permissions/app.toml").read_text(
+            encoding="utf-8"
+        )
+
+        for command, frontend in (
+            ("qiling_music_sense_start", sense),
+            ("qiling_music_sense_stop", sense),
+            ("qiling_music_sense_status", sense),
+            ("qiling_music_sense_configure", sense),
+        ):
+            with self.subTest(command=command):
+                self.assertIn(command, frontend)
+                self.assertRegex(rust, rf"fn {re.escape(command)}\s*\(")
+                self.assertRegex(
+                    rust,
+                    rf"generate_handler!\s*\[[\s\S]*?\b{re.escape(command)}\b",
+                )
+                self.assertRegex(permissions, rf'"{re.escape(command)}"')
+
+        # 设定页要能显示监听状态；隐藏器灵必须停止采集。
+        self.assertIn("loadMusicSenseStatus", settings)
+        self.assertRegex(
+            rust,
+            r"fn set_pet_open[\s\S]*?state\.music\.stop\(\)",
+        )
+        # 采集只做实时分析，不落盘。
+        self.assertNotIn("fs::write", music)
+        self.assertNotIn("File::create", music)
+        self.assertNotIn("std::fs", music)
+
+    def test_music_library_commands_are_registered_and_allowed(self):
+        music_app = (ROOT / "src/pet/MusicApp.tsx").read_text(encoding="utf-8")
+        library = (ROOT / "src/pet/musicLibrary.ts").read_text(encoding="utf-8")
+        local = (ROOT / "src/pet/useLocalMusic.ts").read_text(encoding="utf-8")
+        settings = (ROOT / "src/pet/SettingsApp.tsx").read_text(encoding="utf-8")
+        rust = (ROOT / "src-tauri/src/main.rs").read_text(encoding="utf-8")
+        permissions = (ROOT / "src-tauri/permissions/app.toml").read_text(
+            encoding="utf-8"
+        )
+        capability = (ROOT / "src-tauri/capabilities/music.json").read_text(
+            encoding="utf-8"
+        )
+        default_capability = (ROOT / "src-tauri/capabilities/default.json").read_text(
+            encoding="utf-8"
+        )
+
+        for command, source in (
+            ("qiling_music_open", settings),
+            ("qiling_music_pick_files", library),
+            ("qiling_music_library_get", library),
+            ("qiling_music_library_add_local", library),
+            ("qiling_music_library_add_remote", library),
+            ("qiling_music_library_remove", library),
+            ("qiling_music_library_clear", library),
+            ("qiling_music_track_audio", local),
+            ("qiling_music_cache_clear", library),
+        ):
+            with self.subTest(command=command):
+                self.assertIn(command, source)
+                self.assertRegex(rust, rf"fn {re.escape(command)}\s*\(")
+                self.assertRegex(
+                    rust,
+                    rf"generate_handler!\s*\[[\s\S]*?\b{re.escape(command)}\b",
+                )
+                self.assertRegex(permissions, rf'"{re.escape(command)}"')
+
+        # 曲库窗口自己一份最小权限；pet/settings 用同一组命令。
+        self.assertIn("allow-music-commands", permissions)
+        self.assertIn("allow-music-commands", capability)
+        self.assertRegex(capability, r'"windows"\s*:\s*\["music"\]')
+        self.assertIn("allow-music-commands", default_capability)
+        # 曲库窗口页面也要有入口。
+        self.assertIn("曲库", music_app)
+
     def test_pet_pack_commands_are_registered_and_allowed(self):
         packs = (ROOT / "src/pet/packs.ts").read_text(encoding="utf-8")
         page = (ROOT / "src/pet/PacksApp.tsx").read_text(encoding="utf-8")

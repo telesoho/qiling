@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import { frameUrl, phaseImageUrl } from './anim'
-import { createPackLibrary, formatInstalledAt, packErrorMessage, type PackRuntime } from './packs'
+import {
+  DEFAULT_CHARACTER,
+  SHIJU_CHARACTER,
+  createPackLibrary,
+  formatInstalledAt,
+  loadCharacterAssets,
+  packErrorMessage,
+  rendererOf,
+  type PackRuntime,
+} from './packs'
 
 const runtime: PackRuntime = {
   character: { id: 'dafeiyu', name: '大肥鱼', builtin: false },
@@ -99,10 +108,25 @@ describe('角色资源包运行时', () => {
   })
 
   it('maps stable error codes to readable Chinese', () => {
-    expect(packErrorMessage('pack_id_invalid')).toContain('id')
-    expect(packErrorMessage('pack_builtin_protected')).toContain('诗琚')
+    expect(packErrorMessage('pack_id_invalid')).toContain('lingpao')
+    expect(packErrorMessage('pack_builtin_protected')).toContain('内置角色')
     expect(packErrorMessage('pack_mvp_tracks_missing:think,explain')).toContain('think,explain')
     expect(packErrorMessage('some_new_code')).toContain('some_new_code')
+  })
+
+  it('defaults to the svg character and keeps shiju as a bitmap character', () => {
+    expect(DEFAULT_CHARACTER).toMatchObject({ id: 'lingpao', name: '灵泡', builtin: true })
+    expect(rendererOf(DEFAULT_CHARACTER)).toBe('svg')
+    expect(rendererOf(SHIJU_CHARACTER)).toBe('webp')
+    // 旧数据没有 renderer 字段时按位图处理。
+    expect(rendererOf({ id: 'demo', name: '演示', builtin: false })).toBe('webp')
+  })
+
+  it('loads the svg character without reading the bitmap library', async () => {
+    const assets = await loadCharacterAssets(DEFAULT_CHARACTER)
+    expect(assets.renderer).toBe('svg')
+    expect(assets.library).toBeNull()
+    expect(assets.beats.map((beat) => beat.key)).toEqual(['breath'])
   })
 
   it('formats installed timestamps defensively', () => {

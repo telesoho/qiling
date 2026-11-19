@@ -27,6 +27,10 @@ url = "2"
 uuid = { version = "1.29.0", features = ["v4", "serde"] }
 zip = { version = "2.6", default-features = false, features = ["deflate"] }
 
+# 听音乐：WASAPI 回环只读取默认播放设备的输出，不做麦克风采集。
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_System_Com"] }
+
 [dev-dependencies]
 futures-util = "0.3"
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"] }

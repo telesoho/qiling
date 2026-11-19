@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>灵泡 · 朝向与旋转实验</title>
+<style>
+  :root {
+    --body: #FF6B4A;
+    --body-deep: #E8502F;
+    --ink: #2B1618;
+    --bg: #141518;
+    --bg-soft: #1c1e23;
+    --line: rgba(255,255,255,.10);
+    --text: #F3EDE7;
+    --muted: #9C938C;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 36px 40px 60px;
+    background: radial-gradient(1200px 700px at 50% -10%, #2a2420 0%, var(--bg) 55%) fixed;
+    color: var(--text); font-family: "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1 { margin: 0 0 6px; font-size: 24px; letter-spacing: .04em; }
+  h1 span { color: var(--body); }
+  .sub { margin: 0 0 28px; color: var(--muted); font-size: 13.5px; line-height: 1.7; max-width: 760px; }
+  main { max-width: 1120px; margin: 0 auto; }
+  h2 { font-size: 15px; letter-spacing: .08em; color: var(--muted); font-weight: 600; margin: 34px 0 14px; }
+  h2 b { color: var(--text); font-weight: 700; margin-right: 8px; }
+
+  .lab { display: grid; grid-template-columns: 520px 1fr; gap: 32px; align-items: center;
+    border: 1px solid var(--line); border-radius: 24px; padding: 18px 30px;
+    background: linear-gradient(180deg, var(--bg-soft), transparent); }
+  .stage { position: relative; height: 520px; display: grid; place-items: center; cursor: crosshair; }
+  .stage::after { content: "移动鼠标"; position: absolute; bottom: 10px; font-size: 11px; color: var(--muted); letter-spacing: .1em; }
+  .ctrl h3 { margin: 0 0 8px; font-size: 18px; }
+  .ctrl p { color: var(--muted); font-size: 13px; line-height: 1.8; margin: 0 0 18px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  button {
+    font: inherit; font-size: 12.5px; cursor: pointer; color: var(--muted);
+    background: transparent; border: 1px solid var(--line); border-radius: 999px; padding: 7px 14px;
+    transition: all .16s;
+  }
+  button:hover { color: var(--text); border-color: var(--body); }
+  button:active { transform: scale(.96); }
+
+  .dirs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .dir-row { display: grid; grid-template-columns: 560px 1fr; gap: 34px; align-items: start; }
+  .dir-copy { padding-top: 4px; }
+  .dir-copy p, .dir-copy li { color: var(--muted); font-size: 13px; line-height: 1.85; margin: 0 0 12px; }
+  .dir-copy ul { margin: 0; padding-left: 18px; }
+  .dir-copy li { margin-bottom: 6px; }
+  .dir-copy b { color: var(--text); }
+  .dir-card { border: 1px solid var(--line); border-radius: 16px; background: var(--bg-soft);
+    display: flex; flex-direction: column; align-items: center; padding: 4px 0 8px; }
+  .dir-card .lbl { font-size: 11.5px; color: var(--muted); }
+  .dir-card.center { justify-content: center; }
+  .dir-card.center .lbl { color: var(--text); }
+
+  .gen { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; }
+  .gen .card { border: 1px solid var(--line); border-radius: 16px; background: var(--bg-soft);
+    display: flex; flex-direction: column; align-items: center; padding: 6px 0 8px; }
+  .gen .card .meta { font-size: 10.5px; color: var(--muted); font-family: Consolas, monospace; letter-spacing: .02em; }
+
+  .notes { margin-top: 36px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+  .notes div { border-top: 1px solid var(--line); padding-top: 12px; font-size: 12.5px; color: var(--muted); line-height: 1.75; }
+  .notes b { display: block; color: var(--text); font-size: 13px; margin-bottom: 4px; }
+
+  /* ---- hero ---- */
+  .float-wrap { animation: breathe 3.8s ease-in-out infinite; transform-origin: 90px 209px; }
+  .hero-body { transition: transform .16s ease-out; transform-origin: 90px 165px; }
+  .gaze { transition: transform .12s ease-out; }
+  .spin-fx { transform-origin: 90px 160px; }
+  .hero-body.is-spin { animation: spin .9s cubic-bezier(.4, 0, .2, 1); }
+  .hero-body.is-away .gaze { animation: away 1.1s ease-in-out; }
+  .hero-body.is-away { animation: squash 1.1s ease-in-out; }
+  @keyframes spin { to { transform: rotate(360deg) scale(1); } }
+  @keyframes squash { 0%, 100% { transform: scale(1, 1); } 45% { transform: scale(1.06, .94); } 55% { transform: scale(.96, 1.04); } }
+  @keyframes away { 0%, 100% { opacity: 1; } 40%, 60% { opacity: 0; } }
+  @keyframes breathe { 0%, 100% { transform: scale(1, 1); } 50% { transform: scale(1.015, .98); } }
+</style>
+</head>
+<body>
+<main>
+  <h1>灵泡 <span>·</span> 朝向与旋转实验</h1>
+  <p class="sub">没有脖子、没有独立头部，所以「看哪里」= 眼睛平移 + 身体倾斜；「转」= 转一个分组。下面四块分别验证：跟随鼠标、八个方向、整圈旋转、程序生成变体。</p>
+
+  <section class="lab">
+    <div class="stage" id="stage"></div>
+    <div class="ctrl">
+      <h3>跟随鼠标</h3>
+      <p>眼睛最多平移 7px、身体最多倾斜 11°。指针离开后回正。这是桌宠“注意到你”的最低成本实现——没有额外资源，只有两个 CSS 变量。</p>
+      <div class="row">
+        <button data-dir="left">向左</button>
+        <button data-dir="right">向右</button>
+        <button data-dir="up">向上</button>
+        <button data-dir="down">向下</button>
+      </div>
+      <div class="row">
+        <button data-act="spin">转一圈</button>
+        <button data-act="away">背过身</button>
+        <button data-act="reset">回到待机</button>
+      </div>
+    </div>
+  </section>
+
+  <h2><b>八个方向</b>同一套骨架，只改 gaze 与 tilt 两个参数</h2>
+  <div class="dir-row">
+    <div class="dirs" id="dirs"></div>
+    <div class="dir-copy">
+      <p>没有独立头部，所以方向感来自两件事叠加：<b>眼睛平移</b>与<b>身体倾斜</b>。只做眼睛平移时方向偏弱，加上倾斜就立刻成立。</p>
+      <ul>
+        <li><b>左右</b>：眼睛 ±7px，身体 ±11°，最自然。</li>
+        <li><b>上下</b>：眼睛 ±5px，配合身体色矩形当眼皮（看上抬下眼皮、看下压上眼皮）。</li>
+        <li><b>斜向</b>：两者叠加，倾斜取小一点（±7°），否则会像歪头卖萌。</li>
+      </ul>
+      <p>这套参数已经能覆盖“看鼠标”“看向气泡”“看向被解释的对象”，不需要任何新美术。</p>
+    </div>
+  </div>
+
+  <h2><b>程序生成</b>形状 / 颜色 / 倾斜 / 眼睛，一次生成一整排</h2>
+  <div class="row"><button id="regen">重新生成</button><span style="font-size:12px;color:var(--muted);align-self:center">同一 seed 可复现</span></div>
+  <div class="gen" id="gen"></div>
+
+  <section class="notes">
+    <div><b>能做的</b>八方向注视、±20° 身体倾斜、整圈 360° 旋转、背过身（隐藏眼睛）、挤压回弹。全部是 transform，没有逐帧资源。</div>
+    <div><b>读感技巧</b>只看眼睛平移，方向感偏弱；加上身体倾斜，方向立刻成立。向下看时用身体色矩形盖住眼睛上半部当眼皮。</div>
+    <div><b>不能做的</b>真正的 3D 转身（背面朝前）。2D 里“背过身”只能隐藏眼睛 + 快速翻转，适合一两秒的表演，不适合长时间停留。</div>
+  </section>
+</main>
+
+<script>
+(function () {
+  const INK = '#2B1618';
+
+  function pet(o) {
+    const body = o.body || '#FF6B4A';
+    const gx = o.gx || 0, gy = o.gy || 0, tilt = o.tilt || 0;
+    const sx = o.sx || 1, sy = o.sy || 1;
+    const lid = o.lid || 0;           // >0 上眼皮盖住比例；<0 下眼皮
+    const w = o.w || 180;
+
+    // 轮廓变体：单角色用 pear；生成器里可换，证明同一套五官能套不同壳
+    const bodyFill = ({
+      pear: `<path d="M90 101 C119 101 143 123 145 155 C147 189 123 209 90 209 C57 209 33 189 35 155 C37 123 61 101 90 101 Z" fill="${body}"/>`,
+      round: `<ellipse cx="90" cy="157" rx="54" ry="53" fill="${body}"/>`,
+      square: `<rect x="37" y="104" width="106" height="103" rx="34" fill="${body}"/>`,
+      bean: `<path d="M78 102 C108 96 142 118 143 152 C144 184 120 206 88 207 C58 208 34 190 36 158 C38 128 50 108 78 102 Z" fill="${body}"/>`,
+    })[o.shape || 'pear'];
+
+    const eye = (x) => {
+      const y = 152 + gy;
+      const cx = x + gx;
+      const eyeEl = `<ellipse cx="${cx}" cy="${y}" rx="8.6" ry="12.4" fill="${INK}"/>`;
+      if (!lid) return eyeEl;
+      const h = Math.abs(lid) * 26;
+      const rect = lid > 0
+        ? `<rect x="${cx - 11}" y="${y - 13}" width="22" height="${h}" fill="${body}"/>`
+        : `<rect x="${cx - 11}" y="${y + 13 - h}" width="22" height="${h}" fill="${body}"/>`;
+      return eyeEl + rect;
+    };
+
+    return `<svg width="${w}" height="${(w / 180) * 240}" viewBox="0 0 180 240" role="img">
+      <ellipse cx="90" cy="216" rx="34" ry="6" fill="#000" opacity=".16"/>
+      <g class="float-wrap">
+      <g class="hero-body" transform="rotate(${tilt} 90 165) translate(90 165) scale(${sx} ${sy}) translate(-90 -165)" style="transform-origin:90px 165px">
+        ${bodyFill}
+        <g class="gaze">${eye(71)}${eye(109)}</g>
+      </g>
+      </g>
+    </svg>`;
+  }
+
+  // ---------- hero ----------
+  const stage = document.getElementById('stage');
+  stage.innerHTML = pet({ w: 340, gx: 0, gy: 0, tilt: 0 });
+
+  const bodyEl = () => stage.querySelector('.hero-body');
+  const gazeEl = () => stage.querySelector('.gaze');
+
+  function setLook(px, py) {
+    const r = stage.getBoundingClientRect();
+    const cx = r.left + r.width / 2;
+    const cy = r.top + r.height * 0.62;
+    let dx = (px - cx) / (r.width * 0.42);
+    let dy = (py - cy) / (r.height * 0.42);
+    const m = Math.hypot(dx, dy);
+    if (m > 1) { dx /= m; dy /= m; }
+    apply(dx, dy);
+  }
+
+  function apply(dx, dy) {
+    const gx = dx * 7;
+    const gy = dy * 5;
+    const tilt = dx * 11;
+    const b = bodyEl(), g = gazeEl();
+    if (!b || !g) return;
+    b.style.transform = `rotate(${tilt}deg)`;
+    g.style.transform = `translate(${gx}px, ${gy}px)`;
+  }
+
+  stage.addEventListener('pointermove', (e) => setLook(e.clientX, e.clientY));
+  stage.addEventListener('pointerleave', () => apply(0, 0));
+
+  document.querySelectorAll('[data-dir]').forEach((btn) => {
+    btn.onclick = () => {
+      const d = btn.dataset.dir;
+      apply(d === 'left' ? -1 : d === 'right' ? 1 : 0, d === 'up' ? -1 : d === 'down' ? 1 : 0);
+    };
+  });
+
+  document.querySelectorAll('[data-act]').forEach((btn) => {
+    btn.onclick = () => {
+      const b = bodyEl();
+      const act = btn.dataset.act;
+      b.classList.remove('is-spin', 'is-away');
+      void b.offsetWidth;
+      if (act === 'spin') b.classList.add('is-spin');
+      if (act === 'away') b.classList.add('is-away');
+      if (act === 'reset') apply(0, 0);
+    };
+  });
+
+  // ---------- 8 directions ----------
+  const DIRS = [
+    { label: '左上', gx: -8, gy: -6, tilt: -9 },
+    { label: '上', gx: 0, gy: -7, tilt: 0 },
+    { label: '右上', gx: 8, gy: -6, tilt: 9 },
+    { label: '左', gx: -9, gy: 0, tilt: -11 },
+    null,
+    { label: '右', gx: 9, gy: 0, tilt: 11 },
+    { label: '左下', gx: -8, gy: 6, tilt: -7, lid: 0.32 },
+    { label: '下', gx: 0, gy: 7, tilt: 0, lid: 0.4 },
+    { label: '右下', gx: 8, gy: 6, tilt: 7, lid: 0.32 },
+  ];
+  document.getElementById('dirs').innerHTML = DIRS.map((d) => {
+    if (!d) return `<div class="dir-card center">${pet({ w: 120 })}<div class="lbl">待机 / 居中</div></div>`;
+    return `<div class="dir-card">${pet({ w: 120, ...d })}<div class="lbl">${d.label}</div></div>`;
+  }).join('');
+
+  // ---------- generative variants ----------
+  const PALETTE = [
+    ['#FF6B4A', '#E8502F'], ['#FF9A6B', '#E8703F'], ['#3FD6A6', '#22B486'],
+    ['#A78BFA', '#8464E8'], ['#FFC24B', '#EFA02A'], ['#F5177F', '#CE0A68'],
+    ['#5AA9FF', '#3A88E0'], ['#F2E8DA', '#CFC0AE'],
+  ];
+
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  let seed = 20261107;
+  function paintGen() {
+    const rnd = mulberry32(seed);
+    const shapes = ['pear', 'round', 'square', 'bean'];
+    const items = [];
+    for (let i = 0; i < 12; i++) {
+      const pal = PALETTE[Math.floor(rnd() * PALETTE.length)];
+      const gx = (rnd() * 2 - 1) * 5;
+      const gy = (rnd() * 2 - 1) * 4;
+      const tilt = (rnd() * 2 - 1) * 18;
+      const sx = 0.9 + rnd() * 0.22;
+      const sy = 0.92 + rnd() * 0.18;
+      const lid = rnd() < 0.25 ? (rnd() < 0.5 ? 0.3 : -0.16) : 0;
+      const shape = shapes[Math.floor(rnd() * shapes.length)];
+      items.push(`<div class="card">${pet({ w: 132, body: pal[0], gx, gy, tilt, sx, sy, lid, shape })}<div class="meta">${pal[0].slice(1)} · ${shape}</div></div>`);
+    }
+    document.getElementById('gen').innerHTML = items.join('');
+  }
+  paintGen();
+  document.getElementById('regen').onclick = () => { seed = (seed * 1664525 + 1013904223) >>> 0; paintGen(); };
+
+  // 截图/直链用：?look=left|right|up|down|tr|tl
+  const look = new URLSearchParams(location.search).get('look');
+  if (look) {
+    const map = { left: [-1, 0], right: [1, 0], up: [0, -1], down: [0, 1], tr: [1, -0.7], tl: [-1, -0.7] };
+    const v = map[look];
+    if (v) apply(v[0], v[1]);
+  }
+})();
+</script>
+</body>
+</html>

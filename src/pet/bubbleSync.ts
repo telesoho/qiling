@@ -11,7 +11,7 @@ export interface BubbleSnap {
 
 export const defaultBubbleSnap: BubbleSnap = {
   text: '',
-  name: '诗琚',
+  name: '灵泡',
   voice: true,
   speaking: false,
   open: false,

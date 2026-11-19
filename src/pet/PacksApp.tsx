@@ -55,12 +55,18 @@ function cardMeta(character: CharacterSummary): string {
   return parts.join(' · ')
 }
 
+const BUILTIN_DESCRIPTIONS: Record<string, string> = {
+  lingpao:
+    '纯色小团子 · 待机 / 讲解 / 思考 / 优势 / 劣势 · 听音乐三档律动 · 拖拽拉长',
+  shiju: '红唐装圆扇棋灵 · 待机 / 讲解 / 思考 / 优势 / 劣势 · 吊起四相位',
+}
+
 /** 当前角色大卡片。 */
 export function PackHero({ character }: { character: CharacterSummary }): JSX.Element {
   const description =
     character.description?.trim() ||
     (character.builtin
-      ? '红唐装圆扇棋灵 · 待机 / 讲解 / 思考 / 优势 / 劣势 · 吊起四相位'
+      ? BUILTIN_DESCRIPTIONS[character.id] ?? '内置角色'
       : '用户安装的角色资源包 · 待机 / 姿势 / 吊起按包内动画轨运行')
   return (
     <section className="pack-hero" aria-label="当前角色">
@@ -81,14 +87,14 @@ export function PackHero({ character }: { character: CharacterSummary }): JSX.El
         <p className="pack-hint">
           {character.builtin
             ? '内置角色始终可用，不可卸载。'
-            : '卸载当前角色后会立即回到内置诗琚。'}
+            : '卸载当前角色后会立即回到默认的灵泡。'}
         </p>
       </div>
     </section>
   )
 }
 
-/** 已安装列表：内置诗琚 + 资源包。 */
+/** 已安装列表：内置灵泡、诗琚 + 资源包。 */
 export function PackList({ view, busy, onActivate, onUninstall }: PackListProps): JSX.Element {
   return (
     <div className="pack-grid">
@@ -224,7 +230,7 @@ export default function PacksApp(): JSX.Element {
   }
 
   async function uninstall(character: CharacterSummary): Promise<void> {
-    const fallback = character.active ? '当前角色会立即回到内置诗琚。' : ''
+    const fallback = character.active ? '当前角色会立即回到默认的灵泡。' : ''
     if (!window.confirm(`卸载「${character.name}」？${fallback}`)) return
     setBusy('uninstall')
     setStatus('')

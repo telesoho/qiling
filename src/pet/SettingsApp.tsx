@@ -20,6 +20,16 @@ import {
   packErrorMessage,
   type PacksView,
 } from './packs'
+import {
+  DEFAULT_MUSIC_TUNING,
+  musicErrorMessage,
+  musicFollowLabel,
+  normalizeMusicTuning,
+  type MusicSenseStatus,
+  type MusicTuning,
+} from './music'
+import { loadMusicSenseStatus } from './useMusicSense'
+import { useMusicPlayer } from './useMusicPlayer'
 import { inTauri } from './sync'
 
 interface ClientInfo {
@@ -105,6 +115,39 @@ const defaultLlmProfiles: Record<LlmProvider, Pick<LlmProfile, 'baseUrl' | 'mode
   ollama: { baseUrl: 'http://127.0.0.1:11434', model: 'qwen3.5:4b' },
   deepseek: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-chat' },
   openai_compatible: { baseUrl: 'https://api.openai.com/v1', model: '' },
+}
+
+function MusicThresholdSlider(props: {
+  id: string
+  label: string
+  help: string
+  value: number
+  min: number
+  max: number
+  onChange: (value: number) => void
+}): JSX.Element {
+  const helpId = `${props.id}-help`
+  return (
+    <div className="music-tuning-row">
+      <label htmlFor={props.id}>
+        <span>{props.label}</span>
+        <output htmlFor={props.id}>{props.value.toFixed(2)}</output>
+      </label>
+      <input
+        id={props.id}
+        type="range"
+        min={props.min}
+        max={props.max}
+        step={0.01}
+        value={props.value}
+        aria-describedby={helpId}
+        onChange={(event) => props.onChange(Number(event.target.value))}
+      />
+      <span id={helpId} className="music-tuning-help">
+        {props.help}
+      </span>
+    </div>
+  )
 }
 
 export function settingsForProvider(settings: LlmSettings, provider: LlmProvider): LlmSettings {
@@ -247,6 +290,8 @@ function actionErrorMessage(reason: unknown, clientName: string): string {
 
 export default function SettingsApp(): JSX.Element {
   const native = inTauri()
+  // 曲库播放可能在设定页之外进行；只取状态用于"系统声音监听暂停"的提示。
+  const musicPlayer = useMusicPlayer({ enabled: native, progress: false })
   const [settings, setSettings] = useState<PetSettings>(loadQiLingSettings)
   const [wakeWordDraft, setWakeWordDraft] = useState(() => loadQiLingSettings().wakeWord)
   const [savingWakeWord, setSavingWakeWord] = useState(false)
@@ -285,6 +330,8 @@ export default function SettingsApp(): JSX.Element {
   const [edgeVoiceError, setEdgeVoiceError] = useState('')
   const [characterView, setCharacterView] = useState<PacksView | null>(null)
   const [characterError, setCharacterError] = useState('')
+  const [musicStatus, setMusicStatus] = useState<MusicSenseStatus | null>(null)
+  const [musicStatusError, setMusicStatusError] = useState('')
 
   useEffect(() => watchQiLingSettings(setSettings), [])
   useEffect(() => setWakeWordDraft(settings.wakeWord), [settings.wakeWord])
@@ -321,6 +368,35 @@ export default function SettingsApp(): JSX.Element {
       window.removeEventListener('focus', onFocus)
     }
   }, [native])
+
+  useEffect(() => {
+    if (!native || !settings.music) {
+      setMusicStatus(null)
+      setMusicStatusError('')
+      return
+    }
+    let active = true
+    const refresh = () => {
+      void loadMusicSenseStatus()
+        .then((status) => {
+          if (!active) return
+          setMusicStatus(status)
+          setMusicStatusError(status.lastError ? musicErrorMessage(status.lastError) : '')
+        })
+        .catch((reason: unknown) => {
+          if (active) setMusicStatusError(musicErrorMessage(reason))
+        })
+    }
+    refresh()
+    const timer = window.setInterval(refresh, 2000)
+    const onFocus = () => refresh()
+    window.addEventListener('focus', onFocus)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [native, settings.music])
 
   useEffect(() => {
     if (!('__TAURI_INTERNALS__' in window || '__TAURI__' in window)) return
@@ -522,6 +598,15 @@ export default function SettingsApp(): JSX.Element {
 
   function patch(next: Partial<PetSettings>) {
     saveQiLingSettings({ ...loadQiLingSettings(), ...next })
+  }
+
+  function patchMusicTuning(next: Partial<MusicTuning>) {
+    patch({
+      musicTuning: normalizeMusicTuning({
+        ...loadQiLingSettings().musicTuning,
+        ...next,
+      }),
+    })
   }
 
   async function refreshModels(baseUrl: string) {
@@ -797,6 +882,25 @@ export default function SettingsApp(): JSX.Element {
 
   const activeCharacter = characterView?.characters.find((character) => character.active)
   const packCount = characterView?.characters.filter((character) => !character.builtin).length ?? 0
+  const musicIsForCurrentCharacter =
+    !characterView || activeCharacter?.id === 'lingpao' || activeCharacter === undefined
+  const musicStatusText = !native
+    ? '仅应用内可用'
+    : musicPlayer.state.status === 'playing'
+      ? settings.music
+        ? '曲库音乐播放中（系统声音监听已暂停）'
+        : '曲库音乐播放中（表情跟随已关闭）'
+      : !settings.music
+        ? '已关闭'
+        : musicStatusError
+          ? musicStatusError
+          : !musicIsForCurrentCharacter
+            ? '当前角色不是灵泡，音乐效果只在灵泡上出现'
+            : musicStatus?.running
+              ? musicFollowLabel(musicStatus)
+              : musicStatus?.supported === false
+                ? '当前系统不支持读取系统声音'
+                : '已开启，灵泡显示时会开始跟随'
 
   return (
     <main className="pet-settings" aria-label="设定">
@@ -808,9 +912,9 @@ export default function SettingsApp(): JSX.Element {
       <section className="settings-section" aria-labelledby="character-title">
         <h2 id="character-title">宠物角色</h2>
         <p>
-          当前角色：{activeCharacter?.name ?? '诗琚'}。
+          当前角色：{activeCharacter?.name ?? '灵泡'}。
           {characterView
-            ? `已安装 ${packCount} 个第三方角色资源包；内置诗琚始终可用。`
+            ? `已安装 ${packCount} 个第三方角色资源包；内置灵泡与诗琚始终可用。`
             : '正在读取角色资源包…'}
         </p>
         <p>安装资源包后会立即注册为可选角色；同一时间只有一个角色在场，切换在资源包页面完成。</p>
@@ -818,6 +922,106 @@ export default function SettingsApp(): JSX.Element {
           管理角色资源包…
         </button>
         {characterError && <p className="settings-error" role="alert">{characterError}</p>}
+      </section>
+
+      <section className="settings-section" aria-labelledby="music-title">
+        <h2 id="music-title">听音乐</h2>
+        <label>
+          <input
+            type="checkbox"
+            checked={settings.music}
+            onChange={(event) => patch({ music: event.target.checked })}
+          />
+          听音乐时自动切换状态
+        </label>
+        <p>
+          灵泡会读取系统正在播放的声音，在本机实时分析音量与节拍，自动在“舒缓 / 轻快 /
+          激烈”之间切换并跟着摇摆。只分析声音特征，不录音、不保存、不上传。
+        </p>
+        <p>
+          会先区分音乐与人声：视频里的说话、播客和零散提示音不会让灵泡进入摇摆状态。
+        </p>
+        <p>
+          关闭开关或隐藏器灵后立即停止采集。只读取默认播放设备；独占模式、受版权保护的音频或非默认设备可能听不到。目前只有灵泡支持这个效果。
+        </p>
+        <p role="status" aria-live="polite">监听状态：{musicStatusText}</p>
+        <details className="music-tuning">
+          <summary>识别阈值（进阶）</summary>
+          <p id="music-tuning-help">
+            数值越低越容易触发。音乐判定综合节奏、音色和最近 1 秒的响度占空比，得分连续高于进入阈值 1
+            秒才算音乐、低于退出阈值 1 秒才退出；三档阈值使用 0–1 的平滑能量，并在进入/退出之间保留滞回。
+            调整后立即生效，可随时恢复默认值。
+          </p>
+          <div className="music-tuning-grid" aria-describedby="music-tuning-help">
+            <MusicThresholdSlider
+              id="music-enter-score"
+              label="进入音乐阈值"
+              help="音乐证据得分高于它才进入摇摆；调低会更灵敏，但人声也可能被误判。"
+              value={settings.musicTuning.enterScore}
+              min={0.05}
+              max={0.95}
+              onChange={(enterScore) => patchMusicTuning({ enterScore })}
+            />
+            <MusicThresholdSlider
+              id="music-exit-score"
+              label="退出音乐阈值"
+              help="得分低于它持续 1 秒才退出音乐；必须低于进入阈值。"
+              value={settings.musicTuning.exitScore}
+              min={0.01}
+              max={0.9}
+              onChange={(exitScore) => patchMusicTuning({ exitScore })}
+            />
+            <MusicThresholdSlider
+              id="music-enter-groove"
+              label="轻快进入阈值"
+              help="能量达到这里从“舒缓”切到“轻快”。"
+              value={settings.musicTuning.enterGroove}
+              min={0.05}
+              max={0.95}
+              onChange={(enterGroove) => patchMusicTuning({ enterGroove })}
+            />
+            <MusicThresholdSlider
+              id="music-exit-groove"
+              label="轻快退出阈值"
+              help="能量低于这里从“轻快”回到“舒缓”。"
+              value={settings.musicTuning.exitGroove}
+              min={0.01}
+              max={0.9}
+              onChange={(exitGroove) => patchMusicTuning({ exitGroove })}
+            />
+            <MusicThresholdSlider
+              id="music-enter-intense"
+              label="激烈进入阈值"
+              help="能量达到这里从“轻快”切到“激烈”；必须高于轻快进入阈值。"
+              value={settings.musicTuning.enterIntense}
+              min={0.06}
+              max={0.99}
+              onChange={(enterIntense) => patchMusicTuning({ enterIntense })}
+            />
+            <MusicThresholdSlider
+              id="music-exit-intense"
+              label="激烈退出阈值"
+              help="能量低于这里从“激烈”回到“轻快”。"
+              value={settings.musicTuning.exitIntense}
+              min={0.01}
+              max={0.98}
+              onChange={(exitIntense) => patchMusicTuning({ exitIntense })}
+            />
+          </div>
+          <div className="music-tuning-actions">
+            <button type="button" onClick={() => patch({ musicTuning: { ...DEFAULT_MUSIC_TUNING } })}>
+              恢复默认阈值
+            </button>
+          </div>
+        </details>
+        <h3>曲库</h3>
+        <p>
+          曲库支持本地音频文件与网络音频直链；器灵播放时按曲库顺序进行，关闭曲库窗口也不会停止播放。
+          曲库播放与系统声音共用上面的「听音乐时自动切换状态」开关和三档能量阈值；两个音乐判定分数只作用于系统声音。
+        </p>
+        <button type="button" disabled={!native} onClick={() => void invoke('qiling_music_open')}>
+          打开曲库…
+        </button>
       </section>
 
       <section className="settings-section" aria-labelledby="voice-title">

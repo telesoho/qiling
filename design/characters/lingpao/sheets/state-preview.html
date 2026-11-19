@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>器灵 · 灵泡（提案 v2）— 状态样张</title>
+<style>
+  :root {
+    --body: #FF6B4A;
+    --body-deep: #E8502F;
+    --ink: #2B1618;
+    --cream: #FFF3E6;
+    --gold: #FFC978;
+    --sky: #8FCBFF;
+
+    --bg: #141518;
+    --bg-soft: #1c1e23;
+    --line: rgba(255, 255, 255, 0.10);
+    --text: #F3EDE7;
+    --muted: #9C938C;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: radial-gradient(1200px 700px at 50% -10%, #2a2420 0%, var(--bg) 55%) fixed;
+    color: var(--text);
+    font-family: "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    padding: 40px 40px 64px;
+  }
+  body.is-light {
+    --bg: #F4F1ED; --bg-soft: #FFFFFF; --text: #2E2A27; --muted: #7A716B;
+    --line: rgba(0, 0, 0, 0.10);
+    background: radial-gradient(1200px 700px at 50% -10%, #FFF9F4 0%, var(--bg) 55%) fixed;
+  }
+  header { max-width: 1180px; margin: 0 auto 30px; display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; }
+  h1 { margin: 0; font-size: 26px; letter-spacing: .04em; font-weight: 700; }
+  h1 span { color: #FF6B4A; }
+  .sub { margin: 8px 0 0; color: var(--muted); font-size: 13.5px; line-height: 1.7; max-width: 660px; }
+  .toggle {
+    flex: none; cursor: pointer; border: 1px solid var(--line); color: var(--text);
+    background: var(--bg-soft); border-radius: 999px; padding: 9px 16px; font-size: 13px;
+    font-family: inherit; transition: all .2s;
+  }
+  .toggle:hover { border-color: #FF6B4A; color: #FF6B4A; }
+
+  main { max-width: 1180px; margin: 0 auto; }
+  .hero {
+    display: grid; grid-template-columns: 420px 1fr; gap: 40px; align-items: center;
+    background: linear-gradient(180deg, var(--bg-soft), transparent);
+    border: 1px solid var(--line); border-radius: 24px; padding: 24px 36px; margin-bottom: 30px;
+  }
+  .hero-stage { display: grid; place-items: center; min-height: 420px; }
+  .hero-copy h2 { margin: 0 0 6px; font-size: 20px; }
+  .hero-copy h2 em { font-style: normal; color: #FF6B4A; font-size: 13px; margin-left: 10px; letter-spacing: .08em; }
+  .hero-copy p { color: var(--muted); font-size: 13.5px; line-height: 1.8; margin: 0 0 18px; max-width: 540px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    font: inherit; font-size: 12.5px; cursor: pointer; color: var(--muted);
+    background: transparent; border: 1px solid var(--line); border-radius: 999px; padding: 7px 13px;
+    transition: all .16s;
+  }
+  .chip:hover { color: var(--text); border-color: #FF6B4A; }
+  .chip.is-on { color: #fff; background: #FF6B4A; border-color: #FF6B4A; font-weight: 700; }
+
+  .swatches { display: flex; align-items: center; gap: 10px; margin-top: 18px; }
+  .swatches .lbl { font-size: 12px; color: var(--muted); letter-spacing: .06em; margin-right: 2px; }
+  .sw { width: 22px; height: 22px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; }
+  .sw.is-on { border-color: var(--text); }
+
+  .grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 14px; }
+  @media (max-width: 1100px) { .grid { grid-template-columns: repeat(4, 1fr); } .hero { grid-template-columns: 1fr; } }
+  @media (max-width: 760px) { .grid { grid-template-columns: repeat(3, 1fr); } body { padding: 24px 18px 48px; } }
+
+  .card {
+    border: 1px solid var(--line); border-radius: 18px; padding: 6px 8px 10px;
+    background: var(--bg-soft); display: flex; flex-direction: column; align-items: center;
+    transition: border-color .2s, transform .2s;
+  }
+  .card:hover { border-color: rgba(255, 107, 74, .55); transform: translateY(-2px); }
+  .card .fig { width: 162px; height: 216px; }
+  .card .cap { font-size: 12px; color: var(--muted); margin-top: 0; letter-spacing: .06em; }
+  .card .cap b { color: var(--text); font-weight: 600; margin-right: 6px; }
+  .card .cap i { font-style: normal; opacity: .45; font-size: 11px; }
+
+  .legend { max-width: 1180px; margin: 30px auto 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+  .legend div { border-top: 1px solid var(--line); padding-top: 12px; font-size: 12.5px; color: var(--muted); line-height: 1.75; }
+  .legend b { display: block; color: var(--text); font-size: 13px; margin-bottom: 4px; }
+  .note { max-width: 1180px; margin: 22px auto 0; font-size: 12px; color: var(--muted); line-height: 1.8; }
+  .note code { background: rgba(255,255,255,.06); padding: 1px 5px; border-radius: 4px; font-size: 11.5px; }
+
+  body.is-sheet header, body.is-sheet .hero, body.is-sheet .legend, body.is-sheet .note { display: none; }
+  body.is-sheet { padding: 26px 32px 32px; }
+  body.is-sheet main { max-width: 1100px; }
+  body.is-sheet .grid { grid-template-columns: repeat(6, 1fr); gap: 12px; }
+
+  /* ---------- rig ---------- */
+  .pet { display: block; overflow: visible; }
+  .pet .float { animation: float 4.2s ease-in-out infinite alternate; transform-box: view-box; }
+  .pet .body { animation: breathe 3.8s ease-in-out infinite; transform-box: fill-box; transform-origin: 50% 100%; }
+  .pet .gaze { transform: translate(var(--gx, 0px), var(--gy, 0px)); transition: transform .12s ease-out; }
+  .pet .eye { transform-box: fill-box; transform-origin: center; }
+  .pet .blink { animation: blink 5.4s infinite; }
+  .pet .mouth-talk { animation: flap .15s steps(2, end) infinite; transform-box: fill-box; transform-origin: center; }
+  .pet .note { animation: rise 2.6s ease-out infinite; }
+  .pet .spark { animation: twinkle 2.1s ease-in-out infinite; transform-box: fill-box; transform-origin: center; }
+  .pet .zzz { animation: drift 3.2s ease-in-out infinite; }
+  .pet .steam { animation: steam 2.2s ease-in-out infinite; }
+  .pet .ripple { animation: ripple 2.4s ease-out infinite; transform-box: fill-box; transform-origin: center; }
+  .pet .drop { animation: drip 2.8s ease-in infinite; }
+
+  .s-happy .float { animation: bounce .95s ease-in-out infinite; }
+  .s-angry .float { animation: shake .4s ease-in-out infinite; }
+  .s-sleep .float { animation: sink 5.5s ease-in-out infinite alternate; }
+  .s-surprise .float { animation: pop .65s cubic-bezier(.2, 1.6, .4, 1) both; }
+  .s-music .float { animation: swayLoose 3s ease-in-out infinite alternate; }
+  .s-think .float { animation: ponder 4.6s ease-in-out infinite; }
+  .s-pickup .float { animation: dangle 1.7s ease-in-out infinite; }
+  .s-listen .float { animation: lean 2.6s ease-in-out infinite; }
+
+  @keyframes float { from { transform: translateY(0); } to { transform: translateY(-5px); } }
+  @keyframes breathe { 0%, 100% { transform: scale(1, 1); } 50% { transform: scale(1.018, .972); } }
+  @keyframes bounce { 0%, 100% { transform: translateY(0) scale(1, 1); } 32% { transform: translateY(-15px) scale(.95, 1.06); } 58% { transform: translateY(0) scale(1.07, .93); } }
+  @keyframes shake { 0%, 100% { transform: translateX(-2.4px) rotate(-1.4deg); } 50% { transform: translateX(2.4px) rotate(1.4deg); } }
+  @keyframes sink { from { transform: translateY(0) scale(1, 1); } to { transform: translateY(6px) scale(1.02, .965); } }
+  @keyframes pop { 0% { transform: scale(.84); } 55% { transform: scale(1.1, 1.04); } 100% { transform: scale(1); } }
+  @keyframes ponder { 0%, 100% { transform: rotate(0) translateY(0); } 35% { transform: rotate(3.5deg) translateY(-3px); } 70% { transform: rotate(-1.5deg) translateY(-1px); } }
+  @keyframes dangle { 0%, 100% { transform: rotate(-3deg) translateY(3px); } 50% { transform: rotate(3deg) translateY(-2px); } }
+  @keyframes lean { 0%, 100% { transform: translateY(0) scale(1,1); } 50% { transform: translateY(-2px) scale(1.01, 1.01); } }
+  @keyframes swayLoose { from { transform: rotate(-4deg) translateY(0); } to { transform: rotate(4deg) translateY(-3px); } }
+  @keyframes blink { 0%, 92%, 100% { transform: scaleY(1); } 94.5%, 96.5% { transform: scaleY(.07); } }
+  @keyframes flap { 0%, 100% { transform: scaleY(1); } 50% { transform: scaleY(.3); } }
+  @keyframes rise { 0% { transform: translate(0, 6px); opacity: 0; } 25% { opacity: 1; } 100% { transform: translate(9px, -24px); opacity: 0; } }
+  @keyframes twinkle { 0%, 100% { transform: scale(.5) rotate(0); opacity: .2; } 50% { transform: scale(1.1) rotate(15deg); opacity: 1; } }
+  @keyframes drift { 0%, 100% { transform: translate(0, 0); opacity: .2; } 50% { transform: translate(6px, -11px); opacity: .95; } }
+  @keyframes steam { 0%, 100% { transform: translateY(2px); opacity: .15; } 50% { transform: translateY(-8px); opacity: .8; } }
+  @keyframes ripple { 0% { transform: scale(.7); opacity: 0; } 35% { opacity: .5; } 100% { transform: scale(1.2); opacity: 0; } }
+  @keyframes drip { 0% { transform: translateY(0); opacity: 0; } 18% { opacity: 1; } 82% { transform: translateY(13px); opacity: .85; } 100% { transform: translateY(16px); opacity: 0; } }
+
+  @media (prefers-reduced-motion: reduce) { .pet * { animation: none !important; } }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>灵泡 <span>LINGPAO</span> · 状态样张 v2</h1>
+    <p class="sub">参考 Grok Bot 的极简语言：一个纯色块、两只眼睛。所有状态都由同一套骨架的参数组合而成，不是一张张画出来的。</p>
+  </div>
+  <button class="toggle" id="toggle">切换浅色桌面</button>
+</header>
+
+<main>
+  <section class="hero">
+    <div class="hero-stage"><div id="hero"></div></div>
+    <div class="hero-copy">
+      <h2 id="hero-name">待机 <em>IDLE</em></h2>
+      <p id="hero-desc">轻微漂浮 + 呼吸形变，每 5 秒眨一次眼。默认不画嘴——两只眼睛就是全部五官，这是极简风格的关键。</p>
+      <div class="chips" id="chips"></div>
+      <div class="swatches" id="swatches">
+        <span class="lbl">配色</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="grid" id="grid"></section>
+
+  <section class="legend">
+    <div><b>眼睛 = 情绪</b>竖椭圆是默认脸。弯成 ∩ 是开心，压扁旋转是生气，放大是惊讶，变成星星是得意。不需要眉毛和嘴也能读懂七成情绪。</div>
+    <div><b>身体 = 生命力</b>呼吸、漂浮、弹跳、抖动、下沉。没有手脚之后，身体本身就是第二表情通道，而且全是两三个关键帧的 transform。</div>
+    <div><b>道具 = 语境</b>耳机、音符、灯泡、省略号、汗滴、蒸汽、Zzz、声波。道具一出现，状态就有确定含义，且全部是纯色块 + 统一描边，能贴在任意桌面上。</div>
+  </section>
+
+  <p class="note" id="note"></p>
+</main>
+
+<script>
+(function () {
+  const PALETTE = [
+    { name: '珊瑚（品牌色）', body: '#FF6B4A', deep: '#E8502F' },
+    { name: '蜜桃', body: '#FF9A6B', deep: '#E8703F' },
+    { name: '薄荷', body: '#3FD6A6', deep: '#22B486' },
+    { name: '薰衣草', body: '#A78BFA', deep: '#8464E8' },
+    { name: '黄油', body: '#FFC24B', deep: '#EFA02A' },
+    { name: '莓红', body: '#F5177F', deep: '#CE0A68' },
+  ];
+
+  const STATES = {
+    idle:        { label: '待机',   en: 'idle',         eye: 'open',   mouth: 'none',  tilt: 0,  prop: 'none',   fx: 'none',   desc: '呼吸、漂浮、每 5 秒左右眨一次眼，眼睛会跟着鼠标走。没有嘴——两只眼睛就是全部五官。' },
+    music:       { label: '听音乐', en: 'listen music', eye: 'happy',  mouth: 'none',  tilt: -4, prop: 'music',  fx: 'notes',  desc: '闭眼笑 + 耳机 + 轻微摇摆。真正的节拍反应（舒缓/轻快/激烈）在 music-lab 里。' },
+    happy:       { label: '开心',   en: 'happy',        eye: 'happy',  mouth: 'grin',  tilt: 0,  prop: 'none',   fx: 'sparkles', desc: '弯眼大笑 + 弹跳 + 星星。没有手之后，开心靠“弹得更高”和光效，而不是举手。' },
+    explain:     { label: '讲解',   en: 'explain',      eye: 'open',   mouth: 'talk',  tilt: 3,  prop: 'bulb',   fx: 'none',   desc: '嘴巴按语速开合、身体前倾、旁边浮一只小灯泡。没有手，讲解就靠“说话 + 眼神 + 道具”。' },
+    think:       { label: '思考',   en: 'think',        eye: 'lookup', mouth: 'none',  tilt: 5,  prop: 'dots',   fx: 'none',   desc: '眼睛向上瞟、头微歪、旁边冒省略号。没有手也没有芽，靠眼神和歪头表示“在转”。' },
+    advantage:   { label: '优势',   en: 'advantage',    eye: 'star',   mouth: 'smirk', tilt: 0,  prop: 'none',   fx: 'sparkles', desc: '星星眼 + 小得意嘴 + 闪光。不用文字也能看出“这步不错”。' },
+    disadvantage:{ label: '劣势',   en: 'disadvantage', eye: 'worry',  mouth: 'wavy',  tilt: -4, prop: 'sweat',  fx: 'none',   desc: '眼睛缩小、身体后仰、一滴冷汗。所有元素都在“往下掉”。' },
+    angry:       { label: '生气',   en: 'angry',        eye: 'angry',  mouth: 'pout',  tilt: 0,  prop: 'steam',  fx: 'none',   desc: '眼睛压扁并向外倾、身体鼓胀抖动、头顶冒蒸汽。生气靠“抖动 + 蒸汽”就够，不需要变红。' },
+    sleep:       { label: '睡觉',   en: 'sleep',        eye: 'closed', mouth: 'none',  tilt: -6, prop: 'zzz',    fx: 'none',   desc: '闭眼、身体下沉、呼吸变慢、Zzz 飘起。' },
+    surprise:    { label: '惊讶',   en: 'surprise',     eye: 'wide',   mouth: 'o',     tilt: 0,  prop: 'bang',   fx: 'none',   desc: '眼睛放大、身体弹起、头顶一个感叹号。' },
+    listen:      { label: '聆听',   en: 'listening',    eye: 'wide',   mouth: 'none',  tilt: 0,  prop: 'ear',    fx: 'ripple', desc: '唤醒词命中后的状态：眼睛睁大、周围泛起一圈圈声波。和“听音乐”的区别是它没有耳机、更警觉。' },
+    pickup:      { label: '被拎起', en: 'picked up',    eye: 'wide',   mouth: 'o',     tilt: 0,  prop: 'none',   fx: 'none',   desc: '被鼠标抓住时：身体拉长、轻轻晃。不需要 193 帧逐帧动画，两个 transform 就够。' },
+  };
+  const ORDER = ['idle', 'music', 'happy', 'explain', 'think', 'advantage', 'disadvantage', 'angry', 'sleep', 'surprise', 'listen', 'pickup'];
+
+  function eyeShape(style, x, y) {
+    const ink = 'var(--ink)';
+    const g = (inner, cls) => `<g class="eye ${cls || ''}">${inner}</g>`;
+    const side = x < 90 ? 1 : -1;
+    switch (style) {
+      case 'open':
+        return g(`<ellipse cx="${x}" cy="${y}" rx="8.6" ry="12.4" fill="${ink}"/>`, 'blink');
+      case 'wide':
+        return g(`<ellipse cx="${x}" cy="${y}" rx="9.8" ry="14.6" fill="${ink}"/>`, 'blink');
+      case 'lookup':
+        return `<g class="eye"><ellipse cx="${x}" cy="${y - 3}" rx="8.2" ry="11" fill="${ink}"/>
+          <path d="M${x - 9} ${y - 8} A9 9 0 0 0 ${x + 9} ${y - 8}" fill="none" stroke="${ink}" stroke-width="3" stroke-linecap="round"/></g>`;
+      case 'happy':
+        return `<path d="M${x - 9} ${y + 3} Q${x} ${y - 10} ${x + 9} ${y + 3}" fill="none" stroke="${ink}" stroke-width="6.2" stroke-linecap="round"/>`;
+      case 'closed':
+        return `<path d="M${x - 9} ${y - 1} Q${x} ${y + 6} ${x + 9} ${y - 1}" fill="none" stroke="${ink}" stroke-width="5.8" stroke-linecap="round"/>`;
+      case 'angry':
+        return `<g class="eye" transform="rotate(${side * 16} ${x} ${y})">
+          <ellipse cx="${x}" cy="${y + 1}" rx="8.8" ry="9.4" fill="${ink}"/>
+        </g>
+        <path d="M${x - side * 4} ${y - 15} L${x + side * 12} ${y - 19}" fill="none" stroke="${ink}" stroke-width="3.4" stroke-linecap="round"/>`;
+      case 'worry':
+        return `<g class="eye"><ellipse cx="${x}" cy="${y + 1}" rx="7.2" ry="10.4" fill="${ink}"/></g>
+        <path d="M${x - side * 2} ${y - 16} L${x + side * 11} ${y - 12}" fill="none" stroke="${ink}" stroke-width="3.2" stroke-linecap="round"/>`;
+      case 'star': {
+        const s = x < 90 ? 0.92 : 0.92;
+        return `<g class="eye"><path transform="translate(${x} ${y}) scale(${s})" d="M0 -12 C2.2 -3.5 3.5 -2.2 12 0 C3.5 2.2 2.2 3.5 0 12 C-2.2 3.5 -3.5 2.2 -12 0 C-3.5 -2.2 -2.2 -3.5 0 -12 Z" fill="${ink}"/></g>`;
+      }
+      default: return '';
+    }
+  }
+
+  function mouthShape(kind) {
+    const ink = 'var(--ink)';
+    switch (kind) {
+      case 'grin':  return `<path d="M80 172 Q90 186 100 172 Z" fill="${ink}"/>`;
+      case 'talk':  return `<g class="mouth-talk"><ellipse cx="90" cy="176" rx="5.8" ry="4.2" fill="${ink}"/></g>`;
+      case 'smirk': return `<path d="M83 174 Q91 180 99 171" fill="none" stroke="${ink}" stroke-width="4.2" stroke-linecap="round"/>`;
+      case 'wavy':  return `<path d="M82 176 q4 -4 8 0 q4 4 8 0" fill="none" stroke="${ink}" stroke-width="3.4" stroke-linecap="round"/>`;
+      case 'pout':  return `<path d="M83 177 Q90 172 97 177" fill="none" stroke="${ink}" stroke-width="4.2" stroke-linecap="round"/>`;
+      case 'o':     return `<ellipse cx="90" cy="176" rx="4.6" ry="5.4" fill="${ink}"/>`;
+      default: return '';
+    }
+  }
+
+  function prop(kind) {
+    const ink = 'var(--ink)', cream = 'var(--cream)', gold = 'var(--gold)', sky = 'var(--sky)';
+    switch (kind) {
+      case 'music':
+        return `<g>
+          <path d="M46 136 Q90 88 134 136" fill="none" stroke="${ink}" stroke-width="6" stroke-linecap="round"/>
+          <rect x="34" y="140" width="15" height="23" rx="7.5" fill="${cream}" stroke="${ink}" stroke-width="3"/>
+          <rect x="131" y="140" width="15" height="23" rx="7.5" fill="${cream}" stroke="${ink}" stroke-width="3"/>
+        </g>
+        <g fill="${gold}" stroke="${ink}" stroke-width="2.4" stroke-linejoin="round">
+          <g class="note" style="animation-delay:0s" transform="translate(130 88)">
+            <ellipse cx="0" cy="12" rx="5.4" ry="4.2" transform="rotate(-18)"/>
+            <path d="M4 12 L4 -6" fill="none"/>
+          </g>
+          <g class="note" style="animation-delay:1.1s" transform="translate(150 108) scale(.8)">
+            <ellipse cx="0" cy="12" rx="5.4" ry="4.2" transform="rotate(-18)"/>
+            <path d="M4 12 L4 -6" fill="none"/>
+          </g>
+        </g>`;
+      case 'bulb':
+        return `<g transform="translate(138 82)">
+          <circle r="10" fill="${gold}" stroke="${ink}" stroke-width="3"/>
+          <rect x="-4" y="8" width="8" height="5.5" rx="2" fill="${ink}"/>
+          <g stroke="${ink}" stroke-width="2.4" stroke-linecap="round" opacity=".65">
+            <path d="M0 -17 L0 -13.5"/><path d="M-15 -4 L-11 -2"/><path d="M15 -4 L11 -2"/>
+          </g>
+        </g>`;
+      case 'dots':
+        return `<g fill="${cream}" stroke="${ink}" stroke-width="2.4">
+          <circle class="note" cx="128" cy="98" r="4" style="animation-delay:0s"/>
+          <circle class="note" cx="141" cy="87" r="3.3" style="animation-delay:.45s"/>
+          <circle class="note" cx="152" cy="74" r="2.6" style="animation-delay:.9s"/>
+        </g>`;
+      case 'sweat':
+        return `<g class="drop" transform="translate(126 116)">
+          <path d="M0 -11 C7 -3 8 3 4.5 7 C1 11 -5 9 -6 4.5 C-7 0 -4 -4 0 -11 Z" fill="${sky}" stroke="${ink}" stroke-width="2.6"/>
+        </g>`;
+      case 'steam':
+        return `<g fill="none" stroke-linecap="round" opacity=".9">
+          <g class="steam" style="animation-delay:0s">
+            <path stroke="var(--ink)" stroke-width="6.6" opacity=".55" d="M64 92 q-7 -8 0 -16 q7 -8 0 -15"/>
+            <path stroke="${cream}" stroke-width="3.4" d="M64 92 q-7 -8 0 -16 q7 -8 0 -15"/>
+          </g>
+          <g class="steam" style="animation-delay:.7s">
+            <path stroke="var(--ink)" stroke-width="6.6" opacity=".55" d="M118 92 q7 -8 0 -16 q-7 -8 0 -15"/>
+            <path stroke="${cream}" stroke-width="3.4" d="M118 92 q7 -8 0 -16 q-7 -8 0 -15"/>
+          </g>
+        </g>`;
+      case 'zzz':
+        return `<g fill="${cream}" stroke="${ink}" stroke-width="2.6" font-family="Segoe UI, sans-serif" font-weight="700" paint-order="stroke">
+          <text class="zzz" style="animation-delay:0s" x="118" y="104" font-size="18">Z</text>
+          <text class="zzz" style="animation-delay:1.1s" x="136" y="86" font-size="13">Z</text>
+          <text class="zzz" style="animation-delay:2.2s" x="148" y="72" font-size="9.5">Z</text>
+        </g>`;
+      case 'bang':
+        return `<g transform="translate(140 76)">
+          <path d="M-3 -16 h6 l-1.4 12 h-3.2 Z" fill="${gold}" stroke="${ink}" stroke-width="2.6" stroke-linejoin="round"/>
+          <circle cx="0" cy="9" r="3.4" fill="${gold}" stroke="${ink}" stroke-width="2.6"/>
+        </g>`;
+      case 'ear':
+        return `<g fill="none" stroke-linecap="round" opacity=".9">
+          <path stroke="var(--ink)" stroke-width="5.6" opacity=".3" d="M151 124 q8 10 0 21 M160 118 q12 16 0 32"/>
+          <path stroke="${gold}" stroke-width="3" d="M151 124 q8 10 0 21"/>
+          <path stroke="${gold}" stroke-width="3" d="M160 118 q12 16 0 32"/>
+        </g>`;
+      default: return '';
+    }
+  }
+
+  function fx(kind) {
+    const gold = 'var(--gold)', ink = 'var(--ink)';
+    switch (kind) {
+      case 'sparkles':
+        return `<g fill="${gold}" stroke="${ink}" stroke-width="2" stroke-linejoin="round">
+          <path class="spark" transform="translate(44 112)" d="M0 -9 C1.6 -2.6 2.6 -1.6 9 0 C2.6 1.6 1.6 2.6 0 9 C-1.6 2.6 -2.6 1.6 -9 0 C-2.6 -1.6 -1.6 -2.6 0 -9 Z"/>
+          <path class="spark" style="animation-delay:.7s" transform="translate(137 104) scale(.8)" d="M0 -9 C1.6 -2.6 2.6 -1.6 9 0 C2.6 1.6 1.6 2.6 0 9 C-1.6 2.6 -2.6 1.6 -9 0 C-2.6 -1.6 -1.6 -2.6 0 -9 Z"/>
+        </g>`;
+      case 'notes':
+        return `<g opacity=".9"><circle class="note" cx="150" cy="80" r="2.6" fill="${gold}" stroke="${ink}" stroke-width="1.6" style="animation-delay:.4s"/></g>`;
+      case 'ripple':
+        return `<g fill="none" opacity=".9">
+          <circle class="ripple" cx="90" cy="150" r="74" stroke="var(--ink)" stroke-width="4.4" opacity=".28" style="animation-delay:0s"/>
+          <circle class="ripple" cx="90" cy="150" r="74" stroke="${gold}" stroke-width="2.4" style="animation-delay:0s"/>
+        </g>`;
+      default: return '';
+    }
+  }
+
+  function render(id, key, size) {
+    const cfg = STATES[key];
+    const w = size === 'hero' ? 360 : 162;
+    const h = size === 'hero' ? 480 : 216;
+    return `<svg class="pet s-${key}" width="${w}" height="${h}" viewBox="0 0 180 240" role="img" aria-label="${cfg.label}">
+      <ellipse cx="90" cy="216" rx="34" ry="6" fill="#000" opacity=".14"/>
+      <g class="float">
+        ${fx(cfg.fx)}
+        <g transform="rotate(${cfg.tilt} 90 160)">
+          <g class="body">
+            <path d="M90 101 C119 101 143 123 145 155 C147 189 123 209 90 209 C57 209 33 189 35 155 C37 123 61 101 90 101 Z"
+                  fill="var(--body)"/>
+            <g class="gaze">
+              ${eyeShape(cfg.eye, 71, 152)}
+              ${eyeShape(cfg.eye, 109, 152)}
+            </g>
+            ${mouthShape(cfg.mouth)}
+          </g>
+        </g>
+        ${prop(cfg.prop)}
+      </g>
+    </svg>`;
+  }
+
+  // ---------- wire up ----------
+  const hero = document.getElementById('hero');
+  const heroName = document.getElementById('hero-name');
+  const heroDesc = document.getElementById('hero-desc');
+  const chips = document.getElementById('chips');
+  const grid = document.getElementById('grid');
+  let current = 'idle';
+
+  function paintHero() {
+    hero.innerHTML = render('hero', current, 'hero');
+    const s = STATES[current];
+    heroName.innerHTML = `${s.label} <em>${s.en.toUpperCase()}</em>`;
+    heroDesc.textContent = s.desc;
+    [...chips.children].forEach((b) => b.classList.toggle('is-on', b.dataset.k === current));
+  }
+
+  ORDER.forEach((key) => {
+    const s = STATES[key];
+    const b = document.createElement('button');
+    b.className = 'chip';
+    b.dataset.k = key;
+    b.textContent = s.label;
+    b.onclick = () => { current = key; paintHero(); };
+    chips.appendChild(b);
+
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = render('c-' + key, key, 'card') + `<div class="cap"><b>${s.label}</b><i>${s.en}</i></div>`;
+    grid.appendChild(card);
+  });
+
+  paintHero();
+
+  const swatches = document.getElementById('swatches');
+  PALETTE.forEach((p, i) => {
+    const sw = document.createElement('button');
+    sw.className = 'sw' + (i === 0 ? ' is-on' : '');
+    sw.style.background = p.body;
+    sw.title = p.name;
+    sw.onclick = () => {
+      document.documentElement.style.setProperty('--body', p.body);
+      document.documentElement.style.setProperty('--body-deep', p.deep);
+      [...swatches.querySelectorAll('.sw')].forEach((el) => el.classList.remove('is-on'));
+      sw.classList.add('is-on');
+    };
+    swatches.appendChild(sw);
+  });
+
+  document.getElementById('toggle').onclick = (e) => {
+    document.body.classList.toggle('is-light');
+    e.currentTarget.textContent = document.body.classList.contains('is-light') ? '切换深色桌面' : '切换浅色桌面';
+  };
+
+  // 眼神跟随：只在主样张上做；网格卡片保持静态
+  const heroStage = document.querySelector('.hero-stage');
+  if (heroStage) {
+    heroStage.addEventListener('pointermove', (e) => {
+      const r = heroStage.getBoundingClientRect();
+      let dx = (e.clientX - (r.left + r.width / 2)) / (r.width * 0.45);
+      let dy = (e.clientY - (r.top + r.height * 0.56)) / (r.height * 0.45);
+      const m = Math.hypot(dx, dy);
+      if (m > 1) { dx /= m; dy /= m; }
+      hero.style.setProperty('--gx', `${(dx * 7).toFixed(1)}px`);
+      hero.style.setProperty('--gy', `${(dy * 5).toFixed(1)}px`);
+    });
+    heroStage.addEventListener('pointerleave', () => {
+      hero.style.setProperty('--gx', '0px');
+      hero.style.setProperty('--gy', '0px');
+    });
+  }
+
+  if (/[?&]light=1/.test(location.search)) {
+    document.body.classList.add('is-light');
+    document.getElementById('toggle').textContent = '切换深色桌面';
+  }
+
+  if (/[?&]sheet=1/.test(location.search)) {
+    document.body.classList.add('is-sheet');
+  }
+
+  document.getElementById('note').innerHTML =
+    '<code>sheets/state-preview.html</code> 是可交互样张：点击状态切换大图，点击色点换配色，点右上角切换深浅桌面。' +
+    '所有图形都是内联 SVG；每个状态只改 <code>eye / mouth / prop / fx / tilt</code> 五个参数，主样张的眼睛还会跟随鼠标。';
+})();
+</script>
+</body>
+</html>

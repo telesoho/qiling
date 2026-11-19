@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { saveQiLingSettings } from '../lib/settings'
+import { defaultPetSettings, saveQiLingSettings } from '../lib/settings'
 import SettingsApp, {
   actionButtonLabel,
   actionCanRunFromSettings,
@@ -37,12 +37,8 @@ describe('器灵设定', () => {
 
   it('leaves voice unchecked when voice is off', () => {
     saveQiLingSettings({
+      ...defaultPetSettings,
       voice: false,
-      bubble: true,
-      voiceAssistant: false,
-      wakeWord: '器灵',
-      voiceEngine: 'auto',
-      edgeVoice: 'zh-CN-XiaoxiaoNeural',
     })
     const page = renderToStaticMarkup(<SettingsApp />)
     expect(beforeLabel(page, '语音')).not.toContain('checked')
@@ -85,9 +81,35 @@ describe('器灵设定', () => {
   it('shows the current character and the pack management entry', () => {
     const page = renderToStaticMarkup(<SettingsApp />)
     expect(page).toContain('宠物角色')
-    expect(page).toContain('当前角色：诗琚')
+    expect(page).toContain('当前角色：灵泡')
     expect(page).toContain('管理角色资源包…')
     expect(page).toContain('正在读取角色资源包…')
+  })
+
+  it('offers the music following switch with a local-only privacy note', () => {
+    const page = renderToStaticMarkup(<SettingsApp />)
+    expect(page).toContain('听音乐')
+    expect(page).toContain('听音乐时自动切换状态')
+    expect(page).toContain('不录音、不保存、不上传')
+    expect(page).toContain('只有灵泡支持这个效果')
+    expect(page).toContain('监听状态：仅应用内可用')
+    expect(page).toContain('打开曲库…')
+    expect(page).toContain('曲库支持本地音频文件与网络音频直链')
+  })
+
+  it('lets the user adjust every music detection threshold', () => {
+    const page = renderToStaticMarkup(<SettingsApp />)
+    expect(page).toContain('识别阈值（进阶）')
+    expect(page).toContain('id="music-enter-score"')
+    expect(page).toContain('id="music-exit-score"')
+    expect(page).toContain('id="music-enter-groove"')
+    expect(page).toContain('id="music-exit-groove"')
+    expect(page).toContain('id="music-enter-intense"')
+    expect(page).toContain('id="music-exit-intense"')
+    expect(page).toContain('恢复默认阈值')
+    // 默认值仍来自设计原型标定；不调整时行为和以前一致。
+    expect(page).toContain('value="0.32"')
+    expect(page).toContain('value="0.6"')
   })
 
   it('shows client pairing controls and the empty state', () => {
